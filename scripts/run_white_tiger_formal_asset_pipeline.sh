@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+export PROJECT_ROOT
+cd "$PROJECT_ROOT"
+
+# Formal clean route:
+#   Stage 1 learns editable fur grooming parameters.
+#   Stage 2 inherits Stage 1 fur roots/model and adds the real mesh surface.
+# Stage 1 may use random colored mesh backing only as an anti-transparency
+# training background for white fur. Stage 2 keeps it off and uses the real
+# surface texture.
+export RUN_STAMP="${RUN_STAMP:-white_tiger_formal_$(date +%Y%m%d%H%M%S)}"
+export PYTHON="${PYTHON:-python}"
+export SKIP_ORIENTATION_GENERATION="${SKIP_ORIENTATION_GENERATION:-0}"
+
+export STAGE1_ROOTS="${STAGE1_ROOTS:-200000}"
+export STAGE1_EXTRA_ROOTS="${STAGE1_EXTRA_ROOTS:-80000}"
+export STAGE1_EXTRA_ROOT_SOURCE="${STAGE1_EXTRA_ROOT_SOURCE:-head_detail}"
+export STAGE1_EXTRA_ROOT_BOOST="${STAGE1_EXTRA_ROOT_BOOST:-4.0}"
+export STAGE1_ITERS="${STAGE1_ITERS:-8000}"
+export STAGE1_SAVE_EVERY="${STAGE1_SAVE_EVERY:-1000}"
+export STAGE1_RANDOM_MESH_BACKING_WEIGHT="${STAGE1_RANDOM_MESH_BACKING_WEIGHT:-0.08}"
+
+export STAGE2_EXTRA_ROOTS="0"
+export STAGE2_SURFACE_ROOTS="${STAGE2_SURFACE_ROOTS:-120000}"
+export STAGE2_SURFACE_ALPHA_SCALE="${STAGE2_SURFACE_ALPHA_SCALE:-0.75}"
+export STAGE2_SURFACE_LR_SCALE="${STAGE2_SURFACE_LR_SCALE:-0.5}"
+export STAGE2_ITERS="${STAGE2_ITERS:-3000}"
+export STAGE2_SAVE_EVERY="${STAGE2_SAVE_EVERY:-500}"
+export STAGE2_RANDOM_MESH_BACKING_WEIGHT="0.0"
+export STAGE2_ROOT_SURFACE_MOVE_LR="${STAGE2_ROOT_SURFACE_MOVE_LR:-0.0}"
+
+echo "FORMAL_WHITE_TIGER_ASSET_PIPELINE=1"
+echo "RUN_STAMP=${RUN_STAMP}"
+echo "STAGE1_ROOTS=${STAGE1_ROOTS}"
+echo "STAGE1_EXTRA_ROOTS=${STAGE1_EXTRA_ROOTS}"
+echo "STAGE1_ITERS=${STAGE1_ITERS}"
+echo "STAGE2_SURFACE_ROOTS=${STAGE2_SURFACE_ROOTS}"
+echo "STAGE2_ITERS=${STAGE2_ITERS}"
+
+STAGE1_RUN_NAME="${STAGE1_RUN_NAME:-${RUN_STAMP}_stage1}"
+STAGE2_RUN_NAME="${STAGE2_RUN_NAME:-${RUN_STAMP}_stage2}"
+
+export RUN_NAME="$STAGE1_RUN_NAME"
+export ROOTS="$STAGE1_ROOTS"
+export EXTRA_ROOTS="$STAGE1_EXTRA_ROOTS"
+export EXTRA_ROOT_SOURCE="$STAGE1_EXTRA_ROOT_SOURCE"
+export EXTRA_ROOT_BOOST="$STAGE1_EXTRA_ROOT_BOOST"
+export ITERS="$STAGE1_ITERS"
+export SAVE_EVERY="$STAGE1_SAVE_EVERY"
+export RANDOM_MESH_BACKING_WEIGHT="$STAGE1_RANDOM_MESH_BACKING_WEIGHT"
+export SURFACE_ROOTS="120000"
+export SURFACE_ALPHA_SCALE="0.0"
+
+echo "STAGE1_RUN=${RUN_NAME}"
+bash "$PROJECT_ROOT/scripts/run_white_tiger_stage1_reconstruction.sh"
+
+STAGE1_CHECKPOINT="$PROJECT_ROOT/outputs/white_tiger_uv_groom/${STAGE1_RUN_NAME}/latest.pt"
+if [[ ! -f "$STAGE1_CHECKPOINT" ]]; then
+  echo "Missing Stage 1 checkpoint: $STAGE1_CHECKPOINT" >&2
+  exit 1
+fi
+
+export RUN_NAME="$STAGE2_RUN_NAME"
+export INIT_CHECKPOINT="$STAGE1_CHECKPOINT"
+export ROOTS="$STAGE1_ROOTS"
+export EXTRA_ROOTS="$STAGE2_EXTRA_ROOTS"
+export SURFACE_ROOTS="$STAGE2_SURFACE_ROOTS"
+export SURFACE_ALPHA_SCALE="$STAGE2_SURFACE_ALPHA_SCALE"
+export SURFACE_LR_SCALE="$STAGE2_SURFACE_LR_SCALE"
+export ITERS="$STAGE2_ITERS"
+export SAVE_EVERY="$STAGE2_SAVE_EVERY"
+export RANDOM_MESH_BACKING_WEIGHT="$STAGE2_RANDOM_MESH_BACKING_WEIGHT"
+export ROOT_SURFACE_MOVE_LR="$STAGE2_ROOT_SURFACE_MOVE_LR"
+
+echo "STAGE2_RUN=${RUN_NAME}"
+bash "$PROJECT_ROOT/scripts/run_white_tiger_stage2_surface_texture.sh" "$STAGE1_CHECKPOINT"
+
+echo "STAGE1_OUTPUT=$PROJECT_ROOT/outputs/white_tiger_uv_groom/${STAGE1_RUN_NAME}"
+echo "STAGE2_OUTPUT=$PROJECT_ROOT/outputs/white_tiger_uv_groom/${STAGE2_RUN_NAME}"
