@@ -182,6 +182,178 @@ def concat_root_data(base: dict[str, np.ndarray], extra: dict[str, np.ndarray]) 
     return out
 
 
+def build_face_adjacency(faces: np.ndarray) -> list[np.ndarray]:
+    vertex_to_faces: dict[int, list[int]] = {}
+    for face_id, tri in enumerate(faces):
+        for vertex_id in tri:
+            vertex_to_faces.setdefault(int(vertex_id), []).append(int(face_id))
+    neighbors: list[set[int]] = [set() for _ in range(int(faces.shape[0]))]
+    for face_list in vertex_to_faces.values():
+        if len(face_list) <= 1:
+            continue
+        for face_id in face_list:
+            neighbors[face_id].update(face_list)
+    out: list[np.ndarray] = []
+    for face_id, neigh in enumerate(neighbors):
+        neigh.discard(face_id)
+        out.append(np.asarray(sorted(neigh), dtype=np.int64))
+    return out
+
+
+def build_root_graph_edges(
+    face_ids: np.ndarray,
+    face_neighbors: list[np.ndarray],
+    edge_count: int,
+    seed: int,
+) -> np.ndarray:
+    root_count = int(face_ids.shape[0])
+    if root_count < 2 or edge_count <= 0:
+        return np.zeros((0, 2), dtype=np.int64)
+
+    face_to_roots: dict[int, list[int]] = {}
+    for root_id, face_id in enumerate(face_ids.astype(np.int64, copy=False)):
+        face_to_roots.setdefault(int(face_id), []).append(int(root_id))
+    face_to_roots_np = {
+        face_id: np.asarray(root_ids, dtype=np.int64)
+        for face_id, root_ids in face_to_roots.items()
+    }
+
+    rng = np.random.default_rng(seed)
+    source_ids = rng.integers(0, root_count, size=max(edge_count * 4, edge_count + 256), endpoint=False)
+    edges: list[tuple[int, int]] = []
+    for src in source_ids:
+        if len(edges) >= edge_count:
+            break
+        face_id = int(face_ids[int(src)])
+        pools = [face_to_roots_np.get(face_id)]
+        if 0 <= face_id < len(face_neighbors):
+            for neigh_face in face_neighbors[face_id]:
+                pools.append(face_to_roots_np.get(int(neigh_face)))
+        candidates = [pool for pool in pools if pool is not None and pool.size > 0]
+        if not candidates:
+            continue
+        cand = np.concatenate(candidates, axis=0)
+        if cand.size <= 1:
+            continue
+        dst = int(cand[int(rng.integers(0, cand.size))])
+        if dst == int(src):
+            if cand.size <= 2:
+                continue
+            dst = int(cand[int(rng.integers(0, cand.size))])
+            if dst == int(src):
+                continue
+        edges.append((int(src), dst))
+    if not edges:
+        return np.zeros((0, 2), dtype=np.int64)
+    return np.asarray(edges, dtype=np.int64)
+
+
+def mesh_graph_groom_smooth_loss(
+    params: dict[str, torch.Tensor],
+    edges: torch.Tensor | None,
+) -> tuple[torch.Tensor, dict[str, float | int]]:
+    if edges is None or edges.numel() == 0:
+        return params["length_logit"].new_tensor(0.0), {
+            "mesh_graph_smooth_edges": 0,
+            "mesh_graph_smooth_geom": 0.0,
+            "mesh_graph_smooth_flow": 0.0,
+            "mesh_graph_smooth_color": 0.0,
+        }
+    src = edges[:, 0].long()
+    dst = edges[:, 1].long()
+    geom = torch.cat(
+        [
+            0.35 * torch.sigmoid(params["coverage_logit"]),
+            0.75 * torch.sigmoid(params["density_logit"]),
+            1.25 * torch.sigmoid(params["length_logit"]),
+            1.00 * params["root_width_raw"],
+            1.00 * params["tip_width_raw"],
+            0.90 * params["lift"],
+            0.90 * params["sag"],
+            0.90 * params["bend"],
+            0.65 * torch.sigmoid(params["stiffness_logit"]),
+        ],
+        dim=-1,
+    )
+    geom_loss = F.smooth_l1_loss(geom[src], geom[dst], reduction="mean")
+
+    flow = torch.cat([params["flow_x"], params["flow_y"]], dim=-1)
+    flow = torch_normalize(flow)
+    flow_dot = (flow[src] * flow[dst]).sum(dim=-1).clamp(-1.0, 1.0)
+    flow_loss = (1.0 - flow_dot).mean()
+
+    color = torch.cat(
+        [
+            params["root_rgb"],
+            params["tip_rgb"],
+            0.25 * torch.tanh(params["darkness"]),
+        ],
+        dim=-1,
+    )
+    color_loss = F.smooth_l1_loss(color[src], color[dst], reduction="mean")
+    loss = geom_loss + 0.75 * flow_loss + 0.12 * color_loss
+    stats = {
+        "mesh_graph_smooth_edges": int(edges.shape[0]),
+        "mesh_graph_smooth_geom": float(geom_loss.detach().cpu()),
+        "mesh_graph_smooth_flow": float(flow_loss.detach().cpu()),
+        "mesh_graph_smooth_color": float(color_loss.detach().cpu()),
+    }
+    return loss, stats
+
+
+@torch.no_grad()
+def compute_dynamic_residual_face_weights(
+    residual_values: torch.Tensor,
+    residual_weight: torch.Tensor,
+    root_face_ids: torch.Tensor,
+    face_count: int,
+    boost: float,
+    gamma: float,
+    min_weight: float,
+) -> tuple[np.ndarray, dict[str, float | int]]:
+    device = residual_values.device
+    face_score = torch.zeros(face_count, 1, device=device, dtype=residual_values.dtype)
+    face_weight = torch.zeros_like(face_score)
+    valid = residual_weight[:, 0] > float(min_weight)
+    if not bool(valid.any()):
+        weights = np.ones(face_count, dtype=np.float32)
+        return weights, {
+            "root_densify_valid_roots": 0,
+            "root_densify_visible_face_fraction": 0.0,
+            "root_densify_residual_mean": 0.0,
+            "root_densify_residual_p95": 0.0,
+            "root_densify_weight_min": 1.0,
+            "root_densify_weight_mean": 1.0,
+            "root_densify_weight_max": 1.0,
+        }
+    face_ids = root_face_ids[valid].long()
+    conf = residual_weight[valid].clamp(0.0, 1.0)
+    score = residual_values[valid].clamp(0.0, 1.0) * conf
+    face_score.index_add_(0, face_ids, score)
+    face_weight.index_add_(0, face_ids, conf)
+    raw = face_score / torch.clamp(face_weight, min=1e-6)
+    raw = torch.where(face_weight > 1e-6, raw, torch.zeros_like(raw))
+    known = raw[:, 0] > 0.0
+    if int(known.sum().item()) > 16:
+        known_values = raw[known, 0]
+        lo = torch.quantile(known_values, 0.10)
+        hi = torch.quantile(known_values, 0.98)
+        norm = ((raw - lo) / torch.clamp(hi - lo, min=1e-6)).clamp(0.0, 1.0)
+    else:
+        norm = raw.clamp(0.0, 1.0)
+    weights_t = 1.0 + float(boost) * torch.pow(norm, float(gamma))
+    stats = {
+        "root_densify_valid_roots": int(valid.detach().sum().cpu()),
+        "root_densify_visible_face_fraction": float((face_weight[:, 0] > 1e-6).float().mean().cpu()),
+        "root_densify_residual_mean": float(norm.mean().cpu()),
+        "root_densify_residual_p95": float(torch.quantile(norm[:, 0], 0.95).cpu()),
+        "root_densify_weight_min": float(weights_t.min().cpu()),
+        "root_densify_weight_mean": float(weights_t.mean().cpu()),
+        "root_densify_weight_max": float(weights_t.max().cpu()),
+    }
+    return weights_t[:, 0].detach().cpu().numpy().astype(np.float32), stats
+
+
 def rebuild_root_data_from_checkpoint(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -3143,6 +3315,19 @@ def main() -> None:
     parser.add_argument("--root-surface-move-start-iter", type=int, default=0)
     parser.add_argument("--root-surface-move-reg-weight", type=float, default=0.0)
     parser.add_argument("--root-surface-move-logit-limit", type=float, default=10.0)
+    parser.add_argument("--root-densify-start-iter", type=int, default=0)
+    parser.add_argument("--root-densify-stop-iter", type=int, default=0)
+    parser.add_argument("--root-densify-interval", type=int, default=0)
+    parser.add_argument("--root-densify-count", type=int, default=0)
+    parser.add_argument("--root-densify-max-roots", type=int, default=0)
+    parser.add_argument("--root-densify-boost", type=float, default=4.0)
+    parser.add_argument("--root-densify-gamma", type=float, default=0.75)
+    parser.add_argument("--root-densify-static-mix", type=float, default=0.25)
+    parser.add_argument("--root-densify-min-weight", type=float, default=1e-4)
+    parser.add_argument("--mesh-graph-smooth-weight", type=float, default=0.0)
+    parser.add_argument("--mesh-graph-smooth-start-iter", type=int, default=0)
+    parser.add_argument("--mesh-graph-smooth-warmup-iters", type=int, default=0)
+    parser.add_argument("--mesh-graph-smooth-edges", type=int, default=60000)
     parser.add_argument("--splat-radius", type=float, default=0.90)
     parser.add_argument("--splat-mode", choices=["point", "oriented"], default="point")
     parser.add_argument("--tangent-radius-scale", type=float, default=1.8)
@@ -3229,6 +3414,10 @@ def main() -> None:
         raise ValueError("--random-mesh-backing-weight requires --surface-roots > 0")
     if args.root_surface_move_lr > 0.0 and args.uv_mode not in {"xatlas", "obj"}:
         raise ValueError("--root-surface-move-lr currently requires --uv-mode xatlas or obj")
+    if args.root_densify_interval > 0 and args.root_densify_count <= 0:
+        raise ValueError("--root-densify-interval requires --root-densify-count > 0")
+    if args.root_densify_count > 0 and args.root_densify_interval <= 0:
+        raise ValueError("--root-densify-count requires --root-densify-interval > 0")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -3239,6 +3428,7 @@ def main() -> None:
 
     mesh_path = project_root / args.mesh
     vertices, faces, obj_uv_vertices, obj_face_uvs = load_obj_mesh_with_uv(mesh_path)
+    face_neighbors = build_face_adjacency(faces)
     uv_vertices: np.ndarray | None = None
     face_uvs: np.ndarray | None = None
     if args.uv_mode == "obj":
@@ -3847,6 +4037,15 @@ def main() -> None:
             torch.exp(model.log_scale).clamp(0.25, 4.0),
             model.trans,
         )
+    initial_mesh_graph_edges_np = None
+    if args.mesh_graph_smooth_weight > 0.0 and args.mesh_graph_smooth_edges > 0:
+        initial_mesh_graph_edges_np = build_root_graph_edges(
+            np.asarray(root_data["face_ids"], dtype=np.int64),
+            face_neighbors,
+            int(args.mesh_graph_smooth_edges),
+            args.seed + 8117,
+        )
+    initial_mesh_graph_edge_count = int(initial_mesh_graph_edges_np.shape[0]) if initial_mesh_graph_edges_np is not None else 0
     with (out / "run_config.json").open("w", encoding="utf-8") as cfg:
         json.dump(
             {
@@ -3879,6 +4078,27 @@ def main() -> None:
                     "reg_weight": float(args.root_surface_move_reg_weight),
                     "logit_limit": float(args.root_surface_move_logit_limit),
                     "parameterization": "per-root barycentric softmax constrained to original mesh face",
+                },
+                "root_densification": {
+                    "enabled": bool(args.root_densify_interval > 0 and args.root_densify_count > 0),
+                    "start_iter": int(args.root_densify_start_iter),
+                    "stop_iter": int(args.root_densify_stop_iter),
+                    "interval": int(args.root_densify_interval),
+                    "count": int(args.root_densify_count),
+                    "max_roots": int(args.root_densify_max_roots),
+                    "boost": float(args.root_densify_boost),
+                    "gamma": float(args.root_densify_gamma),
+                    "static_mix": float(args.root_densify_static_mix),
+                    "min_weight": float(args.root_densify_min_weight),
+                    "source": "held-out render residual over current root projections, optionally mixed with static image/detail sampling weights",
+                },
+                "mesh_graph_smooth": {
+                    "weight": float(args.mesh_graph_smooth_weight),
+                    "start_iter": int(args.mesh_graph_smooth_start_iter),
+                    "warmup_iters": int(args.mesh_graph_smooth_warmup_iters),
+                    "target_edges": int(args.mesh_graph_smooth_edges),
+                    "actual_edges": int(initial_mesh_graph_edge_count),
+                    "graph": "root pairs on same or adjacent mesh faces",
                 },
                 "flow_orientation": {
                     "weight": float(args.flow_orient_weight),
@@ -4035,40 +4255,76 @@ def main() -> None:
     if initialization_stats:
         (out / "initialization_stats.json").write_text(json.dumps(initialization_stats, indent=2), encoding="utf-8")
         print(json.dumps({"initialization": initialization_stats}), flush=True)
-    param_groups = [{"params": [model.texture], "lr": args.lr, "name": "texture"}]
-    if model.triplanes is not None:
-        param_groups.append(
-            {"params": [model.triplanes], "lr": args.lr * float(args.triplane_lr_scale), "name": "triplanes"}
-        )
-    if model.coarse_texture is not None:
-        param_groups.append(
-            {"params": [model.coarse_texture], "lr": args.lr * float(args.coarse_lr_scale), "name": "coarse_texture"}
-        )
-    if model.head_texture is not None:
-        param_groups.append(
-            {"params": [model.head_texture], "lr": args.lr * float(args.head_lr_scale), "name": "head_texture"}
-        )
-    if model.surface_texture is not None:
-        param_groups.append(
-            {"params": [model.surface_texture], "lr": args.lr * float(args.surface_lr_scale), "name": "surface_texture"}
-        )
-    if root_bary_logits is not None:
-        param_groups.append({"params": [root_bary_logits], "lr": args.root_surface_move_lr, "name": "root_bary_logits"})
     if args.freeze_pose or args.pose_lr <= 0.0:
         model.log_scale.requires_grad_(False)
         model.trans.requires_grad_(False)
-    else:
-        param_groups.append({"params": [model.log_scale, model.trans], "lr": args.pose_lr})
-    opt = torch.optim.Adam(param_groups)
+
+    def build_optimizer() -> torch.optim.Optimizer:
+        param_groups = [{"params": [model.texture], "lr": args.lr, "name": "texture"}]
+        if model.triplanes is not None:
+            param_groups.append(
+                {"params": [model.triplanes], "lr": args.lr * float(args.triplane_lr_scale), "name": "triplanes"}
+            )
+        if model.coarse_texture is not None:
+            param_groups.append(
+                {
+                    "params": [model.coarse_texture],
+                    "lr": args.lr * float(args.coarse_lr_scale),
+                    "name": "coarse_texture",
+                }
+            )
+        if model.head_texture is not None:
+            param_groups.append(
+                {"params": [model.head_texture], "lr": args.lr * float(args.head_lr_scale), "name": "head_texture"}
+            )
+        if model.surface_texture is not None:
+            param_groups.append(
+                {
+                    "params": [model.surface_texture],
+                    "lr": args.lr * float(args.surface_lr_scale),
+                    "name": "surface_texture",
+                }
+            )
+        if root_bary_logits is not None:
+            param_groups.append({"params": [root_bary_logits], "lr": args.root_surface_move_lr, "name": "root_bary_logits"})
+        if not (args.freeze_pose or args.pose_lr <= 0.0):
+            param_groups.append({"params": [model.log_scale, model.trans], "lr": args.pose_lr, "name": "pose"})
+        return torch.optim.Adam(param_groups)
+
+    opt = build_optimizer()
     sample_idx = torch.linspace(0, args.curve_samples - 1, args.render_samples, device=device).long()
-    flow_orient_segment_ids = None
-    total_flow_segments = int(root_base_roots.shape[0]) * max(int(sample_idx.numel()) - 1, 0)
-    if args.flow_orient_weight > 0.0 and args.flow_orient_max_segments > 0 and total_flow_segments > args.flow_orient_max_segments:
-        rng = np.random.default_rng(args.seed + 1337)
+    def build_flow_orient_segment_ids(root_count: int, iteration: int = 0) -> torch.Tensor | None:
+        total_flow_segments = int(root_count) * max(int(sample_idx.numel()) - 1, 0)
+        if (
+            args.flow_orient_weight <= 0.0
+            or args.flow_orient_max_segments <= 0
+            or total_flow_segments <= args.flow_orient_max_segments
+        ):
+            return None
+        rng = np.random.default_rng(args.seed + 1337 + int(iteration))
         ids = np.sort(
             rng.choice(total_flow_segments, size=args.flow_orient_max_segments, replace=False)
         ).astype(np.int64)
-        flow_orient_segment_ids = torch.tensor(ids, device=device)
+        return torch.tensor(ids, device=device)
+
+    def build_mesh_graph_edges_tensor(iteration: int = 0) -> torch.Tensor | None:
+        if args.mesh_graph_smooth_weight <= 0.0 or args.mesh_graph_smooth_edges <= 0:
+            return None
+        if int(iteration) == 0 and initial_mesh_graph_edges_np is not None:
+            edges_np = initial_mesh_graph_edges_np
+        else:
+            edges_np = build_root_graph_edges(
+                np.asarray(root_data["face_ids"], dtype=np.int64),
+                face_neighbors,
+                int(args.mesh_graph_smooth_edges),
+                args.seed + 8117 + int(iteration),
+            )
+        if edges_np.shape[0] == 0:
+            return None
+        return torch.tensor(edges_np, device=device, dtype=torch.long)
+
+    flow_orient_segment_ids = build_flow_orient_segment_ids(int(root_base_roots.shape[0]))
+    mesh_graph_edges = build_mesh_graph_edges_tensor(0)
 
     def scheduled_flow_orient_weight(iteration: int) -> float:
         if args.flow_orient_weight <= 0.0:
@@ -4171,6 +4427,18 @@ def main() -> None:
         progress = (iteration - args.random_mesh_backing_start_iter + 1) / float(warmup)
         progress = min(1.0, max(0.0, progress))
         return float(args.random_mesh_backing_weight) * progress
+
+    def scheduled_mesh_graph_smooth_weight(iteration: int) -> float:
+        if args.mesh_graph_smooth_weight <= 0.0 or mesh_graph_edges is None:
+            return 0.0
+        if iteration < args.mesh_graph_smooth_start_iter:
+            return 0.0
+        warmup = max(0, int(args.mesh_graph_smooth_warmup_iters))
+        if warmup <= 0:
+            return float(args.mesh_graph_smooth_weight)
+        progress = (iteration - args.mesh_graph_smooth_start_iter + 1) / float(warmup)
+        progress = min(1.0, max(0.0, progress))
+        return float(args.mesh_graph_smooth_weight) * progress
 
     def zero_flow_grads_if_frozen(iteration: int) -> bool:
         freeze_after = int(args.freeze_flow_after_iter)
@@ -4402,6 +4670,14 @@ def main() -> None:
                 args.detail_tv_relax,
                 args.detail_tv_min_weight,
             )
+            mesh_graph_smooth = pred_img.new_tensor(0.0)
+            mesh_graph_smooth_stats: dict[str, float | int] = {}
+            mesh_graph_smooth_weight = scheduled_mesh_graph_smooth_weight(it)
+            if mesh_graph_smooth_weight > 0.0:
+                mesh_graph_smooth, mesh_graph_smooth_stats = mesh_graph_groom_smooth_loss(
+                    params,
+                    mesh_graph_edges,
+                )
             density_mean = torch.sigmoid(model.texture[:, 1:2]).mean()
             flow_hint_prior = pred_img.new_tensor(0.0)
             flow_hint_prior_stats: dict[str, float | int] = {}
@@ -4457,6 +4733,7 @@ def main() -> None:
                 + args.root_surface_move_reg_weight * root_surface_move_reg
                 + args.texture_tv_weight * tv
                 + args.asset_param_smooth_weight * asset_param_smooth
+                + mesh_graph_smooth_weight * mesh_graph_smooth
                 + 0.005 * density_mean
             )
             opt.zero_grad(set_to_none=True)
@@ -4505,6 +4782,8 @@ def main() -> None:
                     "texture_tv_weight": float(args.texture_tv_weight),
                     "asset_param_smooth": float(asset_param_smooth.detach().cpu()),
                     "asset_param_smooth_weight": float(args.asset_param_smooth_weight),
+                    "mesh_graph_smooth": float(mesh_graph_smooth.detach().cpu()),
+                    "mesh_graph_smooth_weight": float(mesh_graph_smooth_weight),
                     "density_mean": float(density_mean.detach().cpu()),
                     "scale": float(torch.exp(model.log_scale).detach().cpu()),
                     "trans": [float(x) for x in model.trans.detach().cpu()],
@@ -4513,6 +4792,7 @@ def main() -> None:
                 rec.update(flow_orient_stats)
                 rec.update(flow_hint_prior_stats)
                 rec.update(flow_coherence_stats)
+                rec.update(mesh_graph_smooth_stats)
                 rec.update(adaptive_stats)
                 rec.update(groom_geometry_stats)
                 log.write(json.dumps(rec) + "\n")
@@ -4907,6 +5187,140 @@ def main() -> None:
                         },
                         out / "latest.pt",
                     )
+                    densify_enabled = args.root_densify_interval > 0 and args.root_densify_count > 0
+                    densify_stop_ok = args.root_densify_stop_iter <= 0 or it <= args.root_densify_stop_iter
+                    densify_due = (
+                        densify_enabled
+                        and it >= args.root_densify_start_iter
+                        and densify_stop_ok
+                        and it % args.root_densify_interval == 0
+                    )
+                    if densify_due:
+                        current_root_count = int(root_data["roots"].shape[0])
+                        max_roots = int(args.root_densify_max_roots)
+                        if max_roots <= 0:
+                            max_roots = current_root_count + int(args.root_densify_count)
+                        add_count = min(int(args.root_densify_count), max(0, max_roots - current_root_count))
+                        if add_count > 0:
+                            residual_face_weights, densify_stats = compute_dynamic_residual_face_weights(
+                                residual_values,
+                                residual_weight,
+                                root_face_ids,
+                                int(faces.shape[0]),
+                                args.root_densify_boost,
+                                args.root_densify_gamma,
+                                args.root_densify_min_weight,
+                            )
+                            static_mix = max(0.0, min(float(args.root_densify_static_mix), 1.0))
+                            if face_sampling_weights is not None and static_mix > 0.0:
+                                static_weights = np.asarray(face_sampling_weights, dtype=np.float32)
+                                static_weights = static_weights / max(float(static_weights.mean()), EPS)
+                                static_weights = np.clip(static_weights, 0.25, 8.0)
+                                residual_face_weights = residual_face_weights * (
+                                    (1.0 - static_mix) + static_mix * static_weights
+                                )
+                            if root_bary_logits is not None:
+                                root_data["bary"] = torch.softmax(root_bary_logits, dim=-1).detach().cpu().numpy().astype(np.float32)
+                            else:
+                                root_data["bary"] = root_base_bary.detach().cpu().numpy().astype(np.float32)
+                            new_root_data = sample_full_body_roots(
+                                vertices,
+                                faces,
+                                add_count,
+                                args.seed + 50021 + int(it),
+                                args.uv_mode,
+                                uv_vertices,
+                                face_uvs,
+                                residual_face_weights,
+                                args.root_distribution,
+                            )
+                            root_data = concat_root_data(root_data, new_root_data)
+                            roots = torch.tensor(root_data["roots"], device=device)
+                            normals = torch.tensor(root_data["normals"], device=device)
+                            tangents = torch.tensor(root_data["tangents"], device=device)
+                            bitangents = torch.tensor(root_data["bitangents"], device=device)
+                            uv = torch.tensor(root_data["uv"], device=device)
+                            coord = torch.tensor(root_data["coord"], device=device)
+                            body_u = torch.tensor(root_data["body_u"], device=device)
+                            root_base_roots = roots
+                            root_base_uv = uv
+                            root_base_coord = coord
+                            root_base_body_u = body_u
+                            root_base_bary = torch.tensor(root_data["bary"], device=device)
+                            root_face_ids = torch.tensor(root_data["face_ids"], device=device, dtype=torch.long)
+                            root_tri = mesh_vertices_t[mesh_faces_t[root_face_ids]]
+                            if args.uv_mode in {"xatlas", "obj"}:
+                                if uv_vertices is None or face_uvs is None:
+                                    raise RuntimeError(f"uv_mode={args.uv_mode} requires UV triangles for root densification")
+                                root_uv_tri = uv_vertices_t[face_uvs_t[root_face_ids]]
+                            tri_np = vertices[faces[np.asarray(root_data["face_ids"], dtype=np.int64)]]
+                            edge_scale_np = (
+                                np.linalg.norm(tri_np[:, 1] - tri_np[:, 0], axis=1)
+                                + np.linalg.norm(tri_np[:, 2] - tri_np[:, 1], axis=1)
+                                + np.linalg.norm(tri_np[:, 0] - tri_np[:, 2], axis=1)
+                            ) / 3.0
+                            root_edge_scale = torch.tensor(np.maximum(edge_scale_np, EPS), device=device, dtype=torch.float32).view(-1, 1)
+                            optimizer_rebuilt = False
+                            if args.root_surface_move_lr > 0.0:
+                                root_bary_logits = torch.nn.Parameter(torch.log(root_base_bary.clamp_min(1e-5)))
+                                opt = build_optimizer()
+                                optimizer_rebuilt = True
+                            if (
+                                args.flow_init_source != "none"
+                                and flow_init_orientation is not None
+                                and flow_init_orientation_confidence is not None
+                            ):
+                                flow_hint, flow_hint_confidence, flow_init_stats = compute_root_flow_hints_from_orientation(
+                                    roots,
+                                    normals,
+                                    tangents,
+                                    bitangents,
+                                    flow_init_orientation,
+                                    flow_init_orientation_confidence,
+                                    masks,
+                                    pmats,
+                                    cam_centers,
+                                    torch.exp(model.log_scale).clamp(0.25, 4.0),
+                                    model.trans,
+                                    args.flow_init_min_confidence,
+                                    args.flow_init_scale,
+                                    args.flow_init_probe_length,
+                                )
+                            if (
+                                boundary_weights is not None
+                                and (
+                                    args.groom_boundary_length_boost > 0.0
+                                    or args.groom_boundary_density_floor > 0.0
+                                    or args.groom_boundary_lift_floor > 0.0
+                                )
+                            ):
+                                root_boundary_evidence, root_boundary_stats = compute_root_boundary_evidence(
+                                    roots,
+                                    normals,
+                                    boundary_weights,
+                                    masks,
+                                    pmats,
+                                    cam_centers,
+                                    torch.exp(model.log_scale).clamp(0.25, 4.0),
+                                    model.trans,
+                                )
+                            flow_orient_segment_ids = build_flow_orient_segment_ids(int(root_base_roots.shape[0]), it)
+                            mesh_graph_edges = build_mesh_graph_edges_tensor(it)
+                            densify_event = {
+                                "iter": int(it),
+                                "added_roots": int(add_count),
+                                "root_count_before": int(current_root_count),
+                                "root_count_after": int(root_data["roots"].shape[0]),
+                                "optimizer_rebuilt": bool(optimizer_rebuilt),
+                                "mesh_graph_edges": int(mesh_graph_edges.shape[0]) if mesh_graph_edges is not None else 0,
+                                "flow_orient_segment_ids": int(flow_orient_segment_ids.shape[0]) if flow_orient_segment_ids is not None else 0,
+                                **densify_stats,
+                            }
+                            with (out / "root_densify_log.jsonl").open("a", encoding="utf-8") as df:
+                                df.write(json.dumps(densify_event) + "\n")
+                            log.write(json.dumps({"root_densify": densify_event}) + "\n")
+                            log.flush()
+                            print(json.dumps({"root_densify": densify_event}), flush=True)
 
     print(out.resolve())
 

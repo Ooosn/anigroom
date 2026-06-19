@@ -127,6 +127,19 @@ export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
   --root-surface-move-start-iter "${ROOT_SURFACE_MOVE_START_ITER:-0}" \
   --root-surface-move-reg-weight "${ROOT_SURFACE_MOVE_REG_WEIGHT:-0.0}" \
   --root-surface-move-logit-limit "${ROOT_SURFACE_MOVE_LOGIT_LIMIT:-10.0}" \
+  --root-densify-start-iter "${ROOT_DENSIFY_START_ITER:-0}" \
+  --root-densify-stop-iter "${ROOT_DENSIFY_STOP_ITER:-0}" \
+  --root-densify-interval "${ROOT_DENSIFY_INTERVAL:-0}" \
+  --root-densify-count "${ROOT_DENSIFY_COUNT:-0}" \
+  --root-densify-max-roots "${ROOT_DENSIFY_MAX_ROOTS:-0}" \
+  --root-densify-boost "${ROOT_DENSIFY_BOOST:-4.0}" \
+  --root-densify-gamma "${ROOT_DENSIFY_GAMMA:-0.75}" \
+  --root-densify-static-mix "${ROOT_DENSIFY_STATIC_MIX:-0.25}" \
+  --root-densify-min-weight "${ROOT_DENSIFY_MIN_WEIGHT:-0.0001}" \
+  --mesh-graph-smooth-weight "${MESH_GRAPH_SMOOTH_WEIGHT:-0.0}" \
+  --mesh-graph-smooth-start-iter "${MESH_GRAPH_SMOOTH_START_ITER:-0}" \
+  --mesh-graph-smooth-warmup-iters "${MESH_GRAPH_SMOOTH_WARMUP_ITERS:-0}" \
+  --mesh-graph-smooth-edges "${MESH_GRAPH_SMOOTH_EDGES:-60000}" \
   --splat-radius "${SPLAT_RADIUS:-0.35}" \
   --splat-mode "${SPLAT_MODE:-point}" \
   --tangent-radius-scale "${TANGENT_RADIUS_SCALE:-1.8}" \
