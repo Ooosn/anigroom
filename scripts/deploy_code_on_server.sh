@@ -15,6 +15,11 @@ if [[ ! -f "$PACKAGE" ]]; then
 fi
 
 mkdir -p "$PROJECT_ROOT"
+for path in README.md .gitignore .gitattributes anigroom docs scripts tools; do
+  if [[ -e "$PROJECT_ROOT/$path" ]]; then
+    rm -rf "$PROJECT_ROOT/$path"
+  fi
+done
 tar -xzf "$PACKAGE" -C "$PROJECT_ROOT"
 cd "$PROJECT_ROOT"
 

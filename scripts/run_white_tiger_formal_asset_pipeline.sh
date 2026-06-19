@@ -6,12 +6,9 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 export PROJECT_ROOT
 cd "$PROJECT_ROOT"
 
-# Formal clean route:
-#   Stage 1 learns editable fur grooming parameters.
-#   Stage 2 inherits Stage 1 fur roots/model and adds the real mesh surface.
-# Stage 1 may use random colored mesh backing only as an anti-transparency
-# training background for white fur. Stage 2 keeps it off and uses the real
-# surface texture.
+# Formal two-stage prototype kept for later experiments.
+# Current active work is Stage 1 only. Stage 1 may use random colored mesh
+# backing only as an anti-transparency training background for white fur.
 export RUN_STAMP="${RUN_STAMP:-white_tiger_formal_$(date +%Y%m%d%H%M%S)}"
 export PYTHON="${PYTHON:-python}"
 export SKIP_ORIENTATION_GENERATION="${SKIP_ORIENTATION_GENERATION:-0}"
