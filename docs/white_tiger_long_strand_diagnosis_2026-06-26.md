@@ -425,3 +425,110 @@ Updated repair direction:
    by limiting early width/opacity growth or routing high-capacity/high-residual
    roots into densification evidence rather than letting them keep increasing
    opacity/width.
+
+## 2026-06-26 Targeted Overpaint Capacity Probe
+
+The next diagnostic tested whether the remaining artifact can be fixed by
+penalizing high-capacity roots only where residual evidence remains high.
+
+A default-off diagnostic loss was added:
+
+```text
+--overpaint-capacity-weight
+--overpaint-residual-threshold
+--overpaint-length-target
+--overpaint-width-target
+--overpaint-opacity-target
+```
+
+The default training path is unchanged. If the loss is enabled without residual
+evidence, training raises instead of silently falling back.
+
+Same 120-iteration single-view probe, with local child color and opacity support
+enabled:
+
+```text
+local child color + opacity:
+  composite PSNR: 26.758
+  raw PSNR:       26.514
+  mask L1:        0.0310
+  p95 length:     0.083129
+  p95 width:      0.00032149
+  p95 opacity:    0.886510
+
+overpaint 0.10, residual threshold 0.08:
+  composite PSNR: 26.725
+  raw PSNR:       26.484
+  mask L1:        0.0333
+  p95 length:     0.082038
+  p95 width:      0.00031843
+  p95 opacity:    0.885089
+
+overpaint 0.20, residual threshold 0.02:
+  composite PSNR: 26.712
+  raw PSNR:       26.466
+  mask L1:        0.0338
+  p95 length:     0.082001
+  p95 width:      0.00031742
+  p95 opacity:    0.884985
+```
+
+Stroke-drag evidence at the final lifecycle event:
+
+```text
+baseline:
+  residual drag candidates: 81
+  residual share in drag candidates: 0.035807
+  width/opacity correlation with contribution per sample: 0.787 / 0.741
+
+local child color + opacity:
+  residual drag candidates: 75
+  residual share in drag candidates: 0.025356
+  width/opacity correlation with contribution per sample: 0.802 / 0.773
+
+overpaint 0.10:
+  residual drag candidates: 3
+  residual share in drag candidates: 0.000184
+  width/opacity correlation with contribution per sample: 0.785 / 0.758
+
+overpaint 0.20:
+  residual drag candidates: 0
+  residual share in drag candidates: 0.0
+  width/opacity correlation with contribution per sample: 0.780 / 0.756
+```
+
+Comparison crop:
+
+```text
+D:\petsgaussianhair\_downloads\white_tiger_overpaint_diagnosis_crop_120iter.png
+```
+
+Conclusion:
+
+- The residual-conditioned overpaint loss is a useful diagnostic, but not a
+  complete repair.
+- It successfully removes the specific combination "high residual + high
+  capacity + high contribution". However, the visible artifact remains because
+  high-capacity roots become high-contribution, low-residual painters after they
+  already fill the image. At that point a residual-conditioned penalty is too
+  late and too local.
+- Therefore the true remaining issue is a training-order / capacity competition:
+  width and opacity can explain holes before densification adds enough local
+  roots. Once they do, the image residual drops and a residual-only overpaint
+  penalty no longer sees the artifact.
+- The next repair should not be another residual-weight tweak. It should give
+  densification the first chance to explain missing local coverage, either by
+  staging width/opacity growth during early densification or by routing alpha
+  under-coverage directly into root insertion before width/opacity become the
+  easiest solution.
+
+Next valid repair candidates:
+
+1. Early capacity staging: temporarily cap or strongly regularize width/opacity
+   while densification is active, then loosen after root coverage stabilizes.
+2. Under-coverage-first densification: use `relu(mask - alpha)` as primary
+   insertion evidence, so missing coverage creates new roots instead of asking
+   existing roots to become wider or more opaque.
+3. Image-footprint regularization: penalize high-opacity, high-footprint roots
+   even when residual is already low, but only during the early coverage-building
+   stage to avoid suppressing valid final fur.

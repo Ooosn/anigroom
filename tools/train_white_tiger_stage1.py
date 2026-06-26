@@ -518,6 +518,35 @@ def groom_shape_prior(field: GroomParameterField) -> torch.Tensor:
     )
 
 
+def overpaint_capacity_loss(
+    field: GroomParameterField,
+    residual_per_root: torch.Tensor | None,
+    *,
+    residual_threshold: float,
+    length_target: float,
+    width_target: float,
+    opacity_target: float,
+) -> torch.Tensor:
+    """Penalize stroke-like capacity only where residual evidence remains high."""
+
+    first_param = next(field.parameters())
+    if residual_per_root is None:
+        return first_param.new_tensor(0.0)
+    residual = residual_per_root.detach().reshape(-1)
+    if residual.numel() != int(field.root_count):
+        raise RuntimeError(f"overpaint residual/root mismatch: {residual.numel()} != {int(field.root_count)}")
+    weights = torch.relu(residual - float(residual_threshold))
+    if not bool((weights > 0.0).any()):
+        return first_param.new_tensor(0.0)
+    weights = weights / weights.mean().clamp_min(1.0e-6)
+    groom = field.decode()
+    length_excess = torch.relu((groom.length.reshape(-1) - float(length_target)) / 0.025)
+    width_excess = torch.relu(torch.log(groom.root_width.reshape(-1).clamp_min(1.0e-7) / float(width_target)))
+    opacity_excess = torch.relu((groom.opacity.reshape(-1) - float(opacity_target)) / max(1.0 - float(opacity_target), 1.0e-6))
+    penalty = 0.5 * length_excess.square() + width_excess.square() + 0.8 * opacity_excess.square()
+    return (weights * penalty).sum() / weights.sum().clamp_min(1.0)
+
+
 def strand_shape_consistency_loss(
     strands: torch.Tensor,
     edges: torch.Tensor,
@@ -804,6 +833,11 @@ class Stage1Config:
     smooth_weight: float = 0.04
     strand_shape_smooth_weight: float = 0.0
     shape_prior_weight: float = 0.0
+    overpaint_capacity_weight: float = 0.0
+    overpaint_residual_threshold: float = 0.08
+    overpaint_length_target: float = 0.075
+    overpaint_width_target: float = 0.00024
+    overpaint_opacity_target: float = 0.82
     root_move_reg_weight: float = 0.003
     orientation_min_confidence: float = 0.08
     compute_lpips: bool = False
@@ -2050,6 +2084,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         config,
                     )
                 residual_per_root = residual_per_root * float(config.densify_residual_weight)
+            if float(config.overpaint_capacity_weight) > 0.0 and residual_per_root is None:
+                raise RuntimeError("overpaint capacity loss requires residual evidence; set --densify-residual-weight > 0")
             pred_orientation, pred_orientation_conf = render_orientation_map(
                 gaussians,
                 viewmats[idx],
@@ -2071,6 +2107,14 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 model.root_observation_confidence,
             )
             shape_prior_loss = groom_shape_prior(model.groom)
+            overpaint_loss = overpaint_capacity_loss(
+                model.groom,
+                residual_per_root,
+                residual_threshold=config.overpaint_residual_threshold,
+                length_target=config.overpaint_length_target,
+                width_target=config.overpaint_width_target,
+                opacity_target=config.overpaint_opacity_target,
+            )
             _, _, roots_local = model.roots_and_normals()
             root_move_loss = torch.mean((roots_local - model.anchor_local).square())
             loss = (
@@ -2081,6 +2125,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.smooth_weight * smooth_loss
                 + config.strand_shape_smooth_weight * strand_shape_loss
                 + config.shape_prior_weight * shape_prior_loss
+                + config.overpaint_capacity_weight * overpaint_loss
                 + config.root_move_reg_weight * root_move_loss
             )
 
@@ -2259,6 +2304,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "smooth_loss": float(smooth_loss.detach().cpu()),
                     "strand_shape_smooth_loss": float(strand_shape_loss.detach().cpu()),
                     "shape_prior_loss": float(shape_prior_loss.detach().cpu()),
+                    "overpaint_capacity_loss": float(overpaint_loss.detach().cpu()),
                     "root_move_loss": float(root_move_loss.detach().cpu()),
                     "train": train_eval,
                     "test": test_eval,
@@ -2442,6 +2488,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smooth-weight", type=float, default=0.04)
     parser.add_argument("--strand-shape-smooth-weight", type=float, default=0.0)
     parser.add_argument("--shape-prior-weight", type=float, default=0.015)
+    parser.add_argument("--overpaint-capacity-weight", type=float, default=0.0)
+    parser.add_argument("--overpaint-residual-threshold", type=float, default=0.08)
+    parser.add_argument("--overpaint-length-target", type=float, default=0.075)
+    parser.add_argument("--overpaint-width-target", type=float, default=0.00024)
+    parser.add_argument("--overpaint-opacity-target", type=float, default=0.82)
     parser.add_argument("--root-move-reg-weight", type=float, default=0.003)
     parser.add_argument("--orientation-min-confidence", type=float, default=0.08)
     parser.add_argument("--compute-lpips", action="store_true")
@@ -2534,6 +2585,11 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         smooth_weight=args.smooth_weight,
         strand_shape_smooth_weight=args.strand_shape_smooth_weight,
         shape_prior_weight=args.shape_prior_weight,
+        overpaint_capacity_weight=args.overpaint_capacity_weight,
+        overpaint_residual_threshold=args.overpaint_residual_threshold,
+        overpaint_length_target=args.overpaint_length_target,
+        overpaint_width_target=args.overpaint_width_target,
+        overpaint_opacity_target=args.overpaint_opacity_target,
         root_move_reg_weight=args.root_move_reg_weight,
         orientation_min_confidence=args.orientation_min_confidence,
         compute_lpips=args.compute_lpips,
