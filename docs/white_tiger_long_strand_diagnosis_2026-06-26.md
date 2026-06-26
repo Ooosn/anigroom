@@ -56,6 +56,23 @@ global need p95: 0.000864
 
 So the current densification rule primarily subdivides already-visible, high-contribution roots. It is not explicitly driven by local image residual or uncovered holes.
 
+An experimental residual-evidence switch was added on branch `codex/diagnose-white-tiger-long-strands` and kept default-off (`--densify-residual-weight 0.0`) so the baseline is unchanged.
+It projects each root into the current view, samples the RGB/mask residual only if the root is mesh-depth visible, and records this value in the lifecycle diagnostics.
+
+Short probe, same 12-iteration view09 setup:
+
+```text
+residual OFF:
+  global need/residual/contribution/visible: 0.000257 / 0.000000 / 207.23 / 391.94
+  selected need/residual/contribution/visible: 0.001506 / 0.000000 / 368.62 / 695.38
+
+root-projected residual ON:
+  global need/residual/contribution/visible: 0.184554 / 0.184298 / 207.24 / 391.94
+  selected need/residual/contribution/visible: 0.890048 / 0.889423 / 380.10 / 713.93
+```
+
+This confirms the baseline is not changed when the switch is off. It also shows that naive root-projected residual is not enough: it raises residual evidence, but the selected parents are still the highest-visible/highest-contribution roots. In other words, point-sampling residual at the root projection still follows the already-rendered streaks and strong texture edges instead of reliably identifying under-covered holes.
+
 ## Current Root Cause Hypothesis
 
 The current failure is a competition between long-strand fitting and densification:
@@ -68,14 +85,17 @@ The current failure is a competition between long-strand fitting and densificati
 
 This is not just an orientation-map issue. Orientation noise can worsen it, but the logs show capacity allocation and lifecycle behavior are also involved.
 
+The first attempted residual attribution also shows the repair has to be coverage-aware. A simple root-pixel residual is still biased toward high-visibility strands, so it does not break the long-strand feedback loop by itself.
+
 ## Fix Directions To Validate
 
 The next changes should be tested one at a time on a diagnostic branch.
 
-1. Add local residual/evidence to densification.
+1. Replace naive root-pixel residual with coverage-aware local residual.
    - Current densification is based on root/gaussian gradients and visibility/contribution.
-   - It does not directly know which image regions remain poorly explained.
-   - We need either a per-root residual attribution or a reliable proxy from rendered error and root contribution.
+   - Root-pixel residual is measurable, but it still selects high-visibility roots.
+   - The next version should use image-space hole/detail evidence, e.g. positive alpha deficit `relu(mask - alpha)` plus local RGB residual, pooled over a small image radius before sampling nearby visible roots.
+   - The evidence should favor roots near under-covered regions, not roots already painting strongly.
 
 2. Delay or soften true pruning.
    - Parent replacement during split is expected.
@@ -91,9 +111,9 @@ The next changes should be tested one at a time on a diagnostic branch.
    - Not all long hair is wrong.
    - The target is long, opaque, high-color-contrast strands that cross local texture/detail boundaries.
    - A simple first version can strengthen length/width/opacity priors during early densification.
+   - A better version should look at image-space footprint: long/wide roots with high residual and high contribution are suspicious because they are likely dragging color rather than adding local coverage.
 
 5. Reconsider multi-level roots only after the single-level diagnosis is verified.
    - Multi-level roots are not rejected.
    - They require separate guide/render root lifecycle logic and multi-level densification.
    - They should be introduced only if evidence shows the current coupling between guide attributes and render coverage cannot be fixed cleanly.
-

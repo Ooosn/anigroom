@@ -78,6 +78,7 @@ class RootStatsWindow:
         gaussians,
         infos: list[dict],
         residual_loss: torch.Tensor | None = None,
+        residual_per_root: torch.Tensor | None = None,
     ) -> None:
         """Accumulate one backward pass.
 
@@ -115,12 +116,20 @@ class RootStatsWindow:
         if opacities.shape[0] != gaussian_count:
             raise RuntimeError("gaussian opacities shape does not match root_indices")
 
+        root_visible_count = torch.zeros((self.root_count, 1), device=self.device)
+        root_visible_count.scatter_add_(0, root_ids[:, None], visible_g)
+
         self.root_grad_abs_sum += root_points.grad.detach().abs().sum(dim=-1, keepdim=True)
         self.gaussian_grad_abs_sum.scatter_add_(0, root_ids[:, None], gaussian_grad.to(device=self.device))
         self.gaussian_contrib_sum.scatter_add_(0, root_ids[:, None], visible_g * opacities.clamp_min(EPS))
-        self.visible_count.scatter_add_(0, root_ids[:, None], visible_g)
+        self.visible_count += root_visible_count
         self.opacity_sum.scatter_add_(0, root_ids[:, None], opacities)
         self.opacity_count.scatter_add_(0, root_ids[:, None], torch.ones_like(opacities))
+        if residual_per_root is not None:
+            residual = residual_per_root.detach().to(device=self.device, dtype=self.residual_sum.dtype).reshape(-1, 1)
+            if residual.shape != (self.root_count, 1):
+                raise RuntimeError(f"residual_per_root must have shape [{self.root_count}, 1], got {tuple(residual.shape)}")
+            self.residual_sum += residual * root_visible_count.clamp_min(1.0)
         if residual_loss is not None:
             self.residual_sum += float(residual_loss.detach().cpu())
         self.iterations += 1

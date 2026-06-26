@@ -608,6 +608,7 @@ def lifecycle_subset_report(
     visible = stats.visible_count.reshape(-1).to(device=ids.device)
     return {
         "need": summarize_values(scores["need"][ids]),
+        "residual": summarize_values(scores["residual"][ids]),
         "gaussian_grad": summarize_values(scores["gaussian_grad"][ids]),
         "root_grad": summarize_values(scores["root_grad"][ids]),
         "contribution": summarize_values(contribution[ids]),
@@ -625,6 +626,7 @@ def lifecycle_global_report(model: WhiteTigerStage1Model, stats, scores: dict[st
     groom = model.groom.decode()
     return {
         "need": summarize_values(scores["need"]),
+        "residual": summarize_values(scores["residual"]),
         "contribution": summarize_values(stats.gaussian_contrib_sum.reshape(-1)),
         "visible": summarize_values(stats.visible_count.reshape(-1)),
         "length": summarize_values(groom.length),
@@ -697,6 +699,7 @@ class Stage1Config:
     densify_until: int = 12000
     densify_score_threshold: float = 2.5e-5
     densify_min_contribution: float = 0.45
+    densify_residual_weight: float = 0.0
     max_splits_per_event: int = 256
     split_children_per_parent: int = 2
     split_neighbor_count: int = 12
@@ -1070,6 +1073,38 @@ def composite_target(target: torch.Tensor, mask: torch.Tensor, backing: torch.Te
     if backing.ndim == 1:
         backing = backing.view(1, 1, 3)
     return target * mask + backing * (1.0 - mask)
+
+
+@torch.no_grad()
+def root_projected_residual(
+    model: WhiteTigerStage1Model,
+    roots_local: torch.Tensor,
+    residual_image: torch.Tensor,
+    viewmat: torch.Tensor,
+    k: torch.Tensor,
+    mesh_depth: MeshDepthResult,
+    config: Stage1Config,
+) -> torch.Tensor:
+    scale = torch.exp(model.log_scale.detach()).view(1, 1)
+    roots = roots_local.detach() * scale + model.translation.detach().view(1, 3)
+    xy, depth = project_points(roots, viewmat, k)
+    height, width = int(residual_image.shape[0]), int(residual_image.shape[1])
+    in_frame = (
+        (depth > 1.0e-6)
+        & (xy[:, 0] >= 0.0)
+        & (xy[:, 0] <= width - 1)
+        & (xy[:, 1] >= 0.0)
+        & (xy[:, 1] <= height - 1)
+    )
+    sampled_mesh_depth = sample_depth_nearest(
+        mesh_depth.depth,
+        xy,
+        kernel_size=int(config.mesh_depth_local_kernel),
+    )
+    tolerance = float(config.mesh_depth_abs_tolerance) + depth.abs() * float(config.mesh_depth_rel_tolerance)
+    visible = in_frame & torch.isfinite(sampled_mesh_depth) & (depth <= sampled_mesh_depth + tolerance)
+    sampled = bilinear_sample(residual_image, xy).reshape(-1, 1)
+    return sampled * visible.float().reshape(-1, 1)
 
 
 def render_model_mesh_depth(
@@ -1481,6 +1516,19 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             ).sum() / torch.clamp(rgb_weight.sum() * 3.0, min=1.0)
             rgb_loss = fixed_rgb_loss + float(config.random_backing_loss_weight) * random_backing_loss
             mask_loss = torch.mean(torch.abs(alpha - mask))
+            residual_per_root = None
+            if float(config.densify_residual_weight) > 0.0:
+                residual_image = torch.abs(pred_fixed.detach() - target_fixed.detach()).mean(dim=-1, keepdim=True)
+                residual_image = residual_image + 0.35 * torch.abs(alpha.detach() - mask.detach())
+                residual_per_root = root_projected_residual(
+                    model,
+                    roots_local_for_grad,
+                    residual_image,
+                    viewmats[idx],
+                    ks[idx],
+                    mesh_depth,
+                    config,
+                ) * float(config.densify_residual_weight)
             pred_orientation, pred_orientation_conf = render_orientation_map(
                 gaussians,
                 viewmats[idx],
@@ -1517,7 +1565,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            root_accum.add(root_points=roots_local_for_grad, gaussians=gaussians, infos=[render_info])
+            root_accum.add(root_points=roots_local_for_grad, gaussians=gaussians, infos=[render_info], residual_per_root=residual_per_root)
             optimizer.step()
 
             should_densify = (
@@ -1823,6 +1871,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--densify-until", type=int, required=True)
     parser.add_argument("--densify-score-threshold", type=float, required=True)
     parser.add_argument("--densify-min-contribution", type=float, required=True)
+    parser.add_argument("--densify-residual-weight", type=float, default=0.0)
     parser.add_argument("--max-splits-per-event", type=int, required=True)
     parser.add_argument("--split-children-per-parent", type=int, required=True)
     parser.add_argument("--split-neighbor-count", type=int, required=True)
@@ -1898,6 +1947,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         densify_until=args.densify_until,
         densify_score_threshold=args.densify_score_threshold,
         densify_min_contribution=args.densify_min_contribution,
+        densify_residual_weight=args.densify_residual_weight,
         max_splits_per_event=args.max_splits_per_event,
         split_children_per_parent=args.split_children_per_parent,
         split_neighbor_count=args.split_neighbor_count,
