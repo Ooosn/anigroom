@@ -376,6 +376,7 @@ def strand_segment_budgets(
     lengths: torch.Tensor,
     min_segments: int,
     max_segments: int,
+    length_bounds: tuple[float, float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float | int]]:
     """Choose a continuous segment budget from strand length and curvature.
 
@@ -405,7 +406,7 @@ def strand_segment_budgets(
     else:
         complexity = arc_excess
 
-    length_bounds = GroomRanges().length
+    length_bounds = GroomRanges().length if length_bounds is None else length_bounds
     length_abs = ((lengths.detach() - length_bounds[0]) / max(length_bounds[1] - length_bounds[0], EPS)).clamp(0.0, 1.0)
     complexity_abs = (complexity.detach() / 0.35).clamp(0.0, 1.0)
     score = (0.68 * length_abs + 0.32 * complexity_abs).clamp(0.0, 1.0)

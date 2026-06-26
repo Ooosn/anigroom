@@ -737,7 +737,13 @@ class WhiteTigerStage1Model(torch.nn.Module):
             child_count=child_count,
         )
         child_lengths = groom.length[root_ids]
-        counts, count_stats = strand_segment_budgets(strands.detach(), child_lengths.detach(), min_segments, max_segments)
+        counts, count_stats = strand_segment_budgets(
+            strands.detach(),
+            child_lengths.detach(),
+            min_segments,
+            max_segments,
+            length_bounds=self.groom.ranges.length,
+        )
         resampled = resample_strands_to_segment_budgets(strands, widths, colors, opacities, counts)
         gaussians = strands_to_gaussians(
             resampled.strands,
