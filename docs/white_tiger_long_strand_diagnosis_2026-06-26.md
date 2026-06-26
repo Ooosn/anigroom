@@ -119,6 +119,50 @@ pixel-to-root residual, target placement ON, weight=2.0:
 
 This proves the placement half of the repair is real: children are being moved much closer to the residual surface targets, and the short run improves slightly. It also proves the repair is incomplete: parent selection remains high-visible/high-contribution because the same selected roots are still chosen before placement. The next step is not more scalar weighting; it is to change the candidate generation/selection so holes can nominate nearby surface roots/faces directly, instead of always starting from roots that already render strongly.
 
+A target-parent selection probe was then tested. It keeps the target-placement path, but ranks parents by accumulated target weight instead of the original score. This still did not break the bias:
+
+```text
+target parent selection, 32 iterations:
+  final composite PSNR: 17.660
+  final mask L1: 0.1046
+  selected/global contribution ratios: 1.846, 1.837, 1.834
+  selected/global visible ratios:      1.835, 1.816, 1.803
+```
+
+So assigning residual pixels back onto existing roots is still the wrong abstraction: the residual targets are absorbed by nearby high-visibility roots before the structure update can add genuinely new coverage.
+
+A default-off direct target insertion diagnostic was added next. It does not replace any selected parent root. Instead, high residual pixels are unprojected through mesh depth directly onto visible mesh faces, and those surface points become new roots. The nearest old root is used only for attribute inheritance. This path is enabled only with `--densify-parent-selection target_direct`; the default remains the original score mode.
+
+Short probe, same 32-iteration setup:
+
+```text
+target placement OFF:
+  final composite PSNR: 17.552
+  final mask L1: 0.1061
+  roots: 20768
+
+target placement ON:
+  final composite PSNR: 17.683
+  final mask L1: 0.1045
+  roots: 20768
+
+target parent selection:
+  final composite PSNR: 17.660
+  final mask L1: 0.1046
+  roots: 20768
+
+direct residual-pixel-to-face insertion:
+  final composite PSNR: 17.734
+  final mask L1: 0.1025
+  roots: 21536
+  inserted direct roots per event: 512
+  mean nearest-parent distance for inheritance: 0.00545-0.00561
+```
+
+This is the clearest diagnostic so far. Direct surface insertion is better than only changing parent score or child placement, and it reduces the mask error most in the short probe. It also keeps memory normal (`~3.4 GB` max allocated in this run), so the earlier memory issue is not part of this direct insertion path.
+
+This is still not the final fix. Direct insertion currently uses top residual pixels directly, with only mesh-depth visibility and nearest-root attribute inheritance. Before it becomes a formal training path, it needs proper deduplication/diversity on the surface, a stable spacing rule, and a prune schedule that does not immediately remove useful low-contribution newborn roots. But it identifies the real direction: hole densification should be residual-pixel/mesh-face driven, not parent-root driven.
+
 ## Current Root Cause Hypothesis
 
 The current failure is a competition between long-strand fitting and densification:
@@ -147,6 +191,7 @@ Current diagnosis split:
 
 - Initial trigger: densification evidence is still concentrated on already highly visible/contributing roots, even with root-pixel or pooled residual.
 - Placement trigger: the original split placement is not residual-directed. It only samples topology neighborhoods around selected parents and chooses locally empty candidates, so it cannot guarantee that children fill image-space holes. The target-placement probe partially fixes this by moving child candidates toward unprojected residual targets, but it does not fix biased parent selection.
+- Direct target trigger: bypassing parent-root selection and inserting new roots from residual-pixel-to-mesh-face targets improves the short probe more than the parent-based variants. This suggests the proper structural repair is direct surface candidate generation with root-neighborhood inheritance, not additional scalar weights on existing parents.
 - Later amplifier: pruning and absolute sample-count lifecycle evidence favor roots with more visible samples; once some roots grow longer/wider, they become structurally harder to remove and can keep painting larger regions.
 - Appearance amplifier: length, root width, and opacity are still available as faster ways to reduce image loss than adding new local roots.
 

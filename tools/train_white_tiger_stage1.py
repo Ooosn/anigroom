@@ -51,6 +51,7 @@ from anigroom.roots.lifecycle import (  # noqa: E402
     apply_attribute_update,
     apply_structure_update,
     interpolate_child_attributes,
+    propose_direct_target_structure_update,
     propose_structure_update,
 )
 from anigroom.roots.statistics import RootStatsWindow  # noqa: E402
@@ -726,6 +727,7 @@ class Stage1Config:
     densify_pixel_evidence_root_k: int = 4
     densify_pixel_evidence_min: float = 0.02
     densify_pixel_evidence_chunk: int = 512
+    densify_parent_selection: str = "score"
     densify_target_placement_weight: float = 0.0
     lifecycle_score_mode: str = "raw"
     max_splits_per_event: int = 256
@@ -1242,6 +1244,100 @@ def pixel_to_root_residual(
 ) -> torch.Tensor:
     residual, _, _ = pixel_to_root_evidence(model, roots_local, residual_image, viewmat, k, mesh_depth, config)
     return residual
+
+
+@torch.no_grad()
+def barycentric_from_points(points: torch.Tensor, tri: torch.Tensor) -> torch.Tensor:
+    a = tri[:, 0]
+    b = tri[:, 1]
+    c = tri[:, 2]
+    v0 = b - a
+    v1 = c - a
+    v2 = points - a
+    d00 = (v0 * v0).sum(dim=-1)
+    d01 = (v0 * v1).sum(dim=-1)
+    d11 = (v1 * v1).sum(dim=-1)
+    d20 = (v2 * v0).sum(dim=-1)
+    d21 = (v2 * v1).sum(dim=-1)
+    denom = (d00 * d11 - d01 * d01).clamp_min(1.0e-12)
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    u = 1.0 - v - w
+    bary = torch.stack([u, v, w], dim=-1)
+    bary = bary.clamp_min(0.0)
+    return bary / bary.sum(dim=-1, keepdim=True).clamp_min(1.0e-8)
+
+
+@torch.no_grad()
+def pixel_to_surface_child_roots(
+    model: WhiteTigerStage1Model,
+    roots_local: torch.Tensor,
+    residual_image: torch.Tensor,
+    viewmat: torch.Tensor,
+    k: torch.Tensor,
+    mesh_depth: MeshDepthResult,
+    config: Stage1Config,
+    max_children: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float | int]]:
+    residual = residual_image[..., 0].detach().reshape(-1)
+    topk = min(max(1, int(config.densify_pixel_evidence_topk)), int(residual.numel()))
+    values, flat_ids = torch.topk(residual, k=topk, largest=True, sorted=True)
+    keep = values >= float(config.densify_pixel_evidence_min)
+    if not bool(keep.any()) or max_children <= 0:
+        empty_ids = roots_local.new_empty((0,), dtype=torch.long)
+        empty_bary = roots_local.new_empty((0, 3))
+        return empty_ids, empty_ids, empty_bary, {"direct_target_candidate_count": 0, "direct_target_insert_count": 0}
+    values = values[keep]
+    flat_ids = flat_ids[keep]
+    face_ids = mesh_depth.face_id.reshape(-1)[flat_ids].long()
+    depth = mesh_depth.depth.reshape(-1)[flat_ids].to(dtype=roots_local.dtype)
+    valid = (face_ids >= 0) & torch.isfinite(depth) & (depth > 1.0e-6)
+    if not bool(valid.any()):
+        empty_ids = roots_local.new_empty((0,), dtype=torch.long)
+        empty_bary = roots_local.new_empty((0, 3))
+        return empty_ids, empty_ids, empty_bary, {"direct_target_candidate_count": 0, "direct_target_insert_count": 0}
+    values = values[valid]
+    flat_ids = flat_ids[valid]
+    face_ids = face_ids[valid]
+    depth = depth[valid]
+    if int(values.numel()) > int(max_children):
+        order = torch.argsort(values, descending=True)[: int(max_children)]
+        flat_ids = flat_ids[order]
+        face_ids = face_ids[order]
+        depth = depth[order]
+        values = values[order]
+
+    height, width = int(mesh_depth.depth.shape[0]), int(mesh_depth.depth.shape[1])
+    xy = torch.stack(
+        [(flat_ids % width).to(dtype=roots_local.dtype), (flat_ids // width).to(dtype=roots_local.dtype)],
+        dim=-1,
+    )
+    cam_x = (xy[:, 0] - k[0, 2].to(dtype=roots_local.dtype)) * depth / k[0, 0].to(dtype=roots_local.dtype)
+    cam_y = (xy[:, 1] - k[1, 2].to(dtype=roots_local.dtype)) * depth / k[1, 1].to(dtype=roots_local.dtype)
+    cam = torch.stack([cam_x, cam_y, depth], dim=-1)
+    rot = viewmat[:3, :3].to(dtype=roots_local.dtype)
+    trans = viewmat[:3, 3].to(dtype=roots_local.dtype)
+    world = (cam - trans.view(1, 3)) @ rot
+    scale = torch.exp(model.log_scale.detach()).to(dtype=roots_local.dtype)
+    target_local = (world - model.translation.detach().to(dtype=roots_local.dtype).view(1, 3)) / scale
+
+    tri = model.vertices[model.faces[face_ids]]
+    bary = barycentric_from_points(target_local, tri)
+    child_points = (tri * bary[:, :, None]).sum(dim=1)
+    dist = torch.cdist(child_points, roots_local.detach())
+    parent_ids = torch.argmin(dist, dim=1).long()
+    parent_distance = torch.min(dist, dim=1).values
+    return (
+        parent_ids,
+        face_ids,
+        bary,
+        {
+            "direct_target_candidate_count": int(topk),
+            "direct_target_insert_count": int(bary.shape[0]),
+            "direct_target_weight_mean": float(values.mean().detach().cpu()),
+            "direct_target_parent_distance_mean": float(parent_distance.mean().detach().cpu()),
+        },
+    )
 
 
 @torch.no_grad()
@@ -1784,6 +1880,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     grad_threshold=float(config.densify_score_threshold) if should_densify else float("inf"),
                     visibility_threshold=1.0,
                     score_mode=str(config.lifecycle_score_mode),
+                    parent_selection_mode=str(config.densify_parent_selection) if should_densify else "score",
                     max_new_roots=int(config.max_splits_per_event) * int(config.split_children_per_parent),
                     children_per_parent=int(config.split_children_per_parent),
                     replace_parent=True,
@@ -1798,17 +1895,47 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     min_opacity=float(config.prune_min_opacity) if should_prune else 0.0,
                     max_prune_fraction=float(config.prune_max_fraction) if should_prune else 0.0,
                 )
-                update = propose_structure_update(
-                    model.lifecycle_state(),
-                    stats,
-                    densify_cfg,
-                    prune_cfg,
-                    vertices=model.vertices,
-                    faces=model.faces,
-                    child_target_points=child_target_points,
-                    child_target_weight=float(config.densify_target_placement_weight) if should_densify else 0.0,
-                )
-                if should_densify and float(config.densify_min_contribution) > 0.0 and update.parent_indices.numel() > 0:
+                direct_target_record: dict[str, float | int] = {}
+                if should_densify and str(config.densify_parent_selection) == "target_direct":
+                    if float(config.densify_residual_weight) <= 0.0 or str(config.densify_residual_mode) != "pixel_to_root":
+                        raise RuntimeError("target_direct densification requires --densify-residual-weight > 0 and --densify-residual-mode pixel_to_root")
+                    direct_parent_ids, direct_face_ids, direct_bary, direct_target_record = pixel_to_surface_child_roots(
+                        model,
+                        model.lifecycle_state().points,
+                        residual_image,
+                        viewmats[idx],
+                        ks[idx],
+                        mesh_depth,
+                        config,
+                        max_children=int(config.max_splits_per_event) * int(config.split_children_per_parent),
+                    )
+                    update = propose_direct_target_structure_update(
+                        model.lifecycle_state(),
+                        stats,
+                        prune_cfg,
+                        child_parent_indices=direct_parent_ids,
+                        new_face_ids=direct_face_ids,
+                        new_barycentric=direct_bary,
+                        score_mode=str(config.lifecycle_score_mode),
+                    )
+                else:
+                    update = propose_structure_update(
+                        model.lifecycle_state(),
+                        stats,
+                        densify_cfg,
+                        prune_cfg,
+                        vertices=model.vertices,
+                        faces=model.faces,
+                        child_target_points=child_target_points,
+                        child_target_weights=root_target_weight if should_densify else None,
+                        child_target_placement_weight=float(config.densify_target_placement_weight) if should_densify else 0.0,
+                    )
+                if (
+                    should_densify
+                    and str(config.densify_parent_selection) != "target_direct"
+                    and float(config.densify_min_contribution) > 0.0
+                    and update.parent_indices.numel() > 0
+                ):
                     contribution = stats.gaussian_contrib_sum.reshape(-1)
                     keep_parent = contribution[update.parent_indices] >= float(config.densify_min_contribution)
                     if not bool(keep_parent.all()):
@@ -1862,6 +1989,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 }
                 if target_placement_record:
                     lifecycle_record["target_placement"] = target_placement_record
+                if direct_target_record:
+                    lifecycle_record["direct_target"] = direct_target_record
                 if changed:
                     result = model.apply_structure_update(update)
                     graph_edges = rebuild_graph_edges(model, k=8)
@@ -2102,6 +2231,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--densify-pixel-evidence-root-k", type=int, default=4)
     parser.add_argument("--densify-pixel-evidence-min", type=float, default=0.02)
     parser.add_argument("--densify-pixel-evidence-chunk", type=int, default=512)
+    parser.add_argument("--densify-parent-selection", choices=("score", "target", "target_direct"), default="score")
     parser.add_argument("--densify-target-placement-weight", type=float, default=0.0)
     parser.add_argument("--lifecycle-score-mode", choices=("raw", "sample_normalized"), default="raw")
     parser.add_argument("--max-splits-per-event", type=int, required=True)
@@ -2188,6 +2318,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         densify_pixel_evidence_root_k=args.densify_pixel_evidence_root_k,
         densify_pixel_evidence_min=args.densify_pixel_evidence_min,
         densify_pixel_evidence_chunk=args.densify_pixel_evidence_chunk,
+        densify_parent_selection=args.densify_parent_selection,
         densify_target_placement_weight=args.densify_target_placement_weight,
         lifecycle_score_mode=args.lifecycle_score_mode,
         max_splits_per_event=args.max_splits_per_event,

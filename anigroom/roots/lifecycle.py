@@ -76,6 +76,7 @@ class DensifyConfig:
     visibility_threshold: float = 1.0
     residual_threshold: float = 0.0
     score_mode: str = "raw"
+    parent_selection_mode: str = "score"
     max_new_roots: int = 1024
     children_per_parent: int = 2
     barycentric_step: float = 0.08
@@ -154,6 +155,28 @@ def select_densify_parents(stats: RootStats, config: DensifyConfig) -> tuple[tor
     if candidates.numel() == 0:
         return candidates, scores
     order = torch.argsort(need[candidates], descending=True)
+    limit = max(0, int(config.max_new_roots) // max(1, int(config.children_per_parent)))
+    parents = candidates[order[:limit]]
+    return parents, scores
+
+
+def select_target_densify_parents(
+    stats: RootStats,
+    config: DensifyConfig,
+    target_weight: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    scores = normalized_root_need(stats, score_mode=config.score_mode)
+    if target_weight.shape[0] != stats.root_count:
+        raise ValueError("target_weight must have one row per root")
+    weight = target_weight.reshape(-1).to(device=stats.device, dtype=stats.root_grad_abs_sum.dtype)
+    valid = scores["raw_visibility"] >= float(config.visibility_threshold)
+    valid = valid & (weight > 0.0)
+    if float(config.residual_threshold) > 0.0:
+        valid = valid & (weight >= float(config.residual_threshold))
+    candidates = torch.nonzero(valid, as_tuple=False).reshape(-1)
+    if candidates.numel() == 0:
+        return candidates, scores
+    order = torch.argsort(weight[candidates], descending=True)
     limit = max(0, int(config.max_new_roots) // max(1, int(config.children_per_parent)))
     parents = candidates[order[:limit]]
     return parents, scores
@@ -438,9 +461,17 @@ def propose_structure_update(
     vertices: torch.Tensor | None = None,
     faces: torch.Tensor | None = None,
     child_target_points: torch.Tensor | None = None,
-    child_target_weight: float = 0.0,
+    child_target_weights: torch.Tensor | None = None,
+    child_target_placement_weight: float = 0.0,
 ) -> RootStructureUpdate:
-    parents, scores = select_densify_parents(stats, densify)
+    if str(densify.parent_selection_mode) == "score":
+        parents, scores = select_densify_parents(stats, densify)
+    elif str(densify.parent_selection_mode) == "target":
+        if child_target_weights is None:
+            raise ValueError("target parent selection requires child_target_weights")
+        parents, scores = select_target_densify_parents(stats, densify, child_target_weights)
+    else:
+        raise ValueError(f"unknown densify parent_selection_mode: {densify.parent_selection_mode}")
     child_parent_indices, new_face_ids, new_barycentric = propose_split_children(
         state,
         parents,
@@ -453,7 +484,7 @@ def propose_structure_update(
         candidate_face_count=densify.candidate_face_count,
         min_child_distance=densify.min_child_distance,
         child_target_points=child_target_points,
-        target_weight=float(child_target_weight),
+        target_weight=float(child_target_placement_weight),
     )
     prune_mask = select_prune_mask(stats, prune)
     if densify.replace_parent and parents.numel() > 0:
@@ -464,6 +495,43 @@ def propose_structure_update(
         child_parent_indices=child_parent_indices,
         new_face_ids=new_face_ids,
         new_barycentric=new_barycentric,
+        prune_mask=prune_mask,
+        scores=scores,
+    )
+
+
+def propose_direct_target_structure_update(
+    state: RootLifecycleState,
+    stats: RootStats,
+    prune: PruneConfig,
+    *,
+    child_parent_indices: torch.Tensor,
+    new_face_ids: torch.Tensor,
+    new_barycentric: torch.Tensor,
+    score_mode: str = "raw",
+) -> RootStructureUpdate:
+    """Insert target-derived child roots directly on mesh faces.
+
+    This is a diagnostic path for hole-directed densification: residual pixels
+    nominate surface positions first, then nearest old roots are used only for
+    attribute inheritance.  It deliberately does not replace the parent roots.
+    """
+
+    state.validate()
+    stats.validate()
+    if child_parent_indices.numel() != new_face_ids.numel() or new_face_ids.numel() != new_barycentric.shape[0]:
+        raise ValueError("direct target child arrays must have matching lengths")
+    if child_parent_indices.numel() > 0:
+        if int(child_parent_indices.min().item()) < 0 or int(child_parent_indices.max().item()) >= stats.root_count:
+            raise ValueError("direct target child_parent_indices out of range")
+    scores = normalized_root_need(stats, score_mode=score_mode)
+    prune_mask = select_prune_mask(stats, prune)
+    parent_indices = torch.unique(child_parent_indices.reshape(-1)) if child_parent_indices.numel() > 0 else child_parent_indices
+    return RootStructureUpdate(
+        parent_indices=parent_indices,
+        child_parent_indices=child_parent_indices.reshape(-1),
+        new_face_ids=new_face_ids.reshape(-1),
+        new_barycentric=new_barycentric.reshape(-1, 3),
         prune_mask=prune_mask,
         scores=scores,
     )
