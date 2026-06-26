@@ -78,6 +78,11 @@ sample-normalized lifecycle, residual OFF:
   global need/contribution/visible/samples: 0.000142 / 207.24 / 391.93 / 391.93
   selected need/contribution/visible/samples: 0.000872 / 365.92 / 690.35 / 690.35
   selected contribution-per-sample: 0.5354 vs global 0.3190
+
+pixel-to-root residual ON:
+  global need/residual/contribution/visible: 0.061842 / 0.061585 / 207.24 / 391.94
+  selected need/residual/contribution/visible: 1.001053 / 1.000000 / 381.48 / 717.57
+  selected contribution-per-sample: 0.5319 vs global 0.3190
 ```
 
 This confirms the baseline is not changed when the switch is off. It also shows that naive root-projected residual is not enough: it raises residual evidence, but the selected parents are still the highest-visible/highest-contribution roots. In other words, point-sampling residual at the root projection still follows the already-rendered streaks and strong texture edges instead of reliably identifying under-covered holes.
@@ -85,6 +90,10 @@ This confirms the baseline is not changed when the switch is off. It also shows 
 The first coverage-pooled version (`alpha deficit + pooled RGB residual`) is also not enough. It reduces the residual ratio gap compared with root-pixel residual, but selected parents are still `1.82x` the global contribution and `1.80x` the global visible sample count. The evidence is still too tied to the current rendered hair layer.
 
 The sample-normalized lifecycle probe shows that per-sample normalization alone also does not fix early parent selection. At iteration 10, selected roots are not meaningfully longer than average yet (`~1.00x` length), and retained sample count is almost the same as visible count. The selected roots are still `1.77x` the global raw contribution and `1.76x` the raw visible count. So sample-count feedback is a later amplifier, not the initial trigger.
+
+The first pixel-to-root version also fails. It collects high residual pixels and assigns them to nearby visible root projections, but the selected parents remain even more biased toward already high-visible/high-contribution roots (`1.84x` global contribution and `1.83x` global visible count). The selected residual saturates to `1.0`, which means the evidence is concentrated on a small set of nearby visible roots rather than distributing structural demand to missing surface regions.
+
+This exposes a second issue in the split placement path. `select_densify_parents` chooses parents by score, but `propose_split_children` then places children by local surface emptiness around each parent. It does not receive the image-space residual pixel positions or a residual-directed target. Therefore even when evidence is computed from under-covered pixels, the new roots are not explicitly placed toward those pixels. The current densification is parent-centric, not hole-centric.
 
 ## Current Root Cause Hypothesis
 
@@ -113,6 +122,7 @@ This does not mean adaptive segments are wrong; the renderer needs enough segmen
 Current diagnosis split:
 
 - Initial trigger: densification evidence is still concentrated on already highly visible/contributing roots, even with root-pixel or pooled residual.
+- Placement trigger: split placement is not residual-directed. It only samples topology neighborhoods around selected parents and chooses locally empty candidates, so it cannot guarantee that children fill image-space holes.
 - Later amplifier: pruning and absolute sample-count lifecycle evidence favor roots with more visible samples; once some roots grow longer/wider, they become structurally harder to remove and can keep painting larger regions.
 - Appearance amplifier: length, root width, and opacity are still available as faster ways to reduce image loss than adding new local roots.
 
@@ -126,7 +136,8 @@ The next changes should be tested one at a time on a diagnostic branch.
    - The first pooled version is still too correlated with visible/contribution.
    - The next version should separate under-coverage evidence from already-painted residual: high `relu(mask - alpha)` should identify holes, while high contribution plus high residual should be treated as a suspicious long-painting signal, not automatically as a densify target.
    - The evidence should favor roots near under-covered regions, not roots already painting strongly.
-   - A likely better assignment is pixel-to-root rather than root-to-pixel: collect high alpha-deficit/detail pixels, assign them to nearby projected visible roots, and use that as densification evidence. Sampling only at existing root projections misses residual that lies between roots.
+   - Pixel-to-root evidence was tested and is not enough by itself. It still selects high-visible/high-contribution parents when the placement step remains parent-centric.
+   - The next valid repair is hole-directed densification: keep pixel evidence as a set of image-space targets, assign targets to nearby visible surface roots/faces, and score candidate child positions by projected distance to those targets plus surface spacing. This changes both parent selection and child placement; changing only the scalar parent score is insufficient.
 
 2. Delay or soften true pruning.
    - Parent replacement during split is expected.

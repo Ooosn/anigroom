@@ -722,6 +722,10 @@ class Stage1Config:
     densify_residual_pool_radius: int = 15
     densify_residual_alpha_weight: float = 1.0
     densify_residual_rgb_weight: float = 0.25
+    densify_pixel_evidence_topk: int = 4096
+    densify_pixel_evidence_root_k: int = 4
+    densify_pixel_evidence_min: float = 0.02
+    densify_pixel_evidence_chunk: int = 512
     lifecycle_score_mode: str = "raw"
     max_splits_per_event: int = 256
     split_children_per_parent: int = 2
@@ -1131,6 +1135,72 @@ def root_projected_residual(
 
 
 @torch.no_grad()
+def pixel_to_root_residual(
+    model: WhiteTigerStage1Model,
+    roots_local: torch.Tensor,
+    residual_image: torch.Tensor,
+    viewmat: torch.Tensor,
+    k: torch.Tensor,
+    mesh_depth: MeshDepthResult,
+    config: Stage1Config,
+) -> torch.Tensor:
+    scale = torch.exp(model.log_scale.detach()).view(1, 1)
+    roots = roots_local.detach() * scale + model.translation.detach().view(1, 3)
+    root_xy, root_depth = project_points(roots, viewmat, k)
+    height, width = int(residual_image.shape[0]), int(residual_image.shape[1])
+    in_frame = (
+        (root_depth > 1.0e-6)
+        & (root_xy[:, 0] >= 0.0)
+        & (root_xy[:, 0] <= width - 1)
+        & (root_xy[:, 1] >= 0.0)
+        & (root_xy[:, 1] <= height - 1)
+    )
+    sampled_mesh_depth = sample_depth_nearest(
+        mesh_depth.depth,
+        root_xy,
+        kernel_size=int(config.mesh_depth_local_kernel),
+    )
+    tolerance = float(config.mesh_depth_abs_tolerance) + root_depth.abs() * float(config.mesh_depth_rel_tolerance)
+    root_visible = in_frame & torch.isfinite(sampled_mesh_depth) & (root_depth <= sampled_mesh_depth + tolerance)
+    visible_ids = torch.nonzero(root_visible, as_tuple=False).reshape(-1)
+    residual = torch.zeros((int(root_xy.shape[0]), 1), device=residual_image.device, dtype=residual_image.dtype)
+    norm = torch.zeros_like(residual)
+    if int(visible_ids.numel()) == 0:
+        return residual
+
+    flat = residual_image[..., 0].detach().reshape(-1)
+    topk = min(max(1, int(config.densify_pixel_evidence_topk)), int(flat.numel()))
+    values, flat_ids = torch.topk(flat, k=topk, largest=True, sorted=False)
+    keep = values >= float(config.densify_pixel_evidence_min)
+    if not bool(keep.any()):
+        return residual
+    values = values[keep]
+    flat_ids = flat_ids[keep]
+    pixel_xy = torch.stack(
+        [(flat_ids % width).to(dtype=residual_image.dtype), (flat_ids // width).to(dtype=residual_image.dtype)],
+        dim=-1,
+    )
+
+    visible_xy = root_xy[visible_ids].to(dtype=residual_image.dtype)
+    root_k = min(max(1, int(config.densify_pixel_evidence_root_k)), int(visible_ids.numel()))
+    chunk = max(1, int(config.densify_pixel_evidence_chunk))
+    residual_flat = residual.reshape(-1)
+    norm_flat = norm.reshape(-1)
+    for start in range(0, int(pixel_xy.shape[0]), chunk):
+        end = min(start + chunk, int(pixel_xy.shape[0]))
+        px = pixel_xy[start:end]
+        val = values[start:end].to(dtype=residual_image.dtype).reshape(-1, 1)
+        dist2 = (px[:, None, :] - visible_xy[None, :, :]).square().sum(dim=-1)
+        nn_dist2, nn_local = torch.topk(dist2, k=root_k, largest=False, sorted=False)
+        nn_root_ids = visible_ids[nn_local]
+        weights = 1.0 / (nn_dist2 + 4.0)
+        weights = weights / torch.clamp(weights.sum(dim=1, keepdim=True), min=1.0e-8)
+        residual_flat.scatter_add_(0, nn_root_ids.reshape(-1), (val * weights).reshape(-1))
+        norm_flat.scatter_add_(0, nn_root_ids.reshape(-1), weights.reshape(-1))
+    return residual / torch.clamp(norm, min=1.0)
+
+
+@torch.no_grad()
 def densification_residual_image(
     pred_fixed: torch.Tensor,
     target_fixed: torch.Tensor,
@@ -1143,6 +1213,13 @@ def densification_residual_image(
     mode = str(config.densify_residual_mode)
     if mode == "root_pixel":
         return rgb_residual + 0.35 * mask_residual
+    if mode == "pixel_to_root":
+        alpha_deficit = torch.relu(mask.detach() - alpha.detach())
+        detail_residual = rgb_residual * mask.detach()
+        return (
+            float(config.densify_residual_alpha_weight) * alpha_deficit
+            + float(config.densify_residual_rgb_weight) * detail_residual
+        )
     if mode != "coverage_pooled":
         raise RuntimeError(f"unknown densify_residual_mode: {mode}")
 
@@ -1571,15 +1648,27 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             residual_per_root = None
             if float(config.densify_residual_weight) > 0.0:
                 residual_image = densification_residual_image(pred_fixed, target_fixed, alpha, mask, config)
-                residual_per_root = root_projected_residual(
-                    model,
-                    roots_local_for_grad,
-                    residual_image,
-                    viewmats[idx],
-                    ks[idx],
-                    mesh_depth,
-                    config,
-                ) * float(config.densify_residual_weight)
+                if str(config.densify_residual_mode) == "pixel_to_root":
+                    residual_per_root = pixel_to_root_residual(
+                        model,
+                        roots_local_for_grad,
+                        residual_image,
+                        viewmats[idx],
+                        ks[idx],
+                        mesh_depth,
+                        config,
+                    )
+                else:
+                    residual_per_root = root_projected_residual(
+                        model,
+                        roots_local_for_grad,
+                        residual_image,
+                        viewmats[idx],
+                        ks[idx],
+                        mesh_depth,
+                        config,
+                    )
+                residual_per_root = residual_per_root * float(config.densify_residual_weight)
             pred_orientation, pred_orientation_conf = render_orientation_map(
                 gaussians,
                 viewmats[idx],
@@ -1924,10 +2013,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--densify-score-threshold", type=float, required=True)
     parser.add_argument("--densify-min-contribution", type=float, required=True)
     parser.add_argument("--densify-residual-weight", type=float, default=0.0)
-    parser.add_argument("--densify-residual-mode", choices=("root_pixel", "coverage_pooled"), default="root_pixel")
+    parser.add_argument("--densify-residual-mode", choices=("root_pixel", "coverage_pooled", "pixel_to_root"), default="root_pixel")
     parser.add_argument("--densify-residual-pool-radius", type=int, default=15)
     parser.add_argument("--densify-residual-alpha-weight", type=float, default=1.0)
     parser.add_argument("--densify-residual-rgb-weight", type=float, default=0.25)
+    parser.add_argument("--densify-pixel-evidence-topk", type=int, default=4096)
+    parser.add_argument("--densify-pixel-evidence-root-k", type=int, default=4)
+    parser.add_argument("--densify-pixel-evidence-min", type=float, default=0.02)
+    parser.add_argument("--densify-pixel-evidence-chunk", type=int, default=512)
     parser.add_argument("--lifecycle-score-mode", choices=("raw", "sample_normalized"), default="raw")
     parser.add_argument("--max-splits-per-event", type=int, required=True)
     parser.add_argument("--split-children-per-parent", type=int, required=True)
@@ -2009,6 +2102,10 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         densify_residual_pool_radius=args.densify_residual_pool_radius,
         densify_residual_alpha_weight=args.densify_residual_alpha_weight,
         densify_residual_rgb_weight=args.densify_residual_rgb_weight,
+        densify_pixel_evidence_topk=args.densify_pixel_evidence_topk,
+        densify_pixel_evidence_root_k=args.densify_pixel_evidence_root_k,
+        densify_pixel_evidence_min=args.densify_pixel_evidence_min,
+        densify_pixel_evidence_chunk=args.densify_pixel_evidence_chunk,
         lifecycle_score_mode=args.lifecycle_score_mode,
         max_splits_per_event=args.max_splits_per_event,
         split_children_per_parent=args.split_children_per_parent,
