@@ -68,3 +68,9 @@ path from the recovered `20260626015952` code. Later cleaned-flow or anchor-flow
 experiments were removed from the formal path. If they are revisited, they must
 be isolated in a new branch and compared against the restored baseline one
 change at a time.
+
+## Metric Reporting
+
+Composite PSNR is the primary Stage 1 PSNR. Raw RGB PSNR may be logged as a
+diagnostic, but summaries, comparisons, and server status reports should lead
+with composite PSNR.
