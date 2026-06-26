@@ -349,3 +349,79 @@ The next changes should be tested one at a time on a diagnostic branch.
    - Multi-level roots are not rejected.
    - They require separate guide/render root lifecycle logic and multi-level densification.
    - They should be introduced only if evidence shows the current coupling between guide attributes and render coverage cannot be fixed cleanly.
+
+## 2026-06-26 Child-Local Appearance Probe
+
+The next diagnostic tested whether one part of the long-streak artifact comes
+from appearance being tied too coarsely to each guide root.
+
+Code evidence:
+
+- `build_strands(...)` produces one `root_color -> tip_color` ramp per guide
+  root.
+- `expand_child_strands(...)` then expands child strands with
+  `child_colors = colors[:, None].expand(...)` and
+  `child_opacities = opacities[:, None].expand(...)`.
+- Therefore all child strands spawned by the same guide root share exactly the
+  same color and opacity profile. If that root becomes long, wide, or opaque, it
+  can paint one color across several stripe boundaries.
+
+A default-off diagnostic was added to `tools/train_white_tiger_stage1.py`:
+
+- `--local-child-color-support`
+- `--local-child-opacity-support`
+
+These add bounded per-child color / opacity offsets after child expansion. The
+default path is unchanged; the new parameters are absent unless the flags are
+explicitly enabled. The parameters are also carried through split/prune via the
+same root-attribute interpolation path as the groom parameters.
+
+Same 120-iteration single-view probe, same direct insertion and spacing
+configuration:
+
+```text
+baseline:
+  composite PSNR: 25.615
+  raw PSNR:       25.447
+  mask L1:        0.0325
+
+local child color:
+  composite PSNR: 26.674
+  raw PSNR:       26.443
+  mask L1:        0.0343
+
+local child color + opacity:
+  composite PSNR: 26.758
+  raw PSNR:       26.514
+  mask L1:        0.0310
+```
+
+Comparison image:
+
+```text
+D:\petsgaussianhair\_downloads\white_tiger_childlocal_comparison_120iter.png
+```
+
+Conclusion:
+
+- Local child appearance support is a real improvement, not just metric noise.
+  It gives the renderer a way to separate local stripe color without forcing one
+  guide-root color to cover an entire child bundle.
+- This confirms appearance coupling is one real cause of the long-streak /
+  dragged-color artifact.
+- It is not sufficient by itself. Width and opacity still grow with contribution
+  and remain strongly correlated with contribution-per-sample. The geometry /
+  opacity capacity loop is still present.
+
+Updated repair direction:
+
+1. Keep child-local appearance as a candidate formal module, but only with
+   bounded support and a later smoothness/regularization check. It should not
+   become an unconstrained texture-like escape hatch.
+2. The next root cause to address is still geometry/opacity overpaint: roots can
+   become wider/opaque and explain missing coverage before densification inserts
+   enough local roots.
+3. A clean next diagnostic should target footprint/capacity directly, preferably
+   by limiting early width/opacity growth or routing high-capacity/high-residual
+   roots into densification evidence rather than letting them keep increasing
+   opacity/width.

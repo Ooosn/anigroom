@@ -835,6 +835,10 @@ class Stage1Config:
     densify_target_placement_weight: float = 0.0
     lifecycle_score_mode: str = "raw"
     stroke_drag_diagnostics: bool = False
+    local_child_color_support: bool = False
+    local_child_opacity_support: bool = False
+    local_child_color_scale: float = 0.20
+    local_child_opacity_scale: float = 0.12
     max_splits_per_event: int = 256
     split_children_per_parent: int = 2
     split_neighbor_count: int = 12
@@ -860,8 +864,16 @@ class WhiteTigerStage1Model(torch.nn.Module):
         device: torch.device,
         init_scale: float = 1.25,
         init_translation: tuple[float, float, float] = (0.0, 0.32, 0.0),
+        max_child_count: int = 8,
+        local_child_color_support: bool = False,
+        local_child_opacity_support: bool = False,
+        local_child_color_scale: float = 0.20,
+        local_child_opacity_scale: float = 0.12,
     ) -> None:
         super().__init__()
+        self.max_child_count = max(1, int(max_child_count))
+        self.local_child_color_scale = float(local_child_color_scale)
+        self.local_child_opacity_scale = float(local_child_opacity_scale)
         self.register_buffer("vertices", torch.from_numpy(mesh.vertices).to(device=device))
         self.register_buffer("faces", torch.from_numpy(mesh.faces).to(device=device, dtype=torch.long))
         self.register_buffer("face_ids", torch.from_numpy(face_ids).to(device=device, dtype=torch.long))
@@ -874,6 +886,14 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.groom = GroomParameterField(int(face_ids.shape[0]), ranges=ranges, device=device)
         self.log_scale = torch.nn.Parameter(torch.tensor([math.log(float(init_scale))], device=device))
         self.translation = torch.nn.Parameter(torch.tensor(init_translation, device=device, dtype=torch.float32))
+        if bool(local_child_color_support):
+            self.child_color_delta_raw = torch.nn.Parameter(torch.zeros((int(face_ids.shape[0]), self.max_child_count, 3), device=device))
+        else:
+            self.register_parameter("child_color_delta_raw", None)
+        if bool(local_child_opacity_support):
+            self.child_opacity_delta_raw = torch.nn.Parameter(torch.zeros((int(face_ids.shape[0]), self.max_child_count, 1), device=device))
+        else:
+            self.register_parameter("child_opacity_delta_raw", None)
         self.initialize_default_groom()
 
     def initialize_default_groom(self) -> None:
@@ -932,6 +952,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             groom.clump_strength,
             child_count=child_count,
         )
+        colors, opacities = self.apply_local_child_support(colors, opacities, root_ids, child_count)
         child_lengths = groom.length[root_ids]
         counts, count_stats = strand_segment_budgets(
             strands.detach(),
@@ -959,6 +980,31 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "translation_norm": float(torch.linalg.norm(self.translation.detach()).cpu()),
         }
         return gaussians, roots, roots_local, stats
+
+    def apply_local_child_support(
+        self,
+        colors: torch.Tensor,
+        opacities: torch.Tensor,
+        root_ids: torch.Tensor,
+        child_count: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.child_color_delta_raw is None and self.child_opacity_delta_raw is None:
+            return colors, opacities
+        child_count = int(child_count)
+        if child_count < 1 or child_count > self.max_child_count:
+            raise ValueError(f"child_count {child_count} exceeds local child support capacity {self.max_child_count}")
+        root_count = int(self.groom.root_color_raw.shape[0])
+        expected = root_count * child_count
+        if int(root_ids.shape[0]) != expected:
+            raise RuntimeError(f"unexpected child expansion shape: {int(root_ids.shape[0])} != {expected}")
+        child_ids = torch.arange(child_count, device=colors.device).view(1, child_count).expand(root_count, child_count).reshape(-1)
+        if self.child_color_delta_raw is not None:
+            delta = torch.tanh(self.child_color_delta_raw[root_ids, child_ids]) * float(self.local_child_color_scale)
+            colors = (colors + delta[:, None, :]).clamp(0.0, 1.0)
+        if self.child_opacity_delta_raw is not None:
+            delta = torch.tanh(self.child_opacity_delta_raw[root_ids, child_ids]) * float(self.local_child_opacity_scale)
+            opacities = (opacities + delta[:, None, :]).clamp(0.0, 1.0)
+        return colors, opacities
 
     def guide_strands_for_loss(self, samples: int) -> torch.Tensor:
         roots, normals, _ = self.roots_and_normals()
@@ -992,6 +1038,8 @@ class WhiteTigerStage1Model(torch.nn.Module):
         ranges = self.groom.ranges
         device = self.vertices.device
         old_params = {name: param.detach() for name, param in self.groom.named_parameters()}
+        old_child_color_delta = self.child_color_delta_raw.detach() if self.child_color_delta_raw is not None else None
+        old_child_opacity_delta = self.child_opacity_delta_raw.detach() if self.child_opacity_delta_raw is not None else None
         new_values: dict[str, torch.Tensor] = {}
         for name, values in old_params.items():
             if update.new_barycentric.numel() == 0:
@@ -1045,6 +1093,28 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.anchor_local = new_state.points.detach()
         self.bary_logits = torch.nn.Parameter(torch.log(self.bary_initial.clamp_min(1.0e-5)))
         self.groom = new_groom
+        if old_child_color_delta is not None:
+            child_delta = interpolate_child_attributes(
+                old_child_color_delta,
+                old_state,
+                update,
+                self.vertices,
+                self.faces,
+                neighbor_count=8,
+                parent_weight=3.0,
+            )
+            self.child_color_delta_raw = torch.nn.Parameter(apply_attribute_update(old_child_color_delta, update, child_delta))
+        if old_child_opacity_delta is not None:
+            child_delta = interpolate_child_attributes(
+                old_child_opacity_delta,
+                old_state,
+                update,
+                self.vertices,
+                self.faces,
+                neighbor_count=8,
+                parent_weight=3.0,
+            )
+            self.child_opacity_delta_raw = torch.nn.Parameter(apply_attribute_update(old_child_opacity_delta, update, child_delta))
         old_conf = self.root_observation_confidence.detach()
         child_conf = (
             interpolate_child_attributes(
@@ -1756,25 +1826,28 @@ def evaluate(
 
 def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) -> torch.optim.Optimizer:
     high_frequency_lr = config.lr_groom * float(config.lr_high_frequency_shape_scale)
+    groom_params = [
+        model.groom.length_raw,
+        model.groom.root_width_raw,
+        model.groom.tip_width_ratio_raw,
+        model.groom.width_taper_raw,
+        model.groom.flow_xy,
+        model.groom.flow_strength_raw,
+        model.groom.lift_raw,
+        model.groom.stiffness_raw,
+        model.groom.opacity_raw,
+        model.groom.tip_opacity_ratio_raw,
+    ]
+    if model.child_opacity_delta_raw is not None:
+        groom_params.append(model.child_opacity_delta_raw)
+    color_params = [model.groom.root_color_raw, model.groom.tip_color_raw]
+    if model.child_color_delta_raw is not None:
+        color_params.append(model.child_color_delta_raw)
     return torch.optim.Adam(
         [
             {"params": [model.bary_logits], "lr": config.lr_root},
             {"params": [model.log_scale, model.translation], "lr": config.lr_calibration},
-            {
-                "params": [
-                    model.groom.length_raw,
-                    model.groom.root_width_raw,
-                    model.groom.tip_width_ratio_raw,
-                    model.groom.width_taper_raw,
-                    model.groom.flow_xy,
-                    model.groom.flow_strength_raw,
-                    model.groom.lift_raw,
-                    model.groom.stiffness_raw,
-                    model.groom.opacity_raw,
-                    model.groom.tip_opacity_ratio_raw,
-                ],
-                "lr": config.lr_groom,
-            },
+            {"params": groom_params, "lr": config.lr_groom},
             {
                 "params": [
                     model.groom.bend_raw,
@@ -1787,7 +1860,7 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
                 ],
                 "lr": high_frequency_lr,
             },
-            {"params": [model.groom.root_color_raw, model.groom.tip_color_raw], "lr": config.lr_color},
+            {"params": color_params, "lr": config.lr_color},
         ]
     )
 
@@ -1855,6 +1928,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         device,
         init_scale=config.init_mesh_scale,
         init_translation=config.init_mesh_translation,
+        max_child_count=config.child_count,
+        local_child_color_support=config.local_child_color_support,
+        local_child_opacity_support=config.local_child_opacity_support,
+        local_child_color_scale=config.local_child_color_scale,
+        local_child_opacity_scale=config.local_child_opacity_scale,
     )
     viewmats, ks = load_camera_tensors(data_root, device)
     width, height = config.expected_width, config.expected_height
@@ -2394,6 +2472,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--densify-target-placement-weight", type=float, default=0.0)
     parser.add_argument("--lifecycle-score-mode", choices=("raw", "sample_normalized"), default="raw")
     parser.add_argument("--stroke-drag-diagnostics", action="store_true")
+    parser.add_argument("--local-child-color-support", action="store_true")
+    parser.add_argument("--local-child-opacity-support", action="store_true")
+    parser.add_argument("--local-child-color-scale", type=float, default=0.20)
+    parser.add_argument("--local-child-opacity-scale", type=float, default=0.12)
     parser.add_argument("--max-splits-per-event", type=int, required=True)
     parser.add_argument("--split-children-per-parent", type=int, required=True)
     parser.add_argument("--split-neighbor-count", type=int, required=True)
@@ -2482,6 +2564,10 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         densify_target_placement_weight=args.densify_target_placement_weight,
         lifecycle_score_mode=args.lifecycle_score_mode,
         stroke_drag_diagnostics=args.stroke_drag_diagnostics,
+        local_child_color_support=args.local_child_color_support,
+        local_child_opacity_support=args.local_child_opacity_support,
+        local_child_color_scale=args.local_child_color_scale,
+        local_child_opacity_scale=args.local_child_opacity_scale,
         max_splits_per_event=args.max_splits_per_event,
         split_children_per_parent=args.split_children_per_parent,
         split_neighbor_count=args.split_neighbor_count,
