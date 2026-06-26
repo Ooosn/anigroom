@@ -333,12 +333,26 @@ def propose_split_children(
         candidate_face_count=int(candidate_face_count),
         candidate_rings=int(candidate_rings),
     )
-    dist = torch.cdist(candidate_points.reshape(-1, 3), state.points).view(candidate_points.shape[0], candidate_points.shape[1], -1)
     nearest_count = max(1, min(int(neighbor_count), int(state.points.shape[0])))
-    nearest_values = torch.topk(dist, k=nearest_count, largest=False, dim=-1).values
-    local_distance = nearest_values[..., -1]
+    flat_candidates = candidate_points.reshape(-1, 3)
+    local_distance_flat = torch.empty((flat_candidates.shape[0],), device=state.points.device, dtype=state.points.dtype)
+    # Candidate count is parent_count * candidate_face_count * template_count.
+    # A full candidate-to-root distance matrix can reach multiple GB during
+    # densification, so compute the kNN distance in chunks.
+    candidate_chunk = 1024
+    for begin in range(0, int(flat_candidates.shape[0]), candidate_chunk):
+        end = min(begin + candidate_chunk, int(flat_candidates.shape[0]))
+        dist = torch.cdist(flat_candidates[begin:end], state.points)
+        nearest_values = torch.topk(dist, k=nearest_count, largest=False, dim=-1).values
+        local_distance_flat[begin:end] = nearest_values[:, -1]
+    local_distance = local_distance_flat.view(candidate_points.shape[0], candidate_points.shape[1])
     if float(min_child_distance) > 0.0:
-        too_close = nearest_values[..., 0] < float(min_child_distance)
+        closest_flat = torch.empty((flat_candidates.shape[0],), device=state.points.device, dtype=state.points.dtype)
+        for begin in range(0, int(flat_candidates.shape[0]), candidate_chunk):
+            end = min(begin + candidate_chunk, int(flat_candidates.shape[0]))
+            dist = torch.cdist(flat_candidates[begin:end], state.points)
+            closest_flat[begin:end] = torch.min(dist, dim=-1).values
+        too_close = closest_flat.view(candidate_points.shape[0], candidate_points.shape[1]) < float(min_child_distance)
         local_distance = local_distance.masked_fill(too_close, -torch.inf)
     selected_ids = torch.topk(local_distance, k=min(children_per_parent, candidate_bary.shape[1]), largest=True, dim=-1).indices
     selected = torch.gather(candidate_bary, 1, selected_ids[:, :, None].expand(-1, -1, 3))

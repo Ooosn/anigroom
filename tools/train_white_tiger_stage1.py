@@ -1144,7 +1144,27 @@ def render_view(
     raw_image = image
     if config.mesh_backing_compositing:
         image = image + (1.0 - alpha) * backing_image.view(1, height, width, 3)
-    stats = {**stats, "visible_gaussian_count": int((info["radii"] > 0).sum().detach().cpu())}
+    radii = info["radii"].detach()
+    tiles_per_gauss = info.get("tiles_per_gauss")
+    if torch.is_tensor(tiles_per_gauss):
+        tiles_detached = tiles_per_gauss.detach()
+        tile_stats = {
+            "tile_intersection_count": int(tiles_detached.sum().cpu()),
+            "tile_intersections_per_gaussian_mean": float(tiles_detached.float().mean().cpu()),
+            "tile_intersections_per_gaussian_max": int(tiles_detached.max().cpu()),
+        }
+    else:
+        tile_stats = {
+            "tile_intersection_count": -1,
+            "tile_intersections_per_gaussian_mean": -1.0,
+            "tile_intersections_per_gaussian_max": -1,
+        }
+    stats = {
+        **stats,
+        "visible_gaussian_count": int((radii > 0).sum().cpu()),
+        "screen_radius_max": int(radii.max().cpu()),
+        **tile_stats,
+    }
     info["mesh_depth_keep_mask"] = keep_mask.detach()
     info["mesh_depth_behind_mesh_mask"] = clip_masks["behind_mesh_mask"].detach()
     info["preclip_means"] = preclip_gaussians.means.detach()
@@ -1542,6 +1562,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "groom": groom_parameter_stats(model.groom),
                     "orientation": orient_stats,
                     "max_memory_mb": round(torch.cuda.max_memory_allocated() / (1024 * 1024), 2),
+                    "memory_allocated_mb": round(torch.cuda.memory_allocated() / (1024 * 1024), 2),
+                    "memory_reserved_mb": round(torch.cuda.memory_reserved() / (1024 * 1024), 2),
+                    "max_memory_reserved_mb": round(torch.cuda.max_memory_reserved() / (1024 * 1024), 2),
                 }
                 log.write(json.dumps(record) + "\n")
                 log.flush()
