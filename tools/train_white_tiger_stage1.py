@@ -578,6 +578,64 @@ def groom_parameter_stats(field: GroomParameterField) -> dict[str, dict[str, flo
     }
 
 
+@torch.no_grad()
+def summarize_values(value: torch.Tensor) -> dict[str, float]:
+    flat = value.detach().float().reshape(-1)
+    if flat.numel() == 0:
+        return {"count": 0.0, "mean": 0.0, "p50": 0.0, "p90": 0.0, "p95": 0.0, "max": 0.0}
+    return {
+        "count": float(flat.numel()),
+        "mean": float(flat.mean().cpu()),
+        "p50": float(torch.quantile(flat, 0.50).cpu()),
+        "p90": float(torch.quantile(flat, 0.90).cpu()),
+        "p95": float(torch.quantile(flat, 0.95).cpu()),
+        "max": float(flat.max().cpu()),
+    }
+
+
+@torch.no_grad()
+def lifecycle_subset_report(
+    model: WhiteTigerStage1Model,
+    stats,
+    scores: dict[str, torch.Tensor],
+    indices: torch.Tensor,
+) -> dict[str, dict[str, float]]:
+    if indices.numel() == 0:
+        return {}
+    ids = indices.detach().long().to(device=model.bary_logits.device)
+    groom = model.groom.decode()
+    contribution = stats.gaussian_contrib_sum.reshape(-1).to(device=ids.device)
+    visible = stats.visible_count.reshape(-1).to(device=ids.device)
+    return {
+        "need": summarize_values(scores["need"][ids]),
+        "gaussian_grad": summarize_values(scores["gaussian_grad"][ids]),
+        "root_grad": summarize_values(scores["root_grad"][ids]),
+        "contribution": summarize_values(contribution[ids]),
+        "visible": summarize_values(visible[ids]),
+        "length": summarize_values(groom.length[ids]),
+        "root_width": summarize_values(groom.root_width[ids]),
+        "tip_width": summarize_values(groom.tip_width[ids]),
+        "opacity": summarize_values(groom.opacity[ids]),
+        "flow_strength": summarize_values(groom.flow_strength[ids]),
+    }
+
+
+@torch.no_grad()
+def lifecycle_global_report(model: WhiteTigerStage1Model, stats, scores: dict[str, torch.Tensor]) -> dict[str, dict[str, float] | float]:
+    groom = model.groom.decode()
+    return {
+        "need": summarize_values(scores["need"]),
+        "contribution": summarize_values(stats.gaussian_contrib_sum.reshape(-1)),
+        "visible": summarize_values(stats.visible_count.reshape(-1)),
+        "length": summarize_values(groom.length),
+        "root_width": summarize_values(groom.root_width),
+        "opacity": summarize_values(groom.opacity),
+        "long_root_fraction_010": float((groom.length.reshape(-1) > 0.10).float().mean().cpu()),
+        "long_root_fraction_015": float((groom.length.reshape(-1) > 0.15).float().mean().cpu()),
+        "wide_root_fraction_00065": float((groom.root_width.reshape(-1) > 0.00065).float().mean().cpu()),
+    }
+
+
 @dataclass(frozen=True)
 class Stage1Config:
     data_root: str
@@ -1525,6 +1583,16 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "selected_parent_count": int(update.parent_indices.numel()),
                     "inserted_child_count": int(update.new_barycentric.shape[0]),
                     "prune_count": int(update.prune_mask.sum().detach().cpu()),
+                    "diagnostics": {
+                        "global": lifecycle_global_report(model, stats, update.scores),
+                        "selected_parents": lifecycle_subset_report(model, stats, update.scores, update.parent_indices),
+                        "pruned_roots": lifecycle_subset_report(
+                            model,
+                            stats,
+                            update.scores,
+                            torch.nonzero(update.prune_mask, as_tuple=False).reshape(-1),
+                        ),
+                    },
                 }
                 if changed:
                     result = model.apply_structure_update(update)
