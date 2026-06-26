@@ -73,11 +73,18 @@ root-projected residual ON:
 coverage-pooled residual ON:
   global need/residual/contribution/visible: 0.520453 / 0.520196 / 207.24 / 391.94
   selected need/residual/contribution/visible: 1.131650 / 1.131004 / 376.60 / 706.94
+
+sample-normalized lifecycle, residual OFF:
+  global need/contribution/visible/samples: 0.000142 / 207.24 / 391.93 / 391.93
+  selected need/contribution/visible/samples: 0.000872 / 365.92 / 690.35 / 690.35
+  selected contribution-per-sample: 0.5354 vs global 0.3190
 ```
 
 This confirms the baseline is not changed when the switch is off. It also shows that naive root-projected residual is not enough: it raises residual evidence, but the selected parents are still the highest-visible/highest-contribution roots. In other words, point-sampling residual at the root projection still follows the already-rendered streaks and strong texture edges instead of reliably identifying under-covered holes.
 
 The first coverage-pooled version (`alpha deficit + pooled RGB residual`) is also not enough. It reduces the residual ratio gap compared with root-pixel residual, but selected parents are still `1.82x` the global contribution and `1.80x` the global visible sample count. The evidence is still too tied to the current rendered hair layer.
+
+The sample-normalized lifecycle probe shows that per-sample normalization alone also does not fix early parent selection. At iteration 10, selected roots are not meaningfully longer than average yet (`~1.00x` length), and retained sample count is almost the same as visible count. The selected roots are still `1.77x` the global raw contribution and `1.76x` the raw visible count. So sample-count feedback is a later amplifier, not the initial trigger.
 
 ## Current Root Cause Hypothesis
 
@@ -103,6 +110,12 @@ There is also a segment-budget feedback loop:
 
 This does not mean adaptive segments are wrong; the renderer needs enough segments for long/curved hair. The issue is that lifecycle evidence currently treats extra samples from a long strand as stronger structural evidence. That makes long-strand fitting compete with densification.
 
+Current diagnosis split:
+
+- Initial trigger: densification evidence is still concentrated on already highly visible/contributing roots, even with root-pixel or pooled residual.
+- Later amplifier: pruning and absolute sample-count lifecycle evidence favor roots with more visible samples; once some roots grow longer/wider, they become structurally harder to remove and can keep painting larger regions.
+- Appearance amplifier: length, root width, and opacity are still available as faster ways to reduce image loss than adding new local roots.
+
 ## Fix Directions To Validate
 
 The next changes should be tested one at a time on a diagnostic branch.
@@ -113,12 +126,14 @@ The next changes should be tested one at a time on a diagnostic branch.
    - The first pooled version is still too correlated with visible/contribution.
    - The next version should separate under-coverage evidence from already-painted residual: high `relu(mask - alpha)` should identify holes, while high contribution plus high residual should be treated as a suspicious long-painting signal, not automatically as a densify target.
    - The evidence should favor roots near under-covered regions, not roots already painting strongly.
+   - A likely better assignment is pixel-to-root rather than root-to-pixel: collect high alpha-deficit/detail pixels, assign them to nearby projected visible roots, and use that as densification evidence. Sampling only at existing root projections misses residual that lies between roots.
 
 2. Delay or soften true pruning.
    - Parent replacement during split is expected.
    - Additional pruning should not aggressively reduce root count before the new roots have stabilized.
    - Prune should operate after a full evidence window and should be separated from early densification tests.
    - Prune should not rank purely by absolute Gaussian-sample contribution; it should account for per-root segment/sample budget or use a stricter "no evidence for a full pass" criterion early.
+   - Sample-normalized lifecycle mode is now available as a diagnostic switch, but it should be validated on a later iteration where segment counts actually differ.
 
 3. Stage appearance capacity.
    - Early training should prevent length/width/opacity from becoming the primary way to close holes.

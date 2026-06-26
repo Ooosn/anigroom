@@ -45,6 +45,7 @@ class RootStatsWindow:
         self.gaussian_grad_abs_sum = torch.zeros(shape, device=self.device)
         self.gaussian_contrib_sum = torch.zeros(shape, device=self.device)
         self.visible_count = torch.zeros(shape, device=self.device)
+        self.gaussian_sample_count = torch.zeros(shape, device=self.device)
         self.opacity_sum = torch.zeros(shape, device=self.device)
         self.opacity_count = torch.zeros(shape, device=self.device)
         self.residual_sum = torch.zeros(shape, device=self.device)
@@ -118,11 +119,14 @@ class RootStatsWindow:
 
         root_visible_count = torch.zeros((self.root_count, 1), device=self.device)
         root_visible_count.scatter_add_(0, root_ids[:, None], visible_g)
+        root_sample_count = torch.zeros((self.root_count, 1), device=self.device)
+        root_sample_count.scatter_add_(0, root_ids[:, None], torch.ones_like(visible_g))
 
         self.root_grad_abs_sum += root_points.grad.detach().abs().sum(dim=-1, keepdim=True)
         self.gaussian_grad_abs_sum.scatter_add_(0, root_ids[:, None], gaussian_grad.to(device=self.device))
         self.gaussian_contrib_sum.scatter_add_(0, root_ids[:, None], visible_g * opacities.clamp_min(EPS))
         self.visible_count += root_visible_count
+        self.gaussian_sample_count += root_sample_count
         self.opacity_sum.scatter_add_(0, root_ids[:, None], opacities)
         self.opacity_count.scatter_add_(0, root_ids[:, None], torch.ones_like(opacities))
         if residual_per_root is not None:
@@ -143,6 +147,7 @@ class RootStatsWindow:
             gaussian_grad_abs_sum=self.gaussian_grad_abs_sum.clone(),
             gaussian_contrib_sum=self.gaussian_contrib_sum.clone(),
             visible_count=self.visible_count.clone(),
+            gaussian_sample_count=self.gaussian_sample_count.clone(),
             residual_sum=self.residual_sum.clone(),
             opacity_mean=opacity_mean.clone(),
         )

@@ -41,6 +41,7 @@ class RootStats:
     gaussian_grad_abs_sum: torch.Tensor
     gaussian_contrib_sum: torch.Tensor
     visible_count: torch.Tensor
+    gaussian_sample_count: torch.Tensor | None = None
     residual_sum: torch.Tensor | None = None
     opacity_mean: torch.Tensor | None = None
 
@@ -53,6 +54,8 @@ class RootStats:
         ]:
             if value.shape[0] != root_count:
                 raise ValueError(f"{name} has mismatched root dimension")
+        if self.gaussian_sample_count is not None and self.gaussian_sample_count.shape[0] != root_count:
+            raise ValueError("gaussian_sample_count has mismatched root dimension")
         if self.residual_sum is not None and self.residual_sum.shape[0] != root_count:
             raise ValueError("residual_sum has mismatched root dimension")
         if self.opacity_mean is not None and self.opacity_mean.shape[0] != root_count:
@@ -72,6 +75,7 @@ class DensifyConfig:
     grad_threshold: float = 0.25
     visibility_threshold: float = 1.0
     residual_threshold: float = 0.0
+    score_mode: str = "raw"
     max_new_roots: int = 1024
     children_per_parent: int = 2
     barycentric_step: float = 0.08
@@ -100,14 +104,27 @@ class RootStructureUpdate:
     scores: dict[str, torch.Tensor]
 
 
-def normalized_root_need(stats: RootStats) -> dict[str, torch.Tensor]:
+def normalized_root_need(stats: RootStats, score_mode: str = "raw") -> dict[str, torch.Tensor]:
     """Compute thresholdable root evidence without percentile normalization."""
 
     stats.validate()
-    denom = stats.gaussian_contrib_sum.clamp_min(EPS)
-    gaussian_grad = stats.gaussian_grad_abs_sum / denom
+    sample_count = (
+        stats.gaussian_sample_count
+        if stats.gaussian_sample_count is not None
+        else torch.ones_like(stats.visible_count)
+    ).clamp_min(1.0)
+    if str(score_mode) == "raw":
+        denom = stats.gaussian_contrib_sum.clamp_min(EPS)
+        gaussian_grad = stats.gaussian_grad_abs_sum / denom
+        contribution = stats.gaussian_contrib_sum
+        visibility = stats.visible_count
+    elif str(score_mode) == "sample_normalized":
+        gaussian_grad = stats.gaussian_grad_abs_sum / sample_count
+        contribution = stats.gaussian_contrib_sum / sample_count
+        visibility = stats.visible_count / sample_count
+    else:
+        raise ValueError(f"unknown root lifecycle score_mode: {score_mode}")
     root_grad = stats.root_grad_abs_sum / stats.visible_count.clamp_min(1.0)
-    visibility = stats.visible_count
     if stats.residual_sum is None:
         residual = torch.zeros_like(root_grad)
     else:
@@ -118,14 +135,18 @@ def normalized_root_need(stats: RootStats) -> dict[str, torch.Tensor]:
         "gaussian_grad": gaussian_grad.reshape(-1),
         "root_grad": root_grad.reshape(-1),
         "visibility": visibility.reshape(-1),
+        "raw_visibility": stats.visible_count.reshape(-1),
+        "contribution": contribution.reshape(-1),
+        "raw_contribution": stats.gaussian_contrib_sum.reshape(-1),
+        "sample_count": sample_count.reshape(-1),
         "residual": residual.reshape(-1),
     }
 
 
 def select_densify_parents(stats: RootStats, config: DensifyConfig) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    scores = normalized_root_need(stats)
+    scores = normalized_root_need(stats, score_mode=config.score_mode)
     need = scores["need"]
-    valid = scores["visibility"] >= float(config.visibility_threshold)
+    valid = scores["raw_visibility"] >= float(config.visibility_threshold)
     valid = valid & (need >= float(config.grad_threshold))
     if float(config.residual_threshold) > 0.0:
         valid = valid & (scores["residual"] >= float(config.residual_threshold))

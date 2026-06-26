@@ -606,6 +606,11 @@ def lifecycle_subset_report(
     groom = model.groom.decode()
     contribution = stats.gaussian_contrib_sum.reshape(-1).to(device=ids.device)
     visible = stats.visible_count.reshape(-1).to(device=ids.device)
+    sample_count = (
+        stats.gaussian_sample_count.reshape(-1).to(device=ids.device)
+        if getattr(stats, "gaussian_sample_count", None) is not None
+        else torch.ones_like(visible)
+    )
     return {
         "need": summarize_values(scores["need"][ids]),
         "residual": summarize_values(scores["residual"][ids]),
@@ -613,6 +618,9 @@ def lifecycle_subset_report(
         "root_grad": summarize_values(scores["root_grad"][ids]),
         "contribution": summarize_values(contribution[ids]),
         "visible": summarize_values(visible[ids]),
+        "sample_count": summarize_values(sample_count[ids]),
+        "visible_per_sample": summarize_values((visible / sample_count.clamp_min(1.0))[ids]),
+        "contribution_per_sample": summarize_values((contribution / sample_count.clamp_min(1.0))[ids]),
         "length": summarize_values(groom.length[ids]),
         "root_width": summarize_values(groom.root_width[ids]),
         "tip_width": summarize_values(groom.tip_width[ids]),
@@ -624,11 +632,21 @@ def lifecycle_subset_report(
 @torch.no_grad()
 def lifecycle_global_report(model: WhiteTigerStage1Model, stats, scores: dict[str, torch.Tensor]) -> dict[str, dict[str, float] | float]:
     groom = model.groom.decode()
+    visible = stats.visible_count.reshape(-1)
+    contribution = stats.gaussian_contrib_sum.reshape(-1)
+    sample_count = (
+        stats.gaussian_sample_count.reshape(-1)
+        if getattr(stats, "gaussian_sample_count", None) is not None
+        else torch.ones_like(visible)
+    )
     return {
         "need": summarize_values(scores["need"]),
         "residual": summarize_values(scores["residual"]),
-        "contribution": summarize_values(stats.gaussian_contrib_sum.reshape(-1)),
-        "visible": summarize_values(stats.visible_count.reshape(-1)),
+        "contribution": summarize_values(contribution),
+        "visible": summarize_values(visible),
+        "sample_count": summarize_values(sample_count),
+        "visible_per_sample": summarize_values(visible / sample_count.clamp_min(1.0)),
+        "contribution_per_sample": summarize_values(contribution / sample_count.clamp_min(1.0)),
         "length": summarize_values(groom.length),
         "root_width": summarize_values(groom.root_width),
         "opacity": summarize_values(groom.opacity),
@@ -704,6 +722,7 @@ class Stage1Config:
     densify_residual_pool_radius: int = 15
     densify_residual_alpha_weight: float = 1.0
     densify_residual_rgb_weight: float = 0.25
+    lifecycle_score_mode: str = "raw"
     max_splits_per_event: int = 256
     split_children_per_parent: int = 2
     split_neighbor_count: int = 12
@@ -1617,6 +1636,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 densify_cfg = DensifyConfig(
                     grad_threshold=float(config.densify_score_threshold) if should_densify else float("inf"),
                     visibility_threshold=1.0,
+                    score_mode=str(config.lifecycle_score_mode),
                     max_new_roots=int(config.max_splits_per_event) * int(config.split_children_per_parent),
                     children_per_parent=int(config.split_children_per_parent),
                     replace_parent=True,
@@ -1908,6 +1928,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--densify-residual-pool-radius", type=int, default=15)
     parser.add_argument("--densify-residual-alpha-weight", type=float, default=1.0)
     parser.add_argument("--densify-residual-rgb-weight", type=float, default=0.25)
+    parser.add_argument("--lifecycle-score-mode", choices=("raw", "sample_normalized"), default="raw")
     parser.add_argument("--max-splits-per-event", type=int, required=True)
     parser.add_argument("--split-children-per-parent", type=int, required=True)
     parser.add_argument("--split-neighbor-count", type=int, required=True)
@@ -1988,6 +2009,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         densify_residual_pool_radius=args.densify_residual_pool_radius,
         densify_residual_alpha_weight=args.densify_residual_alpha_weight,
         densify_residual_rgb_weight=args.densify_residual_rgb_weight,
+        lifecycle_score_mode=args.lifecycle_score_mode,
         max_splits_per_event=args.max_splits_per_event,
         split_children_per_parent=args.split_children_per_parent,
         split_neighbor_count=args.split_neighbor_count,
