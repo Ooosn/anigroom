@@ -69,9 +69,15 @@ residual OFF:
 root-projected residual ON:
   global need/residual/contribution/visible: 0.184554 / 0.184298 / 207.24 / 391.94
   selected need/residual/contribution/visible: 0.890048 / 0.889423 / 380.10 / 713.93
+
+coverage-pooled residual ON:
+  global need/residual/contribution/visible: 0.520453 / 0.520196 / 207.24 / 391.94
+  selected need/residual/contribution/visible: 1.131650 / 1.131004 / 376.60 / 706.94
 ```
 
 This confirms the baseline is not changed when the switch is off. It also shows that naive root-projected residual is not enough: it raises residual evidence, but the selected parents are still the highest-visible/highest-contribution roots. In other words, point-sampling residual at the root projection still follows the already-rendered streaks and strong texture edges instead of reliably identifying under-covered holes.
+
+The first coverage-pooled version (`alpha deficit + pooled RGB residual`) is also not enough. It reduces the residual ratio gap compared with root-pixel residual, but selected parents are still `1.82x` the global contribution and `1.80x` the global visible sample count. The evidence is still too tied to the current rendered hair layer.
 
 ## Current Root Cause Hypothesis
 
@@ -87,6 +93,16 @@ This is not just an orientation-map issue. Orientation noise can worsen it, but 
 
 The first attempted residual attribution also shows the repair has to be coverage-aware. A simple root-pixel residual is still biased toward high-visibility strands, so it does not break the long-strand feedback loop by itself.
 
+There is also a segment-budget feedback loop:
+
+- `strand_segment_budgets` increases Gaussian count with decoded length and curvature.
+- `RootStatsWindow` accumulates visibility/contribution per visible Gaussian sample.
+- A longer root therefore receives more visible samples and more contribution budget.
+- `select_prune_mask` ranks/prunes by absolute contribution/visibility, so shorter or less visible roots are easier to delete.
+- Once pruning starts, root count falls, and surviving roots have an incentive to become longer/wider/opaque to cover the same pixels.
+
+This does not mean adaptive segments are wrong; the renderer needs enough segments for long/curved hair. The issue is that lifecycle evidence currently treats extra samples from a long strand as stronger structural evidence. That makes long-strand fitting compete with densification.
+
 ## Fix Directions To Validate
 
 The next changes should be tested one at a time on a diagnostic branch.
@@ -94,18 +110,21 @@ The next changes should be tested one at a time on a diagnostic branch.
 1. Replace naive root-pixel residual with coverage-aware local residual.
    - Current densification is based on root/gaussian gradients and visibility/contribution.
    - Root-pixel residual is measurable, but it still selects high-visibility roots.
-   - The next version should use image-space hole/detail evidence, e.g. positive alpha deficit `relu(mask - alpha)` plus local RGB residual, pooled over a small image radius before sampling nearby visible roots.
+   - The first pooled version is still too correlated with visible/contribution.
+   - The next version should separate under-coverage evidence from already-painted residual: high `relu(mask - alpha)` should identify holes, while high contribution plus high residual should be treated as a suspicious long-painting signal, not automatically as a densify target.
    - The evidence should favor roots near under-covered regions, not roots already painting strongly.
 
 2. Delay or soften true pruning.
    - Parent replacement during split is expected.
    - Additional pruning should not aggressively reduce root count before the new roots have stabilized.
    - Prune should operate after a full evidence window and should be separated from early densification tests.
+   - Prune should not rank purely by absolute Gaussian-sample contribution; it should account for per-root segment/sample budget or use a stricter "no evidence for a full pass" criterion early.
 
 3. Stage appearance capacity.
    - Early training should prevent length/width/opacity from becoming the primary way to close holes.
    - Densification should get the first chance to explain missing local detail.
    - After root coverage improves, loosen local appearance parameters.
+   - This is likely required because residual-only routing did not break the feedback loop.
 
 4. Penalize abnormal long-strand painting.
    - Not all long hair is wrong.

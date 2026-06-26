@@ -700,6 +700,10 @@ class Stage1Config:
     densify_score_threshold: float = 2.5e-5
     densify_min_contribution: float = 0.45
     densify_residual_weight: float = 0.0
+    densify_residual_mode: str = "root_pixel"
+    densify_residual_pool_radius: int = 15
+    densify_residual_alpha_weight: float = 1.0
+    densify_residual_rgb_weight: float = 0.25
     max_splits_per_event: int = 256
     split_children_per_parent: int = 2
     split_neighbor_count: int = 12
@@ -1105,6 +1109,35 @@ def root_projected_residual(
     visible = in_frame & torch.isfinite(sampled_mesh_depth) & (depth <= sampled_mesh_depth + tolerance)
     sampled = bilinear_sample(residual_image, xy).reshape(-1, 1)
     return sampled * visible.float().reshape(-1, 1)
+
+
+@torch.no_grad()
+def densification_residual_image(
+    pred_fixed: torch.Tensor,
+    target_fixed: torch.Tensor,
+    alpha: torch.Tensor,
+    mask: torch.Tensor,
+    config: Stage1Config,
+) -> torch.Tensor:
+    rgb_residual = torch.abs(pred_fixed.detach() - target_fixed.detach()).mean(dim=-1, keepdim=True)
+    mask_residual = torch.abs(alpha.detach() - mask.detach())
+    mode = str(config.densify_residual_mode)
+    if mode == "root_pixel":
+        return rgb_residual + 0.35 * mask_residual
+    if mode != "coverage_pooled":
+        raise RuntimeError(f"unknown densify_residual_mode: {mode}")
+
+    alpha_deficit = torch.relu(mask.detach() - alpha.detach())
+    detail_residual = rgb_residual * mask.detach()
+    radius = max(0, int(config.densify_residual_pool_radius))
+    if radius > 0:
+        kernel = 2 * radius + 1
+        alpha_deficit = F.max_pool2d(alpha_deficit.permute(2, 0, 1).unsqueeze(0), kernel, stride=1, padding=radius)[0].permute(1, 2, 0)
+        detail_residual = F.avg_pool2d(detail_residual.permute(2, 0, 1).unsqueeze(0), kernel, stride=1, padding=radius)[0].permute(1, 2, 0)
+    return (
+        float(config.densify_residual_alpha_weight) * alpha_deficit
+        + float(config.densify_residual_rgb_weight) * detail_residual
+    )
 
 
 def render_model_mesh_depth(
@@ -1518,8 +1551,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             mask_loss = torch.mean(torch.abs(alpha - mask))
             residual_per_root = None
             if float(config.densify_residual_weight) > 0.0:
-                residual_image = torch.abs(pred_fixed.detach() - target_fixed.detach()).mean(dim=-1, keepdim=True)
-                residual_image = residual_image + 0.35 * torch.abs(alpha.detach() - mask.detach())
+                residual_image = densification_residual_image(pred_fixed, target_fixed, alpha, mask, config)
                 residual_per_root = root_projected_residual(
                     model,
                     roots_local_for_grad,
@@ -1872,6 +1904,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--densify-score-threshold", type=float, required=True)
     parser.add_argument("--densify-min-contribution", type=float, required=True)
     parser.add_argument("--densify-residual-weight", type=float, default=0.0)
+    parser.add_argument("--densify-residual-mode", choices=("root_pixel", "coverage_pooled"), default="root_pixel")
+    parser.add_argument("--densify-residual-pool-radius", type=int, default=15)
+    parser.add_argument("--densify-residual-alpha-weight", type=float, default=1.0)
+    parser.add_argument("--densify-residual-rgb-weight", type=float, default=0.25)
     parser.add_argument("--max-splits-per-event", type=int, required=True)
     parser.add_argument("--split-children-per-parent", type=int, required=True)
     parser.add_argument("--split-neighbor-count", type=int, required=True)
@@ -1948,6 +1984,10 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         densify_score_threshold=args.densify_score_threshold,
         densify_min_contribution=args.densify_min_contribution,
         densify_residual_weight=args.densify_residual_weight,
+        densify_residual_mode=args.densify_residual_mode,
+        densify_residual_pool_radius=args.densify_residual_pool_radius,
+        densify_residual_alpha_weight=args.densify_residual_alpha_weight,
+        densify_residual_rgb_weight=args.densify_residual_rgb_weight,
         max_splits_per_event=args.max_splits_per_event,
         split_children_per_parent=args.split_children_per_parent,
         split_neighbor_count=args.split_neighbor_count,
