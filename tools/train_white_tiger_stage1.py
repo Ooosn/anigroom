@@ -657,6 +657,110 @@ def lifecycle_global_report(model: WhiteTigerStage1Model, stats, scores: dict[st
     }
 
 
+@torch.no_grad()
+def stroke_drag_report(model: WhiteTigerStage1Model, stats, scores: dict[str, torch.Tensor]) -> dict[str, dict[str, float] | float]:
+    """Quantify roots that can explain pixels by long, wide, opaque strokes.
+
+    This diagnostic is logging-only.  It is meant to test whether high residual
+    and high contribution are concentrated on high-capacity strands, which would
+    explain the observed color dragging without changing training behavior.
+    """
+
+    groom = model.groom.decode()
+    length = groom.length.reshape(-1).float()
+    width = groom.root_width.reshape(-1).float()
+    opacity = groom.opacity.reshape(-1).float()
+    contribution = stats.gaussian_contrib_sum.reshape(-1).float()
+    sample_count = (
+        stats.gaussian_sample_count.reshape(-1).float()
+        if getattr(stats, "gaussian_sample_count", None) is not None
+        else torch.ones_like(contribution)
+    ).clamp_min(1.0)
+    contribution_per_sample = contribution / sample_count
+    residual = scores["residual"].reshape(-1).float()
+    need = scores["need"].reshape(-1).float()
+
+    def q(value: torch.Tensor, quantile: float) -> torch.Tensor:
+        if value.numel() == 0:
+            return value.new_tensor(0.0)
+        return torch.quantile(value, float(quantile))
+
+    length_q90 = q(length, 0.90)
+    width_q90 = q(width, 0.90)
+    opacity_q90 = q(opacity, 0.90)
+    contrib_q90 = q(contribution_per_sample, 0.90)
+    residual_q90 = q(residual, 0.90)
+    high_capacity = (length >= length_q90) & (width >= width_q90) & (opacity >= opacity_q90)
+    high_contrib = contribution_per_sample >= contrib_q90
+    high_residual = residual >= residual_q90
+    drag = high_capacity & high_contrib
+    residual_drag = drag & high_residual
+
+    def masked_summary(mask: torch.Tensor) -> dict[str, float]:
+        mask = mask.reshape(-1).bool()
+        count = int(mask.sum().detach().cpu())
+        total_count = max(1, int(mask.numel()))
+        contribution_total = contribution.sum().clamp_min(1.0e-8)
+        residual_total = residual.sum().clamp_min(1.0e-8)
+        need_total = need.sum().clamp_min(1.0e-8)
+        if count == 0:
+            return {
+                "count": 0.0,
+                "fraction": 0.0,
+                "contribution_share": 0.0,
+                "residual_share": 0.0,
+                "need_share": 0.0,
+                "length_mean": 0.0,
+                "width_mean": 0.0,
+                "opacity_mean": 0.0,
+                "contribution_per_sample_mean": 0.0,
+                "residual_mean": 0.0,
+            }
+        return {
+            "count": float(count),
+            "fraction": float(count / total_count),
+            "contribution_share": float((contribution[mask].sum() / contribution_total).detach().cpu()),
+            "residual_share": float((residual[mask].sum() / residual_total).detach().cpu()) if float(residual_total.detach().cpu()) > 1.0e-8 else 0.0,
+            "need_share": float((need[mask].sum() / need_total).detach().cpu()),
+            "length_mean": float(length[mask].mean().detach().cpu()),
+            "width_mean": float(width[mask].mean().detach().cpu()),
+            "opacity_mean": float(opacity[mask].mean().detach().cpu()),
+            "contribution_per_sample_mean": float(contribution_per_sample[mask].mean().detach().cpu()),
+            "residual_mean": float(residual[mask].mean().detach().cpu()),
+        }
+
+    def corr(a: torch.Tensor, b: torch.Tensor) -> float:
+        a = a.reshape(-1).float()
+        b = b.reshape(-1).float()
+        if a.numel() < 2 or float(a.std().detach().cpu()) < 1.0e-12 or float(b.std().detach().cpu()) < 1.0e-12:
+            return 0.0
+        value = torch.corrcoef(torch.stack([a, b], dim=0))[0, 1]
+        return float(torch.nan_to_num(value, nan=0.0).detach().cpu())
+
+    return {
+        "thresholds": {
+            "length_q90": float(length_q90.detach().cpu()),
+            "width_q90": float(width_q90.detach().cpu()),
+            "opacity_q90": float(opacity_q90.detach().cpu()),
+            "contribution_per_sample_q90": float(contrib_q90.detach().cpu()),
+            "residual_q90": float(residual_q90.detach().cpu()),
+        },
+        "high_capacity": masked_summary(high_capacity),
+        "high_contribution": masked_summary(high_contrib),
+        "high_residual": masked_summary(high_residual),
+        "drag_candidates": masked_summary(drag),
+        "residual_drag_candidates": masked_summary(residual_drag),
+        "correlation": {
+            "length_vs_contribution_per_sample": corr(length, contribution_per_sample),
+            "width_vs_contribution_per_sample": corr(width, contribution_per_sample),
+            "opacity_vs_contribution_per_sample": corr(opacity, contribution_per_sample),
+            "length_vs_residual": corr(length, residual),
+            "width_vs_residual": corr(width, residual),
+            "opacity_vs_residual": corr(opacity, residual),
+        },
+    }
+
+
 @dataclass(frozen=True)
 class Stage1Config:
     data_root: str
@@ -730,6 +834,7 @@ class Stage1Config:
     densify_parent_selection: str = "score"
     densify_target_placement_weight: float = 0.0
     lifecycle_score_mode: str = "raw"
+    stroke_drag_diagnostics: bool = False
     max_splits_per_event: int = 256
     split_children_per_parent: int = 2
     split_neighbor_count: int = 12
@@ -2039,6 +2144,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         ),
                     },
                 }
+                if config.stroke_drag_diagnostics:
+                    lifecycle_record["diagnostics"]["stroke_drag"] = stroke_drag_report(model, stats, update.scores)
                 if target_placement_record:
                     lifecycle_record["target_placement"] = target_placement_record
                 if direct_target_record:
@@ -2286,6 +2393,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--densify-parent-selection", choices=("score", "target", "target_direct"), default="score")
     parser.add_argument("--densify-target-placement-weight", type=float, default=0.0)
     parser.add_argument("--lifecycle-score-mode", choices=("raw", "sample_normalized"), default="raw")
+    parser.add_argument("--stroke-drag-diagnostics", action="store_true")
     parser.add_argument("--max-splits-per-event", type=int, required=True)
     parser.add_argument("--split-children-per-parent", type=int, required=True)
     parser.add_argument("--split-neighbor-count", type=int, required=True)
@@ -2373,6 +2481,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         densify_parent_selection=args.densify_parent_selection,
         densify_target_placement_weight=args.densify_target_placement_weight,
         lifecycle_score_mode=args.lifecycle_score_mode,
+        stroke_drag_diagnostics=args.stroke_drag_diagnostics,
         max_splits_per_event=args.max_splits_per_event,
         split_children_per_parent=args.split_children_per_parent,
         split_neighbor_count=args.split_neighbor_count,

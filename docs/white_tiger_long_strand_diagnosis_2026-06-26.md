@@ -236,6 +236,50 @@ These controls rule out two easy explanations:
 
 The remaining problem is more specific: roots are still allowed to use long/wide/opaque one-color strokes to explain texture gaps. The repair should not be a blanket capacity freeze. It needs either better local color/attribute support for each strand, stronger local grooming consistency tied to surface neighborhoods, or a lifecycle rule that treats high-residual high-contribution long strokes as evidence for additional local roots rather than as a reason to keep expanding the same strand.
 
+A logging-only stroke-drag diagnostic was then added behind `--stroke-drag-diagnostics`. It does not change training. It only measures whether high-capacity roots are receiving disproportionate contribution/residual evidence. The same 120-iteration direct+spacing run produced essentially the same image metrics, so the diagnostic is non-invasive:
+
+```text
+direct spacing 0.004 + stroke-drag diagnostics:
+  iter 120 composite PSNR: 25.615
+  mask L1: 0.0325
+  roots: 21929
+  p95 length/width/opacity: 0.0843 / 0.000324 / 0.888
+```
+
+Stroke-drag diagnostic summary:
+
+```text
+iter 20:
+  high-capacity roots: 3.86% of roots, 7.18% contribution, 10.70% residual
+  width/opacity vs contribution-per-sample correlation: 0.660 / 0.589
+
+iter 40:
+  high-capacity roots: 4.39% of roots, 8.22% contribution, 13.16% residual
+  width/opacity vs contribution-per-sample correlation: 0.749 / 0.662
+
+iter 80:
+  high-capacity roots: 3.57% of roots, 6.89% contribution, 4.89% residual
+  width/opacity vs contribution-per-sample correlation: 0.785 / 0.728
+
+iter 100:
+  high-capacity roots: 3.12% of roots, 6.32% contribution, 4.58% residual
+  width/opacity vs contribution-per-sample correlation: 0.787 / 0.741
+```
+
+This refines the diagnosis:
+
+- Early in training, high-capacity roots are also over-represented in residual, so they are visibly involved in hard regions.
+- Later in training, residual becomes less concentrated on those roots, but contribution remains strongly correlated with width and opacity. This means the long-strand artifact is not simply "the highest residual roots get long." It is more structural: wide/opaque strands are rewarded as high-contribution explanations, even after coverage improves.
+- Length is involved, but width and opacity are the stronger measured correlates. So a length-only fix would likely miss the main stroke-painting path.
+- A blanket capacity freeze is too blunt. The better repair target is local support: prevent a single root color and one wide opaque strand from explaining a large texture region, while still allowing normal hair length where it is geometrically correct.
+
+The next repair should therefore be tested along one of these cleaner directions:
+
+1. **Local color/attribute support.** Keep the current single guide/root geometry, but let color/opacity vary more locally along the strand or through child/local support, so a long strand is not forced to paint one color across stripe boundaries.
+2. **Stroke-footprint regularization.** Penalize the combination of high width, high opacity, high contribution-per-sample, and high local RGB residual. This targets the measured failure mode more directly than a global width/opacity prior.
+3. **Densify-from-overpaint.** Treat high-contribution/high-capacity roots in high residual neighborhoods as evidence that the region needs more local roots, not as evidence that the current root should keep growing stronger.
+4. **Surface-neighborhood grooming consistency.** Strengthen local agreement for geometry and appearance parameters on the mesh graph, but only where it does not erase real stripe/color variation. This should be separate from the failed blanket shape-prior increase.
+
 ## Current Root Cause Hypothesis
 
 The current failure is a competition between long-strand fitting and densification:
