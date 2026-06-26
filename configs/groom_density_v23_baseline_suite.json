@@ -1,0 +1,56 @@
+{
+  "name": "groom_density_v23_baseline_suite",
+  "description": "Fixed V2.3 groom/densification baseline. It keeps the accepted V2.2 modules and adopts the longer schedule validated by the V2.2 step probe.",
+  "output_root": "_downloads/groom_density_v23_baseline_suite_20260624",
+  "script": "tools/train_groom_density_densification.py",
+  "common_args": {
+    "init_mode": "projected_curve",
+    "densify_warmup": 160,
+    "densify_interval": 80,
+    "groom_smooth_weight": 0.04,
+    "smooth_detail_protection": 0.65,
+    "flow_coherence_weight": 1.0,
+    "log_interval": 500,
+    "width": 1440,
+    "height": 810
+  },
+  "regular_schedule": {
+    "iterations": 4200,
+    "densify_until": 2000,
+    "max_splits_per_event": 256
+  },
+  "hard_schedule": {
+    "iterations": 5200,
+    "densify_until": 2800,
+    "max_splits_per_event": 320
+  },
+  "cases": [
+    {"style": "tiger_plush", "density": "animal_density", "schedule": "regular"},
+    {"style": "short_plush", "density": "animal_density", "schedule": "regular"},
+    {"style": "mixed_animal", "density": "animal_density", "schedule": "regular"},
+    {"style": "dog_guard", "density": "animal_density", "schedule": "regular"},
+    {"style": "coarse_guard", "density": "animal_density", "schedule": "regular"},
+    {"style": "long_silky", "density": "animal_density", "schedule": "regular"},
+    {"style": "mane_ridge", "density": "animal_density", "schedule": "regular"},
+    {"style": "wavy", "density": "animal_density", "schedule": "regular"},
+    {"style": "cowlick_whorl", "density": "animal_density", "schedule": "regular"},
+    {"style": "patchy_length", "density": "animal_density", "schedule": "hard"},
+    {"style": "wet_matted", "density": "matted_density", "schedule": "regular"},
+    {"style": "clumped", "density": "matted_density", "schedule": "regular"},
+    {"style": "frizzy", "density": "matted_density", "schedule": "hard"},
+    {"style": "curly_ringlet", "density": "matted_density", "schedule": "hard"},
+    {"style": "curled", "density": "matted_density", "schedule": "hard"},
+    {"style": "dirty_tangled", "density": "matted_density", "schedule": "hard"},
+    {"style": "fine_undercoat", "density": "animal_density", "schedule": "regular"},
+    {"style": "spiky_guard", "density": "animal_density", "schedule": "regular"},
+    {"style": "side_parted", "density": "animal_density", "schedule": "regular"},
+    {"style": "ringlet_plus_undercoat", "density": "matted_density", "schedule": "hard"},
+    {"style": "facial_short_to_long", "density": "animal_density", "schedule": "hard"}
+  ],
+  "expected_boundary_cases": [
+    "curled",
+    "dirty_tangled",
+    "curly_ringlet",
+    "cowlick_whorl"
+  ]
+}

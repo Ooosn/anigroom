@@ -1,0 +1,37 @@
+{
+  "name": "groom_density_v22_step_probe",
+  "description": "Longer-step probe for the fixed V2.2 groom/densification baseline. This does not replace the baseline; it checks whether selected ordinary and hard hair types are limited by training length when all accepted modules stay enabled.",
+  "output_root": "_downloads/groom_density_v22_step_probe_20260624",
+  "script": "tools/train_groom_density_densification.py",
+  "common_args": {
+    "init_mode": "projected_curve",
+    "densify_warmup": 160,
+    "densify_interval": 80,
+    "groom_smooth_weight": 0.04,
+    "smooth_detail_protection": 0.65,
+    "flow_coherence_weight": 1.0,
+    "log_interval": 500,
+    "width": 1440,
+    "height": 810
+  },
+  "regular_long_schedule": {
+    "iterations": 4200,
+    "densify_until": 2000,
+    "max_splits_per_event": 256
+  },
+  "hard_long_schedule": {
+    "iterations": 5200,
+    "densify_until": 2800,
+    "max_splits_per_event": 320
+  },
+  "cases": [
+    {"style": "tiger_plush", "density": "animal_density", "schedule": "regular_long"},
+    {"style": "long_silky", "density": "animal_density", "schedule": "regular_long"},
+    {"style": "spiky_guard", "density": "animal_density", "schedule": "regular_long"},
+    {"style": "cowlick_whorl", "density": "animal_density", "schedule": "regular_long"},
+    {"style": "curly_ringlet", "density": "matted_density", "schedule": "hard_long"},
+    {"style": "curled", "density": "matted_density", "schedule": "hard_long"},
+    {"style": "dirty_tangled", "density": "matted_density", "schedule": "hard_long"},
+    {"style": "ringlet_plus_undercoat", "density": "matted_density", "schedule": "hard_long"}
+  ]
+}

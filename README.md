@@ -11,4 +11,8 @@ The active route is intentionally small:
 - Stage 2 is not part of the current active run.
 - UV maps are storage and visualization; geometric smoothness should be enforced on mesh/root neighborhoods.
 
-See `docs/MAINLINE.md` for the current entry points.
+Current planning documents:
+
+- `docs/stage1_confirmed_framework.md`
+- `docs/stage1_module_decisions.md`
+- `docs/anigroom_implementation_plan.md`

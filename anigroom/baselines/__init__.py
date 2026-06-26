@@ -1,0 +1,2 @@
+"""Baseline trainers for AniGroom."""
+

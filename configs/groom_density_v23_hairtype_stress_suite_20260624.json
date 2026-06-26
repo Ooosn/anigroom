@@ -1,0 +1,58 @@
+{
+  "name": "groom_density_v23_hairtype_stress_suite_20260624",
+  "description": "Hair-type stress coverage for the frozen V2.3 reconstruction baseline. This suite keeps the accepted modules enabled and tests whether the current strand-to-Gaussian, root movement, densification, pruning, flow-coherence, and detail-protected smoothness settings remain stable across common groom styles.",
+  "output_root": "_downloads/groom_density_v23_hairtype_stress_suite_20260624",
+  "script": "tools/train_groom_density_densification.py",
+  "common_args": {
+    "init_mode": "projected_curve",
+    "densify_warmup": 160,
+    "densify_interval": 100,
+    "groom_smooth_weight": 0.04,
+    "smooth_detail_protection": 0.65,
+    "flow_coherence_weight": 1.0,
+    "log_interval": 500,
+    "width": 1440,
+    "height": 810
+  },
+  "regular_schedule": {
+    "iterations": 4800,
+    "densify_until": 2200,
+    "max_splits_per_event": 256
+  },
+  "hard_schedule": {
+    "iterations": 6400,
+    "densify_until": 3200,
+    "max_splits_per_event": 384
+  },
+  "extreme_schedule": {
+    "iterations": 7600,
+    "densify_until": 4200,
+    "max_splits_per_event": 448
+  },
+  "cases": [
+    {"style": "tiger_plush", "density": "matted_density", "schedule": "hard"},
+    {"style": "short_plush", "density": "animal_density", "schedule": "regular"},
+    {"style": "fine_undercoat", "density": "animal_density", "schedule": "regular"},
+    {"style": "long_silky", "density": "animal_density", "schedule": "hard"},
+    {"style": "dog_guard", "density": "animal_density", "schedule": "hard"},
+    {"style": "coarse_guard", "density": "prune_islands", "schedule": "hard"},
+    {"style": "wavy", "density": "animal_density", "schedule": "regular"},
+    {"style": "frizzy", "density": "animal_density", "schedule": "hard"},
+    {"style": "clumped", "density": "matted_density", "schedule": "hard"},
+    {"style": "wet_matted", "density": "matted_density", "schedule": "extreme"},
+    {"style": "dirty_tangled", "density": "matted_density", "schedule": "extreme"},
+    {"style": "curly_ringlet", "density": "animal_density", "schedule": "extreme"},
+    {"style": "ringlet_plus_undercoat", "density": "animal_density", "schedule": "extreme"},
+    {"style": "mane_ridge", "density": "animal_density", "schedule": "hard"},
+    {"style": "patchy_length", "density": "prune_islands", "schedule": "hard"},
+    {"style": "cowlick_whorl", "density": "prune_islands", "schedule": "hard"},
+    {"style": "side_parted", "density": "prune_islands", "schedule": "hard"},
+    {"style": "spiky_guard", "density": "matted_density", "schedule": "hard"},
+    {"style": "facial_short_to_long", "density": "prune_islands", "schedule": "hard"}
+  ],
+  "notes": [
+    "This is not a replacement for the frozen baseline. It is a coverage suite for common animal/hair groom families.",
+    "Harder curl, ringlet, wet, and tangled cases use an extreme schedule so densification has enough events and then a long stabilization tail.",
+    "All cases keep the existing accepted modules on; no fallback renderer, no reduced-resolution substitute, and no one-step smoke test."
+  ]
+}

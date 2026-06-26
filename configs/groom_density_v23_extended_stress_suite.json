@@ -1,0 +1,45 @@
+{
+  "name": "groom_density_v23_extended_stress_suite",
+  "description": "Additional stress coverage on top of the fixed V2.3 baseline. This does not replace the baseline; it reuses the accepted modules and longer V2.3 schedules to test harder density/style combinations.",
+  "output_root": "_downloads/groom_density_v23_extended_stress_suite_20260624",
+  "script": "tools/train_groom_density_densification.py",
+  "common_args": {
+    "init_mode": "projected_curve",
+    "densify_warmup": 160,
+    "densify_interval": 80,
+    "groom_smooth_weight": 0.04,
+    "smooth_detail_protection": 0.65,
+    "flow_coherence_weight": 1.0,
+    "log_interval": 500,
+    "width": 1440,
+    "height": 810
+  },
+  "regular_schedule": {
+    "iterations": 4200,
+    "densify_until": 2000,
+    "max_splits_per_event": 256
+  },
+  "hard_schedule": {
+    "iterations": 5200,
+    "densify_until": 2800,
+    "max_splits_per_event": 320
+  },
+  "cases": [
+    {"style": "tiger_plush", "density": "matted_density", "schedule": "hard"},
+    {"style": "tiger_plush", "density": "prune_islands", "schedule": "hard"},
+    {"style": "mixed_animal", "density": "matted_density", "schedule": "hard"},
+    {"style": "dog_guard", "density": "matted_density", "schedule": "hard"},
+    {"style": "coarse_guard", "density": "prune_islands", "schedule": "hard"},
+    {"style": "long_silky", "density": "matted_density", "schedule": "hard"},
+    {"style": "fine_undercoat", "density": "matted_density", "schedule": "regular"},
+    {"style": "short_plush", "density": "prune_islands", "schedule": "regular"},
+    {"style": "cowlick_whorl", "density": "matted_density", "schedule": "hard"},
+    {"style": "side_parted", "density": "matted_density", "schedule": "hard"},
+    {"style": "spiky_guard", "density": "matted_density", "schedule": "hard"},
+    {"style": "facial_short_to_long", "density": "matted_density", "schedule": "hard"}
+  ],
+  "notes": [
+    "All cases keep projected_curve initialization, root movement, gradient-driven densification, flow coherence, groom smoothness, and detail-protected smoothing enabled.",
+    "The purpose is to expose failure modes before white-tiger Stage 1, not to overwrite the fixed V2.3 baseline."
+  ]
+}

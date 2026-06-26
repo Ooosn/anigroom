@@ -8,6 +8,7 @@ MESH_PATH="${MESH_PATH:-${PROJECT_ROOT}/data_sources/neuralfur_official_results/
 ORIENTATION_DIR="${ORIENTATION_DIR:-orientations_2}"
 REQUIRE_ORIENTATION="${REQUIRE_ORIENTATION:-1}"
 REQUIRE_CUDA="${REQUIRE_CUDA:-0}"
+REQUIRE_GSPLAT="${REQUIRE_GSPLAT:-1}"
 
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
@@ -15,11 +16,15 @@ export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 "$PYTHON" - <<'PY'
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import torch
 
 required = ["PIL", "numpy", "xatlas"]
+require_gsplat = os.environ.get("REQUIRE_GSPLAT", "1") != "0"
+if require_gsplat:
+    required.append("gsplat")
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 out = {
     "python": True,
@@ -27,6 +32,7 @@ out = {
     "cuda_available": bool(torch.cuda.is_available()),
     "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
     "missing": missing,
+    "require_gsplat": require_gsplat,
 }
 if torch.cuda.is_available():
     out["cuda_device_name"] = torch.cuda.get_device_name(0)

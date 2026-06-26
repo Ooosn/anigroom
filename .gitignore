@@ -14,18 +14,19 @@ env/
 *.egg-info/
 
 # Local data and generated assets
-data/
-data_sources/
-external/
-refs/
-outputs/
-logs/
-leader_outputs/
-leader_demo_*/
-server_pull/
-_archive/
-_server_inspect/
-_tmp*/
+/data/
+/data_sources/
+/external/
+/refs/
+/outputs/
+/logs/
+/_downloads/
+/leader_outputs/
+/leader_demo_*/
+/server_pull/
+/_archive/
+/_server_inspect/
+/_tmp*/
 *.tar
 *.tar.gz
 *.zip
@@ -60,4 +61,6 @@ desktop.ini
 .idea/
 
 # Local verification pulls
-_stage1_check_*/
+/_stage1_check_*/
+/_baseline_*/
+/_stage1_prune_mechanism_probe_*/

@@ -1,0 +1,27 @@
+{
+  "name": "white_tiger_neuralfur_mixed_release_alignment",
+  "status": "fixed_visual_alignment",
+  "reason": "The local white tiger processed folder contains cameras/images only, while the available furless mesh is from the NeuralFur official results folder. The complete GaussianHaircut-format directory with projection.npy, furless.obj, neus_lr.obj, scale_035.pickle, tangent, annotation, and eye files is not present locally. The mesh-to-camera transform below is the visually verified white-tiger alignment used for all subsequent projection and visualization.",
+  "official_expected_files": [
+    "projection.npy",
+    "furless.obj",
+    "neus_lr.obj",
+    "tan_furless.npy",
+    "annotations_furless_reshaped2.json",
+    "eyes.ply",
+    "scale.pickle"
+  ],
+  "data_root": "data/neuralfur_work/whiteTiger_processed/roaringwalk",
+  "mesh_path": "data_sources/neuralfur_official_results/whiteTiger/furless_reshaped.obj",
+  "uv_atlas": "data_sources/neuralfur_official_results/whiteTiger/furless_reshaped.xatlas_uv.npz",
+  "camera_source": "projection",
+  "projection_file": "cameras.npz",
+  "mesh_to_camera_initial": {
+    "scale": 1.28,
+    "translation": [0.0, 0.32, 0.02]
+  },
+  "validation": {
+    "must_pass_before_backprojection": true,
+    "diagnostic": "mask and mesh projection overlay must be checked before white tiger Stage 1 training"
+  }
+}
