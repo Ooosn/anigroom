@@ -95,6 +95,30 @@ The first pixel-to-root version also fails. It collects high residual pixels and
 
 This exposes a second issue in the split placement path. `select_densify_parents` chooses parents by score, but `propose_split_children` then places children by local surface emptiness around each parent. It does not receive the image-space residual pixel positions or a residual-directed target. Therefore even when evidence is computed from under-covered pixels, the new roots are not explicitly placed toward those pixels. The current densification is parent-centric, not hole-centric.
 
+A default-off target-placement probe was then added. It keeps the parent selection unchanged, but when `--densify-target-placement-weight > 0`, high residual pixels are unprojected through mesh depth into local surface targets. Split candidates are scored by both local surface spacing and distance to the accumulated target for that parent.
+
+Short probe, 32 iterations, densify at `10/20/30`, same full-resolution view09 setup:
+
+```text
+pixel-to-root residual, target placement OFF:
+  final composite PSNR: 17.552
+  final mask L1: 0.1061
+  selected/global contribution ratios: 1.841, 1.837, 1.826
+  selected/global visible ratios:      1.831, 1.820, 1.803
+
+pixel-to-root residual, target placement ON, weight=2.0:
+  final composite PSNR: 17.683
+  final mask L1: 0.1045
+  selected/global contribution ratios: 1.841, 1.843, 1.828
+  selected/global visible ratios:      1.831, 1.820, 1.799
+  child target-distance improvements:
+    iter 10: parent 0.005254 -> child 0.002169
+    iter 20: parent 0.005604 -> child 0.001877
+    iter 30: parent 0.005792 -> child 0.001946
+```
+
+This proves the placement half of the repair is real: children are being moved much closer to the residual surface targets, and the short run improves slightly. It also proves the repair is incomplete: parent selection remains high-visible/high-contribution because the same selected roots are still chosen before placement. The next step is not more scalar weighting; it is to change the candidate generation/selection so holes can nominate nearby surface roots/faces directly, instead of always starting from roots that already render strongly.
+
 ## Current Root Cause Hypothesis
 
 The current failure is a competition between long-strand fitting and densification:
@@ -122,7 +146,7 @@ This does not mean adaptive segments are wrong; the renderer needs enough segmen
 Current diagnosis split:
 
 - Initial trigger: densification evidence is still concentrated on already highly visible/contributing roots, even with root-pixel or pooled residual.
-- Placement trigger: split placement is not residual-directed. It only samples topology neighborhoods around selected parents and chooses locally empty candidates, so it cannot guarantee that children fill image-space holes.
+- Placement trigger: the original split placement is not residual-directed. It only samples topology neighborhoods around selected parents and chooses locally empty candidates, so it cannot guarantee that children fill image-space holes. The target-placement probe partially fixes this by moving child candidates toward unprojected residual targets, but it does not fix biased parent selection.
 - Later amplifier: pruning and absolute sample-count lifecycle evidence favor roots with more visible samples; once some roots grow longer/wider, they become structurally harder to remove and can keep painting larger regions.
 - Appearance amplifier: length, root width, and opacity are still available as faster ways to reduce image loss than adding new local roots.
 
@@ -137,7 +161,8 @@ The next changes should be tested one at a time on a diagnostic branch.
    - The next version should separate under-coverage evidence from already-painted residual: high `relu(mask - alpha)` should identify holes, while high contribution plus high residual should be treated as a suspicious long-painting signal, not automatically as a densify target.
    - The evidence should favor roots near under-covered regions, not roots already painting strongly.
    - Pixel-to-root evidence was tested and is not enough by itself. It still selects high-visible/high-contribution parents when the placement step remains parent-centric.
-   - The next valid repair is hole-directed densification: keep pixel evidence as a set of image-space targets, assign targets to nearby visible surface roots/faces, and score candidate child positions by projected distance to those targets plus surface spacing. This changes both parent selection and child placement; changing only the scalar parent score is insufficient.
+   - Target-directed child placement was tested and works as a partial repair: it moves inserted children closer to residual surface targets and slightly improves the short probe.
+   - The next valid repair is fully hole-directed densification: keep pixel evidence as a set of image-space targets, assign targets to nearby visible surface roots/faces, and let targets nominate parent/candidate regions directly. This changes both parent selection and child placement; changing only the scalar parent score is insufficient.
 
 2. Delay or soften true pruning.
    - Parent replacement during split is expected.

@@ -323,6 +323,8 @@ def propose_split_children(
     candidate_rings: int = 3,
     candidate_face_count: int = 32,
     min_child_distance: float = 0.0,
+    child_target_points: torch.Tensor | None = None,
+    target_weight: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Place split children by choosing locally emptier surface candidates.
 
@@ -375,7 +377,27 @@ def propose_split_children(
             closest_flat[begin:end] = torch.min(dist, dim=-1).values
         too_close = closest_flat.view(candidate_points.shape[0], candidate_points.shape[1]) < float(min_child_distance)
         local_distance = local_distance.masked_fill(too_close, -torch.inf)
-    selected_ids = torch.topk(local_distance, k=min(children_per_parent, candidate_bary.shape[1]), largest=True, dim=-1).indices
+    placement_score = local_distance
+    if child_target_points is not None and float(target_weight) > 0.0:
+        if child_target_points.shape != state.points.shape:
+            raise ValueError("child_target_points must match state.points shape")
+        parent_targets = child_target_points[parent_indices].to(device=state.points.device, dtype=state.points.dtype)
+        target_valid = torch.isfinite(parent_targets).all(dim=-1)
+        if bool(target_valid.any()):
+            target_distance = torch.linalg.norm(candidate_points - parent_targets[:, None, :], dim=-1)
+            finite_local = torch.isfinite(local_distance)
+            local_min = local_distance.masked_fill(~finite_local, torch.inf).amin(dim=1, keepdim=True)
+            local_max = local_distance.masked_fill(~finite_local, -torch.inf).amax(dim=1, keepdim=True)
+            local_range = (local_max - local_min).clamp_min(EPS)
+            spacing_score = (local_distance - local_min) / local_range
+            target_min = target_distance.amin(dim=1, keepdim=True)
+            target_max = target_distance.amax(dim=1, keepdim=True)
+            target_range = (target_max - target_min).clamp_min(EPS)
+            target_score = 1.0 - (target_distance - target_min) / target_range
+            combined = spacing_score + float(target_weight) * target_score
+            combined = combined.masked_fill(~finite_local, -torch.inf)
+            placement_score = torch.where(target_valid[:, None], combined, local_distance)
+    selected_ids = torch.topk(placement_score, k=min(children_per_parent, candidate_bary.shape[1]), largest=True, dim=-1).indices
     selected = torch.gather(candidate_bary, 1, selected_ids[:, :, None].expand(-1, -1, 3))
     selected_faces = torch.gather(candidate_faces, 1, selected_ids)
     for child_idx in range(selected.shape[1]):
@@ -415,6 +437,8 @@ def propose_structure_update(
     *,
     vertices: torch.Tensor | None = None,
     faces: torch.Tensor | None = None,
+    child_target_points: torch.Tensor | None = None,
+    child_target_weight: float = 0.0,
 ) -> RootStructureUpdate:
     parents, scores = select_densify_parents(stats, densify)
     child_parent_indices, new_face_ids, new_barycentric = propose_split_children(
@@ -428,6 +452,8 @@ def propose_structure_update(
         candidate_rings=densify.candidate_rings,
         candidate_face_count=densify.candidate_face_count,
         min_child_distance=densify.min_child_distance,
+        child_target_points=child_target_points,
+        target_weight=float(child_target_weight),
     )
     prune_mask = select_prune_mask(stats, prune)
     if densify.replace_parent and parents.numel() > 0:

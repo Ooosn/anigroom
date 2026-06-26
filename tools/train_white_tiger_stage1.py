@@ -726,6 +726,7 @@ class Stage1Config:
     densify_pixel_evidence_root_k: int = 4
     densify_pixel_evidence_min: float = 0.02
     densify_pixel_evidence_chunk: int = 512
+    densify_target_placement_weight: float = 0.0
     lifecycle_score_mode: str = "raw"
     max_splits_per_event: int = 256
     split_children_per_parent: int = 2
@@ -1135,7 +1136,7 @@ def root_projected_residual(
 
 
 @torch.no_grad()
-def pixel_to_root_residual(
+def pixel_to_root_evidence(
     model: WhiteTigerStage1Model,
     roots_local: torch.Tensor,
     residual_image: torch.Tensor,
@@ -1143,7 +1144,7 @@ def pixel_to_root_residual(
     k: torch.Tensor,
     mesh_depth: MeshDepthResult,
     config: Stage1Config,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     scale = torch.exp(model.log_scale.detach()).view(1, 1)
     roots = roots_local.detach() * scale + model.translation.detach().view(1, 3)
     root_xy, root_depth = project_points(roots, viewmat, k)
@@ -1165,39 +1166,82 @@ def pixel_to_root_residual(
     visible_ids = torch.nonzero(root_visible, as_tuple=False).reshape(-1)
     residual = torch.zeros((int(root_xy.shape[0]), 1), device=residual_image.device, dtype=residual_image.dtype)
     norm = torch.zeros_like(residual)
+    target_sum = torch.zeros((int(root_xy.shape[0]), 3), device=residual_image.device, dtype=residual_image.dtype)
+    target_weight = torch.zeros_like(residual)
+    invalid_targets = torch.full_like(target_sum, torch.nan)
     if int(visible_ids.numel()) == 0:
-        return residual
+        return residual, invalid_targets, target_weight
 
     flat = residual_image[..., 0].detach().reshape(-1)
     topk = min(max(1, int(config.densify_pixel_evidence_topk)), int(flat.numel()))
     values, flat_ids = torch.topk(flat, k=topk, largest=True, sorted=False)
     keep = values >= float(config.densify_pixel_evidence_min)
     if not bool(keep.any()):
-        return residual
+        return residual, invalid_targets, target_weight
     values = values[keep]
     flat_ids = flat_ids[keep]
+    pixel_depth = mesh_depth.depth.reshape(-1)[flat_ids].to(dtype=residual_image.dtype)
+    depth_valid = torch.isfinite(pixel_depth) & (pixel_depth > 1.0e-6)
+    if not bool(depth_valid.any()):
+        return residual, invalid_targets, target_weight
+    values = values[depth_valid]
+    flat_ids = flat_ids[depth_valid]
+    pixel_depth = pixel_depth[depth_valid]
     pixel_xy = torch.stack(
         [(flat_ids % width).to(dtype=residual_image.dtype), (flat_ids // width).to(dtype=residual_image.dtype)],
         dim=-1,
     )
+    cam_x = (pixel_xy[:, 0] - k[0, 2].to(dtype=residual_image.dtype)) * pixel_depth / k[0, 0].to(dtype=residual_image.dtype)
+    cam_y = (pixel_xy[:, 1] - k[1, 2].to(dtype=residual_image.dtype)) * pixel_depth / k[1, 1].to(dtype=residual_image.dtype)
+    cam = torch.stack([cam_x, cam_y, pixel_depth], dim=-1)
+    rot = viewmat[:3, :3].to(dtype=residual_image.dtype)
+    trans = viewmat[:3, 3].to(dtype=residual_image.dtype)
+    world = (cam - trans.view(1, 3)) @ rot
+    target_local = (world - model.translation.detach().to(dtype=residual_image.dtype).view(1, 3)) / scale.to(dtype=residual_image.dtype)
 
     visible_xy = root_xy[visible_ids].to(dtype=residual_image.dtype)
     root_k = min(max(1, int(config.densify_pixel_evidence_root_k)), int(visible_ids.numel()))
     chunk = max(1, int(config.densify_pixel_evidence_chunk))
     residual_flat = residual.reshape(-1)
     norm_flat = norm.reshape(-1)
+    target_weight_flat = target_weight.reshape(-1)
     for start in range(0, int(pixel_xy.shape[0]), chunk):
         end = min(start + chunk, int(pixel_xy.shape[0]))
         px = pixel_xy[start:end]
         val = values[start:end].to(dtype=residual_image.dtype).reshape(-1, 1)
+        target = target_local[start:end]
         dist2 = (px[:, None, :] - visible_xy[None, :, :]).square().sum(dim=-1)
         nn_dist2, nn_local = torch.topk(dist2, k=root_k, largest=False, sorted=False)
         nn_root_ids = visible_ids[nn_local]
         weights = 1.0 / (nn_dist2 + 4.0)
         weights = weights / torch.clamp(weights.sum(dim=1, keepdim=True), min=1.0e-8)
-        residual_flat.scatter_add_(0, nn_root_ids.reshape(-1), (val * weights).reshape(-1))
+        weighted = val * weights
+        residual_flat.scatter_add_(0, nn_root_ids.reshape(-1), weighted.reshape(-1))
         norm_flat.scatter_add_(0, nn_root_ids.reshape(-1), weights.reshape(-1))
-    return residual / torch.clamp(norm, min=1.0)
+        target_weight_flat.scatter_add_(0, nn_root_ids.reshape(-1), weighted.reshape(-1))
+        target_sum.scatter_add_(
+            0,
+            nn_root_ids.reshape(-1, 1).expand(-1, 3),
+            (target[:, None, :] * weighted[:, :, None]).reshape(-1, 3),
+        )
+    averaged_residual = residual / torch.clamp(norm, min=1.0)
+    averaged_target = target_sum / torch.clamp(target_weight, min=1.0e-8)
+    averaged_target = torch.where(target_weight > 0.0, averaged_target, invalid_targets)
+    return averaged_residual, averaged_target, target_weight
+
+
+@torch.no_grad()
+def pixel_to_root_residual(
+    model: WhiteTigerStage1Model,
+    roots_local: torch.Tensor,
+    residual_image: torch.Tensor,
+    viewmat: torch.Tensor,
+    k: torch.Tensor,
+    mesh_depth: MeshDepthResult,
+    config: Stage1Config,
+) -> torch.Tensor:
+    residual, _, _ = pixel_to_root_evidence(model, roots_local, residual_image, viewmat, k, mesh_depth, config)
+    return residual
 
 
 @torch.no_grad()
@@ -1605,6 +1649,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         torch.randint(len(train_indices), (int(start_iteration),), generator=generator)
     optimizer = make_stage1_optimizer(model, config)
     root_accum = RootStatsWindow(int(model.face_ids.shape[0]), device)
+    root_target_sum = torch.zeros((int(model.face_ids.shape[0]), 3), device=device)
+    root_target_weight = torch.zeros((int(model.face_ids.shape[0]), 1), device=device)
     lifecycle_history: list[dict[str, float | int]] = []
 
     log_path = output_dir / "metrics.jsonl"
@@ -1649,7 +1695,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             if float(config.densify_residual_weight) > 0.0:
                 residual_image = densification_residual_image(pred_fixed, target_fixed, alpha, mask, config)
                 if str(config.densify_residual_mode) == "pixel_to_root":
-                    residual_per_root = pixel_to_root_residual(
+                    residual_per_root, target_local, target_weight = pixel_to_root_evidence(
                         model,
                         roots_local_for_grad,
                         residual_image,
@@ -1658,6 +1704,10 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         mesh_depth,
                         config,
                     )
+                    if float(config.densify_target_placement_weight) > 0.0:
+                        valid_target = torch.isfinite(target_local).all(dim=-1, keepdim=True) & (target_weight > 0.0)
+                        root_target_sum += torch.where(valid_target, target_local * target_weight, torch.zeros_like(root_target_sum))
+                        root_target_weight += torch.where(valid_target, target_weight, torch.zeros_like(root_target_weight))
                 else:
                     residual_per_root = root_projected_residual(
                         model,
@@ -1722,6 +1772,14 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             if should_densify or should_prune:
                 stats = root_accum.to_stats()
                 root_count_before = int(model.face_ids.shape[0])
+                child_target_points = None
+                if should_densify and float(config.densify_target_placement_weight) > 0.0:
+                    child_target_points = root_target_sum / torch.clamp(root_target_weight, min=1.0e-8)
+                    child_target_points = torch.where(
+                        root_target_weight > 0.0,
+                        child_target_points,
+                        torch.full_like(child_target_points, torch.nan),
+                    )
                 densify_cfg = DensifyConfig(
                     grad_threshold=float(config.densify_score_threshold) if should_densify else float("inf"),
                     visibility_threshold=1.0,
@@ -1747,6 +1805,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     prune_cfg,
                     vertices=model.vertices,
                     faces=model.faces,
+                    child_target_points=child_target_points,
+                    child_target_weight=float(config.densify_target_placement_weight) if should_densify else 0.0,
                 )
                 if should_densify and float(config.densify_min_contribution) > 0.0 and update.parent_indices.numel() > 0:
                     contribution = stats.gaussian_contrib_sum.reshape(-1)
@@ -1762,9 +1822,26 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         new_prune = torch.zeros_like(update.prune_mask)
                         if should_prune:
                             new_prune |= update.prune_mask
-                            new_prune[original_parents] = False
+                        new_prune[original_parents] = False
                         new_prune[kept_parents] = True
                         update.prune_mask = new_prune
+                target_placement_record: dict[str, float | int] = {}
+                if child_target_points is not None and update.new_barycentric.numel() > 0:
+                    current_state = model.lifecycle_state()
+                    target_for_child = child_target_points[update.child_parent_indices]
+                    target_valid = torch.isfinite(target_for_child).all(dim=-1)
+                    if bool(target_valid.any()):
+                        tri = model.vertices[model.faces[update.new_face_ids]]
+                        child_points = (tri * update.new_barycentric[:, :, None]).sum(dim=1)
+                        parent_points = current_state.points[update.child_parent_indices]
+                        parent_dist = torch.linalg.norm(parent_points[target_valid] - target_for_child[target_valid], dim=-1)
+                        child_dist = torch.linalg.norm(child_points[target_valid] - target_for_child[target_valid], dim=-1)
+                        target_placement_record = {
+                            "targeted_child_count": int(target_valid.sum().detach().cpu()),
+                            "parent_target_distance_mean": float(parent_dist.mean().detach().cpu()),
+                            "child_target_distance_mean": float(child_dist.mean().detach().cpu()),
+                            "target_distance_improvement_mean": float((parent_dist - child_dist).mean().detach().cpu()),
+                        }
                 changed = update.new_barycentric.numel() > 0 or bool(update.prune_mask.any())
                 lifecycle_record = {
                     "iteration": iteration,
@@ -1783,6 +1860,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         ),
                     },
                 }
+                if target_placement_record:
+                    lifecycle_record["target_placement"] = target_placement_record
                 if changed:
                     result = model.apply_structure_update(update)
                     graph_edges = rebuild_graph_edges(model, k=8)
@@ -1795,6 +1874,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 log.flush()
                 print(json.dumps({"lifecycle": lifecycle_record}), flush=True)
                 root_accum = RootStatsWindow(int(model.face_ids.shape[0]), device)
+                root_target_sum = torch.zeros((int(model.face_ids.shape[0]), 3), device=device)
+                root_target_weight = torch.zeros((int(model.face_ids.shape[0]), 1), device=device)
 
             if iteration == 1 or iteration % config.eval_every == 0 or iteration == config.iterations:
                 train_eval = evaluate(model, image_paths, mask_paths, viewmats, ks, train_indices, width, height, config, metric_computer, device, mesh_depth_ctx=mesh_depth_ctx)
@@ -2021,6 +2102,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--densify-pixel-evidence-root-k", type=int, default=4)
     parser.add_argument("--densify-pixel-evidence-min", type=float, default=0.02)
     parser.add_argument("--densify-pixel-evidence-chunk", type=int, default=512)
+    parser.add_argument("--densify-target-placement-weight", type=float, default=0.0)
     parser.add_argument("--lifecycle-score-mode", choices=("raw", "sample_normalized"), default="raw")
     parser.add_argument("--max-splits-per-event", type=int, required=True)
     parser.add_argument("--split-children-per-parent", type=int, required=True)
@@ -2106,6 +2188,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         densify_pixel_evidence_root_k=args.densify_pixel_evidence_root_k,
         densify_pixel_evidence_min=args.densify_pixel_evidence_min,
         densify_pixel_evidence_chunk=args.densify_pixel_evidence_chunk,
+        densify_target_placement_weight=args.densify_target_placement_weight,
         lifecycle_score_mode=args.lifecycle_score_mode,
         max_splits_per_event=args.max_splits_per_event,
         split_children_per_parent=args.split_children_per_parent,
