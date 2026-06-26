@@ -620,3 +620,103 @@ Candidate stage policy:
    orientation / smooth optimization.
 3. Prune phase: only after a full evidence window; prune should not run during
    the initial coverage-building probe.
+
+## 2026-06-26 Current-Code Formal Isolation
+
+The previous section mixed short lifecycle probes with an older 1200-iteration
+baseline. That was not enough to decide what should enter the mainline, because
+the older run was produced before the latest logging / local-child changes and
+does not expose the same groom diagnostics. I therefore re-ran the formal
+single-view `view09` setting with the current code.
+
+All three runs below use the same formal base settings:
+
+- `root_count = 20000`
+- `min_segments / max_segments = 12 / 44`
+- `child_count = 4`
+- `train_views = test_views = 9`
+- full-resolution `1920 x 1080`
+- no early-capacity loss
+- no overpaint-capacity loss
+- pruning disabled for the run
+
+The only changed variables are local child support, split spacing, and
+densification schedule.
+
+```text
+current-code formal baseline:
+  local child color/opacity: off
+  split_min_child_distance: 0.0
+  densify: warmup 1000, interval 500, until 1000
+  composite PSNR: 32.107
+  raw PSNR:       31.210
+  mask L1:        0.006021
+  roots:          20128
+  drag candidates at final lifecycle: 570
+  drag need share: 0.0717
+
+local child color + opacity, same late densification:
+  local child color/opacity: on
+  split_min_child_distance: 0.003
+  densify: warmup 1000, interval 500, until 1000
+  composite PSNR: 32.904
+  raw PSNR:       31.835
+  mask L1:        0.005728
+  roots:          20128
+  drag candidates at final lifecycle: 470
+  drag need share: 0.0516
+
+local child color + opacity, early repeated densification:
+  local child color/opacity: on
+  split_min_child_distance: 0.003
+  densify: warmup 200, interval 100, until 1000
+  composite PSNR: 33.852
+  raw PSNR:       32.501
+  mask L1:        0.004346
+  roots:          21152
+  drag candidates at final lifecycle: 355
+  drag need share: 0.0331
+```
+
+Comparison figures:
+
+```text
+D:\petsgaussianhair\_downloads\white_tiger_formal_current_vs_fix_zoom_1200.png
+D:\petsgaussianhair\_downloads\white_tiger_formal_lifecycle_fix_comparison_1200.png
+```
+
+Conclusion:
+
+- The strongest confirmed cause is **late densification**. With the previous
+  formal schedule, the model first learns to fill holes by growing wider,
+  longer, high-opacity strands, and densification only runs at iteration 1000.
+  By then the image residual is already mostly explained by those strokes.
+- Local child color/opacity and smaller split spacing are real positive changes:
+  under the same late-densification schedule they improve composite PSNR by
+  `+0.797 dB` and reduce drag candidates from `570` to `470`.
+- However, local child support alone is not enough. The decisive improvement
+  comes when densification is allowed to run while coverage is still being
+  built. Moving from one late event to repeated events from iteration 200 to
+  1000 improves the current-code formal baseline by `+1.745 dB`, reduces mask
+  error, and cuts drag candidates from `570` to `355`.
+- The artifact is therefore not a pure color bug and not a pure shape-prior
+  problem. It is a lifecycle problem: **local coverage must be created before
+  strand capacity becomes the easiest way to explain missing pixels.**
+- The remaining issue is not fully solved. Width and opacity are still high and
+  still correlate with contribution, so the next repair should focus on a
+  capacity-aware coverage phase rather than a residual-only penalty. Early
+  capacity staging is still only a candidate; in short probes it lowered
+  width/opacity but did not beat the no-staging denser-insertion variant.
+
+Mainline recommendation after this isolation:
+
+1. Promote local child color and opacity support into the formal Stage 1
+   candidate path.
+2. Use residual/alpha-deficit driven `target_direct` insertion with a real
+   surface spacing rule (`split_min_child_distance = 0.003` for this white tiger
+   view09 scale).
+3. Start densification early enough to compete with width/opacity growth
+   (`warmup 200`, `interval 100`, `until 1000` worked in the 1200-iteration
+   formal single-view run).
+4. Keep early-capacity and overpaint-capacity losses default-off until a longer
+   follow-up proves they improve both PSNR and visual strand quality.
