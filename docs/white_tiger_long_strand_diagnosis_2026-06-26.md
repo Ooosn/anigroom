@@ -532,3 +532,91 @@ Next valid repair candidates:
 3. Image-footprint regularization: penalize high-opacity, high-footprint roots
    even when residual is already low, but only during the early coverage-building
    stage to avoid suppressing valid final fur.
+
+## 2026-06-26 Early Capacity Staging + Denser Root Insertion
+
+The previous overpaint probe showed that residual-conditioned capacity penalties
+are too late: once a wide/opaque strand has filled a hole, residual becomes low
+and the artifact is no longer visible to a residual-only penalty.
+
+A default-off early staging loss was added:
+
+```text
+--early-capacity-weight
+--early-capacity-until
+--early-capacity-length-target
+--early-capacity-width-target
+--early-capacity-opacity-target
+```
+
+This loss is active only before `--early-capacity-until`. It directly penalizes
+excess length, width, and opacity during coverage-building, so densification gets
+the first chance to explain holes. If the loss is enabled without an explicit
+`--early-capacity-until`, training raises instead of silently choosing a schedule.
+
+Same 120-iteration single-view probe, local child color and opacity enabled:
+
+```text
+baseline spacing 0.004:
+  composite PSNR: 25.615
+  raw PSNR:       25.447
+  roots:          21929
+  p95 width:      0.00032390
+  p95 opacity:    0.887567
+
+local child color + opacity, spacing 0.004:
+  composite PSNR: 26.758
+  raw PSNR:       26.514
+  roots:          21901
+  p95 width:      0.00032149
+  p95 opacity:    0.886510
+
+early capacity, spacing 0.004:
+  composite PSNR: 26.685
+  raw PSNR:       26.444
+  roots:          21924
+  p95 width:      0.00030525
+  p95 opacity:    0.850130
+
+early capacity, spacing 0.003:
+  composite PSNR: 26.964
+  raw PSNR:       26.707
+  roots:          22665
+  p95 width:      0.00030350
+  p95 opacity:    0.849702
+```
+
+Comparison crop:
+
+```text
+D:\petsgaussianhair\_downloads\white_tiger_capacity_spacing_diagnosis_crop_120iter.png
+```
+
+Conclusion:
+
+- Early capacity staging alone reduces width/opacity, but lowers PSNR when root
+  insertion remains too sparse. That confirms the loss is not a standalone
+  repair.
+- Combining early capacity staging with denser insertion (`split_min_child_distance
+  = 0.003`) improves the 120-iteration probe from 26.758 to 26.964 composite
+  PSNR. Root count rises from about 21.9k to 22.7k.
+- This supports the current root cause model: long streaks come from a
+  competition between local root coverage and per-root capacity. If roots are not
+  inserted densely enough, width/opacity become the cheaper solution. If root
+  insertion is allowed to fill local holes while capacity growth is staged, the
+  fit improves.
+- The remaining drag metrics are not fully solved: width/opacity still correlate
+  strongly with contribution per sample. The next serious repair should turn
+  this into a staged lifecycle policy, not a one-off regularizer:
+  densify with alpha-deficit evidence and small enough spacing first, keep
+  width/opacity constrained during this phase, then release capacity after
+  coverage stabilizes.
+
+Candidate stage policy:
+
+1. Coverage-building phase: `pixel_to_root` residual with alpha deficit only,
+   `target_direct` insertion, smaller split spacing, early capacity staging on.
+2. Detail phase: stop inserting roots, release capacity staging, continue RGB /
+   orientation / smooth optimization.
+3. Prune phase: only after a full evidence window; prune should not run during
+   the initial coverage-building probe.

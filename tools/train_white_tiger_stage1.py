@@ -547,6 +547,22 @@ def overpaint_capacity_loss(
     return (weights * penalty).sum() / weights.sum().clamp_min(1.0)
 
 
+def early_capacity_staging_loss(
+    field: GroomParameterField,
+    *,
+    length_target: float,
+    width_target: float,
+    opacity_target: float,
+) -> torch.Tensor:
+    """Keep width/opacity from solving coverage before new roots can be inserted."""
+
+    groom = field.decode()
+    length_excess = torch.relu((groom.length.reshape(-1) - float(length_target)) / 0.025)
+    width_excess = torch.relu(torch.log(groom.root_width.reshape(-1).clamp_min(1.0e-7) / float(width_target)))
+    opacity_excess = torch.relu((groom.opacity.reshape(-1) - float(opacity_target)) / max(1.0 - float(opacity_target), 1.0e-6))
+    return 0.35 * length_excess.square().mean() + width_excess.square().mean() + 0.8 * opacity_excess.square().mean()
+
+
 def strand_shape_consistency_loss(
     strands: torch.Tensor,
     edges: torch.Tensor,
@@ -838,6 +854,11 @@ class Stage1Config:
     overpaint_length_target: float = 0.075
     overpaint_width_target: float = 0.00024
     overpaint_opacity_target: float = 0.82
+    early_capacity_weight: float = 0.0
+    early_capacity_until: int = 0
+    early_capacity_length_target: float = 0.075
+    early_capacity_width_target: float = 0.00024
+    early_capacity_opacity_target: float = 0.82
     root_move_reg_weight: float = 0.003
     orientation_min_confidence: float = 0.08
     compute_lpips: bool = False
@@ -2017,6 +2038,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
     root_target_sum = torch.zeros((int(model.face_ids.shape[0]), 3), device=device)
     root_target_weight = torch.zeros((int(model.face_ids.shape[0]), 1), device=device)
     lifecycle_history: list[dict[str, float | int]] = []
+    if float(config.early_capacity_weight) > 0.0 and int(config.early_capacity_until) <= 0:
+        raise RuntimeError("--early-capacity-weight requires explicit --early-capacity-until")
 
     log_path = output_dir / "metrics.jsonl"
     start = time.time()
@@ -2115,6 +2138,13 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 width_target=config.overpaint_width_target,
                 opacity_target=config.overpaint_opacity_target,
             )
+            early_capacity_active = float(config.early_capacity_weight) > 0.0 and iteration <= int(config.early_capacity_until)
+            early_capacity_loss = early_capacity_staging_loss(
+                model.groom,
+                length_target=config.early_capacity_length_target,
+                width_target=config.early_capacity_width_target,
+                opacity_target=config.early_capacity_opacity_target,
+            )
             _, _, roots_local = model.roots_and_normals()
             root_move_loss = torch.mean((roots_local - model.anchor_local).square())
             loss = (
@@ -2126,6 +2156,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.strand_shape_smooth_weight * strand_shape_loss
                 + config.shape_prior_weight * shape_prior_loss
                 + config.overpaint_capacity_weight * overpaint_loss
+                + (config.early_capacity_weight if early_capacity_active else 0.0) * early_capacity_loss
                 + config.root_move_reg_weight * root_move_loss
             )
 
@@ -2305,6 +2336,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "strand_shape_smooth_loss": float(strand_shape_loss.detach().cpu()),
                     "shape_prior_loss": float(shape_prior_loss.detach().cpu()),
                     "overpaint_capacity_loss": float(overpaint_loss.detach().cpu()),
+                    "early_capacity_loss": float(early_capacity_loss.detach().cpu()),
+                    "early_capacity_active": bool(early_capacity_active),
                     "root_move_loss": float(root_move_loss.detach().cpu()),
                     "train": train_eval,
                     "test": test_eval,
@@ -2493,6 +2526,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overpaint-length-target", type=float, default=0.075)
     parser.add_argument("--overpaint-width-target", type=float, default=0.00024)
     parser.add_argument("--overpaint-opacity-target", type=float, default=0.82)
+    parser.add_argument("--early-capacity-weight", type=float, default=0.0)
+    parser.add_argument("--early-capacity-until", type=int, default=0)
+    parser.add_argument("--early-capacity-length-target", type=float, default=0.075)
+    parser.add_argument("--early-capacity-width-target", type=float, default=0.00024)
+    parser.add_argument("--early-capacity-opacity-target", type=float, default=0.82)
     parser.add_argument("--root-move-reg-weight", type=float, default=0.003)
     parser.add_argument("--orientation-min-confidence", type=float, default=0.08)
     parser.add_argument("--compute-lpips", action="store_true")
@@ -2590,6 +2628,11 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         overpaint_length_target=args.overpaint_length_target,
         overpaint_width_target=args.overpaint_width_target,
         overpaint_opacity_target=args.overpaint_opacity_target,
+        early_capacity_weight=args.early_capacity_weight,
+        early_capacity_until=args.early_capacity_until,
+        early_capacity_length_target=args.early_capacity_length_target,
+        early_capacity_width_target=args.early_capacity_width_target,
+        early_capacity_opacity_target=args.early_capacity_opacity_target,
         root_move_reg_weight=args.root_move_reg_weight,
         orientation_min_confidence=args.orientation_min_confidence,
         compute_lpips=args.compute_lpips,
