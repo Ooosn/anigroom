@@ -163,6 +163,79 @@ This is the clearest diagnostic so far. Direct surface insertion is better than 
 
 This is still not the final fix. Direct insertion currently uses top residual pixels directly, with only mesh-depth visibility and nearest-root attribute inheritance. Before it becomes a formal training path, it needs proper deduplication/diversity on the surface, a stable spacing rule, and a prune schedule that does not immediately remove useful low-contribution newborn roots. But it identifies the real direction: hole densification should be residual-pixel/mesh-face driven, not parent-root driven.
 
+A surface-spacing version of direct insertion was then tested. It keeps the residual-pixel-to-mesh-face path, but rejects new roots that are too close to existing roots or to already accepted new roots in the same event. This is controlled by `--split-min-child-distance`; the default value remains `0`, so the baseline path is unchanged unless the diagnostic flag is explicitly set.
+
+Short probe, 32 iterations:
+
+```text
+direct insertion, no surface spacing:
+  final composite PSNR: 17.734
+  final mask L1: 0.1025
+  roots: 21536
+
+direct insertion, surface spacing = 0.004:
+  final composite PSNR: 18.040
+  final mask L1: 0.0964
+  roots: 21482
+  accepted/rejected direct targets:
+    iter 10: insert 512, valid 3631, reject existing 307, reject new 1606
+    iter 20: insert 512, valid 2161, reject existing 192, reject new 1075
+    iter 30: insert 458, valid 1845, reject existing 238, reject new 1149
+```
+
+This is an important result: the spaced version inserts fewer roots by the third event, but improves both image and mask metrics. The improvement is therefore not just "more roots"; it is better-placed roots. Surface diversity is part of the fix.
+
+Longer 120-iteration probe with direct insertion and `0.004` spacing:
+
+```text
+iter 40:  composite PSNR 18.583, mask L1 0.0928, length p95 0.0681, width p95 0.000207, opacity p95 0.804
+iter 80:  composite PSNR 22.975, mask L1 0.0532, length p95 0.0777, width p95 0.000263, opacity p95 0.852
+iter 120: composite PSNR 25.587, mask L1 0.0324, length p95 0.0845, width p95 0.000324, opacity p95 0.888
+
+root lifecycle:
+  20: 20000 -> 20512, insert 512
+  40: 20512 -> 21024, insert 512
+  60: 21024 -> 21384, insert 360
+  80: 21384 -> 21672, insert 288
+ 100: 21672 -> 21902, insert 230
+```
+
+This confirms two separate effects:
+
+- the coverage side improves: mask error drops steadily and direct insertion naturally slows down as the valid spaced residual targets become fewer;
+- the long-streak side is still present: length, width, and opacity keep increasing, so better densification alone does not remove long opaque strokes.
+
+Two negative controls were also run to avoid guessing:
+
+```text
+direct spacing 0.004, normal priors:
+  iter 120 composite PSNR: 25.587
+  mask L1: 0.0324
+  p95 length/width/opacity: 0.0845 / 0.000324 / 0.888
+
+stronger smooth + shape priors:
+  iter 120 composite PSNR: 25.471
+  mask L1: 0.0325
+  p95 length/width/opacity: 0.0827 / 0.000324 / 0.888
+
+hard early stroke-capacity freeze to iter 80:
+  iter 120 composite PSNR: 23.157
+  mask L1: 0.0822
+  p95 length/width/opacity: 0.0680 / 0.000206 / 0.802
+
+soft early stroke-capacity scale 0.25 to iter 80:
+  iter 120 composite PSNR: 25.564
+  mask L1: 0.0336
+  p95 length/width/opacity: 0.0844 / 0.000323 / 0.886
+```
+
+These controls rule out two easy explanations:
+
+- simply increasing smooth/shape prior is not enough; it barely changes width/opacity and slightly hurts PSNR;
+- simply freezing or uniformly scaling length/width/opacity gradients is not the right fix. A hard freeze suppresses the artifact capacity but loses coverage/fitting; a soft scale almost exactly returns to the normal run.
+
+The remaining problem is more specific: roots are still allowed to use long/wide/opaque one-color strokes to explain texture gaps. The repair should not be a blanket capacity freeze. It needs either better local color/attribute support for each strand, stronger local grooming consistency tied to surface neighborhoods, or a lifecycle rule that treats high-residual high-contribution long strokes as evidence for additional local roots rather than as a reason to keep expanding the same strand.
+
 ## Current Root Cause Hypothesis
 
 The current failure is a competition between long-strand fitting and densification:

@@ -1300,13 +1300,13 @@ def pixel_to_surface_child_roots(
     flat_ids = flat_ids[valid]
     face_ids = face_ids[valid]
     depth = depth[valid]
-    if int(values.numel()) > int(max_children):
+    min_distance = max(0.0, float(config.split_min_child_distance))
+    if min_distance <= 0.0 and int(values.numel()) > int(max_children):
         order = torch.argsort(values, descending=True)[: int(max_children)]
         flat_ids = flat_ids[order]
         face_ids = face_ids[order]
         depth = depth[order]
         values = values[order]
-
     height, width = int(mesh_depth.depth.shape[0]), int(mesh_depth.depth.shape[1])
     xy = torch.stack(
         [(flat_ids % width).to(dtype=roots_local.dtype), (flat_ids // width).to(dtype=roots_local.dtype)],
@@ -1324,18 +1324,70 @@ def pixel_to_surface_child_roots(
     tri = model.vertices[model.faces[face_ids]]
     bary = barycentric_from_points(target_local, tri)
     child_points = (tri * bary[:, :, None]).sum(dim=1)
-    dist = torch.cdist(child_points, roots_local.detach())
-    parent_ids = torch.argmin(dist, dim=1).long()
-    parent_distance = torch.min(dist, dim=1).values
+
+    nearest_existing = torch.empty((child_points.shape[0],), device=child_points.device, dtype=child_points.dtype)
+    nearest_parent = torch.empty((child_points.shape[0],), device=child_points.device, dtype=torch.long)
+    chunk = max(1, int(config.densify_pixel_evidence_chunk))
+    detached_roots = roots_local.detach()
+    for begin in range(0, int(child_points.shape[0]), chunk):
+        end = min(begin + chunk, int(child_points.shape[0]))
+        dist = torch.cdist(child_points[begin:end], detached_roots)
+        nearest = torch.min(dist, dim=1)
+        nearest_existing[begin:end] = nearest.values
+        nearest_parent[begin:end] = nearest.indices.long()
+
+    accepted: list[int] = []
+    close_existing_reject = 0
+    close_new_reject = 0
+    for idx in range(int(child_points.shape[0])):
+        if len(accepted) >= int(max_children):
+            break
+        if min_distance > 0.0 and float(nearest_existing[idx].detach().cpu()) < min_distance:
+            close_existing_reject += 1
+            continue
+        if min_distance > 0.0 and accepted:
+            accepted_points = child_points[torch.tensor(accepted, device=child_points.device, dtype=torch.long)]
+            dist_new = torch.linalg.norm(accepted_points - child_points[idx : idx + 1], dim=-1)
+            if bool((dist_new < min_distance).any()):
+                close_new_reject += 1
+                continue
+        accepted.append(idx)
+
+    if not accepted:
+        empty_ids = roots_local.new_empty((0,), dtype=torch.long)
+        empty_bary = roots_local.new_empty((0, 3))
+        return (
+            empty_ids,
+            empty_ids,
+            empty_bary,
+            {
+                "direct_target_candidate_count": int(topk),
+                "direct_target_valid_count": int(child_points.shape[0]),
+                "direct_target_insert_count": 0,
+                "direct_target_close_existing_reject_count": int(close_existing_reject),
+                "direct_target_close_new_reject_count": int(close_new_reject),
+                "direct_target_min_child_distance": float(min_distance),
+            },
+        )
+
+    accepted_ids = torch.tensor(accepted, device=child_points.device, dtype=torch.long)
+    parent_ids = nearest_parent[accepted_ids].long()
+    parent_distance = nearest_existing[accepted_ids]
     return (
         parent_ids,
-        face_ids,
-        bary,
+        face_ids[accepted_ids],
+        bary[accepted_ids],
         {
             "direct_target_candidate_count": int(topk),
-            "direct_target_insert_count": int(bary.shape[0]),
-            "direct_target_weight_mean": float(values.mean().detach().cpu()),
+            "direct_target_valid_count": int(child_points.shape[0]),
+            "direct_target_insert_count": int(accepted_ids.shape[0]),
+            "direct_target_weight_mean": float(values[accepted_ids].mean().detach().cpu()),
             "direct_target_parent_distance_mean": float(parent_distance.mean().detach().cpu()),
+            "direct_target_parent_distance_min": float(parent_distance.min().detach().cpu()),
+            "direct_target_parent_distance_max": float(parent_distance.max().detach().cpu()),
+            "direct_target_close_existing_reject_count": int(close_existing_reject),
+            "direct_target_close_new_reject_count": int(close_new_reject),
+            "direct_target_min_child_distance": float(min_distance),
         },
     )
 
