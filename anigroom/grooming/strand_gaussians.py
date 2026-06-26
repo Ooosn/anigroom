@@ -514,10 +514,11 @@ def adaptive_resample_strands(
     lengths: torch.Tensor,
     min_segments: int,
     max_segments: int,
+    length_bounds: tuple[float, float] | None = None,
 ) -> ResampledStrands:
     """Adaptive but continuous strand sampling for 3DGS conversion."""
 
-    counts, stats = strand_segment_budgets(strands, lengths, min_segments, max_segments)
+    counts, stats = strand_segment_budgets(strands, lengths, min_segments, max_segments, length_bounds=length_bounds)
     resampled = resample_strands_to_segment_budgets(strands, widths, colors, opacities, counts)
     resampled.stats.update(stats)
     return resampled
