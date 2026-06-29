@@ -82,3 +82,51 @@ For each run:
 Only mechanisms with both metric and visual support should remain in the formal
 route. Mechanisms that do not trigger or do not improve the result must be
 marked diagnostic or redesigned.
+
+## Completed Results
+
+All runs used view09, 1920x1080, 3200 iterations, composite PSNR as the primary
+metric, and raw PSNR as a diagnostic metric.
+
+| run | config | final composite PSNR | final raw PSNR | final roots | final Gaussians | conclusion |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| `20260629033147` | baseline | 39.854 | 35.736 | 139898 | 8986687 | reference route |
+| `20260629050205_ablate_no_densify` | no render-root densification | 37.671 | 34.718 | 100000 | 6224052 | render-root densification is necessary |
+| `20260629054243_ablate_no_residual` | no guide residual unlock | 39.539 | 35.533 | 139881 | 9035188 | guide residual unlock is a small gain, not the core reason |
+| `20260629062953_ablate_child1` | one child strand | 39.353 | 35.636 | 144490 | 2316721 | child strands help, mainly coverage/stability, but are not the core reason |
+
+Trajectory summary:
+
+- No render-root densification stayed fixed at 100000 roots and ended 2.183 dB
+  below baseline. It reached only 37.671 at 3200 even with the same residual
+  unlock schedule, so the 39+ result is not explained by iteration count alone.
+- No guide residual unlock matched the baseline before the residual phase and
+  still reached 39.539. This means the current single-view gain is mostly from
+  render-root densification and continued optimization, while guide residual
+  unlock adds about 0.315 dB in this run.
+- One child strand started much worse, recovered after densification and
+  residual unlock, but still ended 0.501 dB below baseline. Child strands are
+  useful as local coverage/thickness capacity. They should stay, but they should
+  not be described as the primary mechanism.
+
+Visual summary:
+
+- No render-root densification does not collapse visually, but it has thinner
+  coverage and softer local details, especially around the belly, legs, and
+  stripe boundaries.
+- No guide residual unlock looks close to baseline. Current evidence does not
+  justify treating guide residual unlock as essential for the view09 result.
+- One-child output is visually plausible, but it has weaker fur-layer thickness
+  and less stable early optimization. The drop at iteration 1800 indicates that
+  the residual phase disturbs the single-child structure more than the baseline.
+
+Current decision:
+
+- Keep render-root densification as a formal Stage 1 mechanism.
+- Keep child strands in the formal route, but treat their role as coverage and
+  local thickness, not as the main innovation by itself.
+- Keep guide residual unlock as an optional refinement for now; it needs
+  multi-view validation before being treated as an essential mechanism.
+- Guide-root densification did not fire in the 38+ baseline, so it is not yet a
+  proven mechanism. It must be redesigned or kept diagnostic until it has clear
+  evidence.
