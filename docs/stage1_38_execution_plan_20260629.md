@@ -209,3 +209,58 @@ The next accepted checkpoint must answer:
    residual unlock, insufficient roots, or renderer/depth/compositing?
 
 Do not report success without these answers.
+
+## Result Log: 20260629033147
+
+Server run:
+
+- commit: `6fdc712`
+- output: `/ssdwork/liuhaohan/petsgaussianhair/outputs/20260629033147`
+- local pulled evidence: `D:\petsgaussianhair\_server_outputs\20260629033147`
+- config: `configs/white_tiger_stage1_formal.env`
+- route: 100k render roots, 2048 guide roots, render-root densification first,
+  delayed guide residual unlock, no old overlong/screen/dark heuristic split.
+
+Metric trajectory:
+
+- iter 1600: composite PSNR 37.855, raw PSNR 34.775, roots 137565
+- iter 2200: composite PSNR 38.511, raw PSNR 35.117, roots 139898
+- iter 2600: composite PSNR 39.208, raw PSNR 35.453, roots 139898
+- iter 3200: composite PSNR 39.854, raw PSNR 35.736, roots 139898
+
+Memory:
+
+- preflight max allocated: about 9 GB
+- final max allocated: about 27.7 GB
+- no 70 GB memory blow-up; chunked pixel evidence path remains necessary.
+
+Mechanism analysis:
+
+- Render-root densification clearly worked. It grew 100k roots to 139898 by
+  iter 1700 and pushed composite PSNR from 31.227 at iter 200 to 37.855 at
+  iter 1600.
+- Guide residual unlock worked. After the 1800 transition dip, composite PSNR
+  recovered from 36.846 at iter 1800 to 39.854 at iter 3200.
+- Guide-root densification did not insert new guide roots in this run. This is
+  acceptable for this checkpoint because the route reached 38+, but it means the
+  current guide densification score/threshold needs separate analysis before it
+  can be claimed as an active contribution.
+- The final high-capacity diagnostic shows selected high-capacity roots still
+  have length around 0.040, so the 39.854 result is not obtained by allowing
+  long-strand color dragging.
+- Visual inspection of iter 3200 shows no return of the earlier large long-strand
+  streak artifact. Remaining errors are mainly high-frequency fur/detail and
+  local alpha/texture mismatch.
+
+Unanswered required validations:
+
+- child strands/clump usefulness: still needs a controlled comparison.
+- RGB-to-flow or edge-style loss: still needs a controlled comparison.
+- cleaned flow for guide initialization: still needs a controlled comparison.
+
+Current conclusion:
+
+This run establishes a valid Stage 1 single-view baseline above 38 composite
+PSNR. It does not finish the full research checklist; it provides the first
+clean 38+ checkpoint from which the three remaining validation studies should be
+run.

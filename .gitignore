@@ -26,6 +26,7 @@ env/
 /server_pull/
 /_archive/
 /_server_inspect/
+/_server_outputs/
 /_tmp*/
 *.tar
 *.tar.gz
