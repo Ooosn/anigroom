@@ -6,11 +6,14 @@ mesh-rooted animal grooming representation that can support the paper.
 
 ## Current Main Goal
 
-Stage 1 must reconstruct white-tiger fur with correct visibility, projected
-evidence, and groom-parameter behavior. The immediate focus is restoring and
-reproducing the single-layer root baseline from `20260626015952`: one mesh root
-owns explicit groom parameters, deterministic child strands are generated from
-that root, and Gaussians are rendered through gsplat.
+Stage 1 must produce a clean white-tiger reconstruction baseline with composite
+PSNR 38+ and plausible fur structure. The active execution contract is
+`docs/stage1_38_execution_plan_20260629.md`; follow it over older recovery or
+diagnostic notes.
+
+The formal direction is low-count guide roots plus 100k render roots: render-root
+coverage/densification first, delayed guide-root densification only after render
+coverage and long-stroke diagnostics stabilize, then controlled residual unlock.
 
 ## Non-Negotiable Rules
 
@@ -45,6 +48,12 @@ that root, and Gaussians are rendered through gsplat.
    must be clearly separated from formal modules.
 10. If the user points out a conceptual issue, stop and analyze that issue
     directly before writing more code.
+11. The formal Stage 1 config must not default to 70k render roots, 8192 guide
+    roots, 1000-iteration densification intervals, or old screen/dark/luma
+    overlong heuristics.
+12. The three required validation points are mandatory before claiming the new
+    baseline: child strands/clump, RGB-to-flow or edge-style loss, and cleaned
+    flow for guide initialization.
 
 ## Required Pre-Action Checklist
 

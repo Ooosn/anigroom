@@ -430,6 +430,141 @@ def propose_split_children(
     return torch.cat(all_parents, dim=0), torch.cat(all_faces, dim=0), torch.cat(all_bary, dim=0)
 
 
+def propose_directional_split_children(
+    state: RootLifecycleState,
+    parent_indices: torch.Tensor,
+    parent_directions: torch.Tensor,
+    children_per_parent: int,
+    *,
+    vertices: torch.Tensor,
+    faces: torch.Tensor,
+    neighbor_count: int = 12,
+    candidate_rings: int = 3,
+    candidate_face_count: int = 32,
+    min_child_distance: float = 0.0,
+    target_distance: float = 0.006,
+    target_weight: float = 2.0,
+    child_target_points: torch.Tensor | None = None,
+    residual_target_weight: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split over-capacity roots along their local surface flow direction.
+
+    This is used for roots whose strand became too long instead of allowing one
+    strand to keep covering a large image-space residual.  Children are selected
+    from topology-local face candidates, so the operation remains a surface
+    split and does not fall back to unconstrained 3D offsets.
+    """
+
+    state.validate()
+    if parent_indices.numel() == 0:
+        return (
+            state.face_ids.new_empty((0,)),
+            state.face_ids.new_empty((0,)),
+            state.barycentric.new_empty((0, 3)),
+        )
+    if parent_directions.shape != state.points.shape:
+        raise ValueError("parent_directions must match state.points shape")
+    children_per_parent = max(1, int(children_per_parent))
+    candidate_faces, candidate_bary, candidate_points = _multi_face_child_candidates(
+        state,
+        parent_indices,
+        vertices,
+        faces,
+        candidate_face_count=int(candidate_face_count),
+        candidate_rings=int(candidate_rings),
+    )
+
+    parent_points = state.points[parent_indices]
+    directions = parent_directions[parent_indices].to(device=state.points.device, dtype=state.points.dtype)
+    directions = directions / torch.linalg.norm(directions, dim=-1, keepdim=True).clamp_min(EPS)
+    if children_per_parent == 1:
+        offsets = torch.zeros((1,), device=state.points.device, dtype=state.points.dtype)
+    else:
+        offsets = torch.linspace(-0.5, 0.5, children_per_parent, device=state.points.device, dtype=state.points.dtype)
+    targets = parent_points[:, None] + directions[:, None] * (offsets[None, :, None] * float(target_distance))
+
+    nearest_count = max(1, min(int(neighbor_count), int(state.points.shape[0])))
+    flat_candidates = candidate_points.reshape(-1, 3)
+    local_distance_flat = torch.empty((flat_candidates.shape[0],), device=state.points.device, dtype=state.points.dtype)
+    closest_flat = torch.empty_like(local_distance_flat)
+    candidate_chunk = 1024
+    for begin in range(0, int(flat_candidates.shape[0]), candidate_chunk):
+        end = min(begin + candidate_chunk, int(flat_candidates.shape[0]))
+        dist = torch.cdist(flat_candidates[begin:end], state.points)
+        nearest_values = torch.topk(dist, k=nearest_count, largest=False, dim=-1).values
+        local_distance_flat[begin:end] = nearest_values[:, -1]
+        closest_flat[begin:end] = nearest_values[:, 0]
+    local_distance = local_distance_flat.view(candidate_points.shape[0], candidate_points.shape[1])
+    closest = closest_flat.view(candidate_points.shape[0], candidate_points.shape[1])
+    finite_local = torch.isfinite(local_distance)
+    if float(min_child_distance) > 0.0:
+        finite_local = finite_local & (closest >= float(min_child_distance))
+    valid_parent_mask = finite_local.any(dim=1)
+    if not bool(valid_parent_mask.all()):
+        parent_indices = parent_indices[valid_parent_mask]
+        if parent_indices.numel() == 0:
+            return (
+                state.face_ids.new_empty((0,)),
+                state.face_ids.new_empty((0,)),
+                state.barycentric.new_empty((0, 3)),
+            )
+        candidate_faces = candidate_faces[valid_parent_mask]
+        candidate_bary = candidate_bary[valid_parent_mask]
+        candidate_points = candidate_points[valid_parent_mask]
+        parent_points = parent_points[valid_parent_mask]
+        directions = directions[valid_parent_mask]
+        targets = targets[valid_parent_mask]
+        local_distance = local_distance[valid_parent_mask]
+        closest = closest[valid_parent_mask]
+        finite_local = finite_local[valid_parent_mask]
+    local_min = local_distance.masked_fill(~finite_local, torch.inf).amin(dim=1, keepdim=True)
+    local_max = local_distance.masked_fill(~finite_local, -torch.inf).amax(dim=1, keepdim=True)
+    local_range = (local_max - local_min).clamp_min(EPS)
+    spacing_score = (local_distance - local_min) / local_range
+    spacing_score = spacing_score.masked_fill(~finite_local, -torch.inf)
+    residual_targets = None
+    residual_target_valid = None
+    residual_target_score = None
+    if child_target_points is not None and float(residual_target_weight) > 0.0:
+        if child_target_points.shape != state.points.shape:
+            raise ValueError("child_target_points must match state.points shape")
+        residual_targets = child_target_points[parent_indices].to(device=state.points.device, dtype=state.points.dtype)
+        residual_target_valid = torch.isfinite(residual_targets).all(dim=-1)
+        if bool(residual_target_valid.any()):
+            residual_target_distance = torch.linalg.norm(candidate_points - residual_targets[:, None, :], dim=-1)
+            residual_target_min = residual_target_distance.masked_fill(~finite_local, torch.inf).amin(dim=1, keepdim=True)
+            residual_target_max = residual_target_distance.masked_fill(~finite_local, -torch.inf).amax(dim=1, keepdim=True)
+            residual_target_range = (residual_target_max - residual_target_min).clamp_min(EPS)
+            residual_target_score = 1.0 - (residual_target_distance - residual_target_min) / residual_target_range
+            residual_target_score = residual_target_score.masked_fill(~finite_local, -torch.inf)
+
+    selected_faces: list[torch.Tensor] = []
+    selected_bary: list[torch.Tensor] = []
+    selected_parents: list[torch.Tensor] = []
+    already_selected = torch.zeros_like(spacing_score, dtype=torch.bool)
+    for child_idx in range(children_per_parent):
+        target_distance_to_candidate = torch.linalg.norm(candidate_points - targets[:, child_idx : child_idx + 1], dim=-1)
+        target_min = target_distance_to_candidate.masked_fill(~finite_local, torch.inf).amin(dim=1, keepdim=True)
+        target_max = target_distance_to_candidate.masked_fill(~finite_local, -torch.inf).amax(dim=1, keepdim=True)
+        target_range = (target_max - target_min).clamp_min(EPS)
+        target_score = 1.0 - (target_distance_to_candidate - target_min) / target_range
+        score = spacing_score + float(target_weight) * target_score
+        if residual_target_score is not None and residual_target_valid is not None:
+            score = torch.where(
+                residual_target_valid[:, None],
+                score + float(residual_target_weight) * residual_target_score,
+                score,
+            )
+        score = score.masked_fill(already_selected | ~finite_local, -torch.inf)
+        chosen = torch.argmax(score, dim=1)
+        selected_faces.append(torch.gather(candidate_faces, 1, chosen[:, None]).reshape(-1))
+        selected_bary.append(torch.gather(candidate_bary, 1, chosen[:, None, None].expand(-1, 1, 3)).reshape(-1, 3))
+        selected_parents.append(parent_indices)
+        already_selected.scatter_(1, chosen[:, None], True)
+
+    return torch.cat(selected_parents, dim=0), torch.cat(selected_faces, dim=0), torch.cat(selected_bary, dim=0)
+
+
 def select_prune_mask(stats: RootStats, config: PruneConfig) -> torch.Tensor:
     stats.validate()
     contribution = stats.gaussian_contrib_sum.reshape(-1)
