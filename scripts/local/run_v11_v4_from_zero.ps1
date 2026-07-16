@@ -16,11 +16,12 @@ function Convert-ToBashPath([string]$PathValue) {
 $projectRoot = "D:\petsgaussianhair"
 $python = "D:\Users\namew\miniconda3\envs\mygs\python.exe"
 $condaEnv = Split-Path -Parent $python
+$condaHook = "D:\Users\namew\miniconda3\shell\condabin\conda-hook.ps1"
 $bash = "C:\Program Files\Git\bin\bash.exe"
 $runner = Join-Path $projectRoot "scripts\server\run_v11_v4_from_zero.sh"
 $meshPath = Join-Path $projectRoot "data_sources\neuralfur_official_results\whiteTiger\furless_reshaped.obj"
 
-foreach ($required in @($projectRoot, $python, $bash, $runner, $DataRoot, $meshPath)) {
+foreach ($required in @($projectRoot, $python, $condaHook, $bash, $runner, $DataRoot, $meshPath)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Required local v11-v4 path not found: $required"
     }
@@ -36,6 +37,12 @@ if ($RunId -notmatch '^\d{14}$') {
 $runRoot = Join-Path $projectRoot ("outputs\" + $RunId)
 $logRoot = Join-Path $projectRoot ("logs\" + $RunId)
 New-Item -ItemType Directory -Force -Path $runRoot, $logRoot | Out-Null
+
+& $condaHook
+conda activate mygs
+if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+    throw "MSVC cl.exe is unavailable after activating mygs"
+}
 
 $env:PATH = "$condaEnv;$condaEnv\Scripts;$condaEnv\Library\bin;$env:PATH"
 $env:PYTHONPATH = "$projectRoot;$env:PYTHONPATH"
