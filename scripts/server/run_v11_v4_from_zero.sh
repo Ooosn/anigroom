@@ -121,7 +121,7 @@ RUN_PREFLIGHT=1 \
 RUN_BATCH_PREFLIGHT=1 \
 RESUME_CHECKPOINT= \
 RESUME_OPTIMIZER=1 \
-GPU_MEMORY_LIMIT_GB=0 \
+GPU_MEMORY_LIMIT_GB="${GPU_MEMORY_LIMIT_GB:-0}" \
 bash scripts/server/run_white_tiger_stage1.sh 2>&1 | tee "${LOG_ROOT}/phase_a.log"
 
 PHASE_A_CHECKPOINT="${PHASE_A_OUTPUT}/checkpoint_009000.pt"
@@ -142,7 +142,7 @@ RESUME_CHECKPOINT="$PHASE_A_CHECKPOINT" \
 RESUME_OPTIMIZER=0 \
 RUN_PREFLIGHT=0 \
 RUN_BATCH_PREFLIGHT=0 \
-GPU_MEMORY_LIMIT_GB=0 \
+GPU_MEMORY_LIMIT_GB="${GPU_MEMORY_LIMIT_GB:-0}" \
 bash scripts/server/run_white_tiger_stage1.sh 2>&1 | tee "${LOG_ROOT}/phase_b.log"
 
 echo "[v11-v4] complete: ${RUN_ROOT}"
