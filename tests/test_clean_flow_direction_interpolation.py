@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+
+from anigroom.flow.clean_flow import CleanFlowTargets, sample_clean_flow_targets
+from anigroom.flow.direction_geometry import parallel_transport_vectors
+
+
+def _targets() -> CleanFlowTargets:
+    points = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.01, 0.0, 0.001],
+            [1.01, 0.0, 0.001],
+        ],
+        dtype=torch.float32,
+    )
+    normals = torch.tensor(
+        [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.0, -1.0],
+        ],
+        dtype=torch.float32,
+    )
+    directions = F.normalize(
+        torch.tensor(
+            [
+                [1.0, 0.0, 0.25],
+                [1.0, 0.0, 0.25],
+                [0.0, 1.0, -0.25],
+                [0.0, 1.0, -0.25],
+            ],
+            dtype=torch.float32,
+        ),
+        dim=-1,
+    )
+    count = int(points.shape[0])
+    ones = torch.ones((count,), dtype=torch.float32)
+    return CleanFlowTargets(
+        points=points,
+        normals=normals,
+        directions=directions,
+        confidence=ones,
+        anchor_confidence=ones,
+        lambda_values=torch.tensor([1.0, 2.0, 10.0, 20.0]),
+        shell_height=torch.tensor([1.0, 2.0, 10.0, 20.0]),
+        raw_shell_height=torch.tensor([3.0, 4.0, 30.0, 40.0]),
+        local_spacing=ones,
+        observed=torch.ones((count,), dtype=torch.bool),
+        anchor=torch.ones((count,), dtype=torch.bool),
+        source_path="synthetic",
+    )
+
+
+def test_parallel_transport_preserves_surface_relative_lift() -> None:
+    source_normal = torch.tensor([[0.0, 0.0, 1.0]])
+    target_normal = torch.tensor([[0.0, 1.0, 0.0]])
+    source_direction = F.normalize(torch.tensor([[1.0, 0.0, 0.25]]), dim=-1)
+    expected = F.normalize(torch.tensor([[1.0, 0.25, 0.0]]), dim=-1)
+
+    transported = parallel_transport_vectors(source_direction, source_normal, target_normal)
+
+    torch.testing.assert_close(transported, expected, atol=1.0e-6, rtol=1.0e-6)
+    torch.testing.assert_close(
+        (source_direction * source_normal).sum(dim=-1),
+        (transported * target_normal).sum(dim=-1),
+        atol=1.0e-6,
+        rtol=1.0e-6,
+    )
+
+
+def test_direction_is_surface_aware_while_scalar_sampling_stays_legacy() -> None:
+    targets = _targets()
+    query = torch.tensor([[0.02, 0.0, 0.0]], dtype=torch.float32)
+    query_normal = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
+
+    sampled = sample_clean_flow_targets(targets, query, query_normal, k=2, chunk_size=1)
+
+    expected_direction = F.normalize(torch.tensor([[1.0, 0.0, 0.25]]), dim=-1)
+    assert float((sampled["direction"] * expected_direction).sum()) > 0.999
+
+    distances = torch.cdist(query, targets.points)
+    values, ids = torch.topk(distances, k=2, dim=-1, largest=False)
+    legacy_weights = 1.0 / values.clamp_min(1.0e-6).square()
+    legacy_weights = legacy_weights / legacy_weights.sum(dim=-1, keepdim=True)
+    expected_shell = (targets.shell_height[ids] * legacy_weights).sum(dim=1)
+    expected_raw_shell = (targets.raw_shell_height[ids] * legacy_weights).sum(dim=1)
+    expected_lambda = (targets.lambda_values[ids] * legacy_weights).sum(dim=1)
+
+    torch.testing.assert_close(sampled["shell_height"], expected_shell)
+    torch.testing.assert_close(sampled["raw_shell_height"], expected_raw_shell)
+    torch.testing.assert_close(sampled["lambda"], expected_lambda)

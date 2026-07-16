@@ -27,6 +27,7 @@ require_var() {
 
 required_config=(
   ROOT_COUNT
+  ROOT_INIT_METHOD
   CANDIDATE_MULTIPLIER
   ITERATIONS
   EVAL_EVERY
@@ -43,10 +44,27 @@ required_config=(
   GAUSSIAN_LENGTH_OVERLAP
   PROJECTED_INIT_VIEWS
   PROJECTED_INIT_MIN_CONFIDENCE
+  CLEAN_FLOW_INIT
+  CLEAN_FLOW_INIT_LIFT
+  CLEAN_FLOW_INIT_K
+  CLEAN_FLOW_INIT_MIN_CONFIDENCE
+  CLEAN_FLOW_ANCHOR_MIN_CONFIDENCE
+  CLEAN_FLOW_LIFT_MIN
+  CLEAN_FLOW_LIFT_MAX
+  CLEAN_FLOW_LENGTH_INIT
+  CLEAN_FLOW_LENGTH_INIT_SCALE
+  CLEAN_FLOW_LENGTH_INIT_MIN_CONFIDENCE
+  CLEAN_FLOW_LENGTH_INIT_MIN
+  CLEAN_FLOW_LENGTH_INIT_MAX
+  CLEAN_FLOW_ANCHOR_WEIGHT
+  CLEAN_FLOW_GUIDE_ANCHOR_WEIGHT
+  CLEAN_FLOW_3D_SMOOTH_WEIGHT
   GUIDE_ROOT_COUNT
   GUIDE_CANDIDATE_MULTIPLIER
+  GUIDE_ROOTS_FROM_CLEAN_FLOW
   GUIDE_INTERPOLATION_K
   GUIDE_CONTROLS_FLOW
+  GUIDE_DIRECTION_PRIMARY
   GUIDE_LENGTH_RESIDUAL_SCALE
   GUIDE_BEND_RESIDUAL_SCALE
   GUIDE_FLOW_RESIDUAL_SCALE
@@ -58,6 +76,12 @@ required_config=(
   GUIDE_CLUMP_RESIDUAL_SCALE
   GUIDE_CURL_RESIDUAL_SCALE
   GUIDE_FRIZZ_RESIDUAL_SCALE
+  GUIDE_REGION_BODY_RESIDUAL_MULTIPLIER
+  GUIDE_REGION_HEAD_RESIDUAL_MULTIPLIER
+  GUIDE_REGION_BODY_SHAPE_MULTIPLIER
+  GUIDE_REGION_HEAD_SHAPE_MULTIPLIER
+  GUIDE_REGION_BODY_COVERAGE_MULTIPLIER
+  GUIDE_REGION_HEAD_COVERAGE_MULTIPLIER
   GUIDE_PRIOR_WEIGHT
   GUIDE_PRIOR_FLOW_WEIGHT
   GUIDE_PRIOR_BEND_WEIGHT
@@ -72,7 +96,14 @@ required_config=(
   GUIDE_RESIDUAL_UNLOCK_START
   GUIDE_RESIDUAL_UNLOCK_END
   GUIDE_RESIDUAL_INITIAL_MULTIPLIER
+  GUIDE_COVERAGE_RESIDUAL_UNLOCK_START
+  GUIDE_COVERAGE_RESIDUAL_UNLOCK_END
+  GUIDE_COVERAGE_RESIDUAL_INITIAL_MULTIPLIER
   GUIDE_FREEZE_UNTIL
+  SHAPE_DETAIL_FREEZE_UNTIL
+  SHAPE_BEND_SCALE
+  SHAPE_CURL_SCALE
+  SHAPE_FRIZZ_SCALE
   GUIDE_DENSIFY_START
   GUIDE_DENSIFY_INTERVAL
   GUIDE_DENSIFY_UNTIL
@@ -95,8 +126,12 @@ required_config=(
   MASK_WEIGHT
   ORIENTATION_WEIGHT
   ORIENTATION_DETAIL_WEIGHT
+  RGB_FLOW_WEIGHT
+  RGB_FLOW_DETAIL_WEIGHT
+  RGB_FLOW_MIN_CONFIDENCE
   SMOOTH_WEIGHT
   STRAND_SHAPE_SMOOTH_WEIGHT
+  EFFECTIVE_SMOOTH_WEIGHT
   SHAPE_PRIOR_WEIGHT
   EFFECTIVE_GEOMETRY_BUDGET_WEIGHT
   EFFECTIVE_LENGTH_TARGET
@@ -141,11 +176,15 @@ required_config=(
   RANDOM_BACKING_COLOR
   BACKING_COLOR_MIN
   BACKING_COLOR_MAX
+  RANDOM_MESH_BACKING_TEXTURE
+  MESH_BACKING_TEXTURE_STRENGTH
+  MESH_BACKING_TEXTURE_OCTAVES
   MESH_DEPTH_CLIPPING
   MESH_DEPTH_ABS_TOLERANCE
   MESH_DEPTH_REL_TOLERANCE
   MESH_DEPTH_LOCAL_KERNEL
   MESH_BACKING_COMPOSITING
+  STRAND_SHAPE_NORMAL_MODE
   DENSIFY_WARMUP
   DENSIFY_INTERVAL
   DENSIFY_UNTIL
@@ -217,9 +256,14 @@ export PROJECT_ROOT PYTHON DATA_ROOT MESH_PATH RUN_ID OUTPUT_DIR EXPECTED_WIDTH 
 
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-echo "[stage1] preflight"
-bash scripts/server/preflight_white_tiger_stage1.sh
+if [[ "${RUN_PREFLIGHT:-1}" != "0" ]]; then
+  echo "[stage1] preflight"
+  bash scripts/server/preflight_white_tiger_stage1.sh
+else
+  echo "[stage1] RUN_PREFLIGHT=0; skipping environment/data preflight"
+fi
 
 echo "[stage1] output_dir=${OUTPUT_DIR}"
 mkdir -p "$OUTPUT_DIR"
@@ -230,10 +274,12 @@ cmd=(
   --mesh-path "$MESH_PATH"
   --output-dir "$OUTPUT_DIR"
   --root-count "$ROOT_COUNT"
+  --root-init-method "$ROOT_INIT_METHOD"
   --candidate-multiplier "$CANDIDATE_MULTIPLIER"
   --iterations "$ITERATIONS"
   --eval-every "$EVAL_EVERY"
   --save-every "$SAVE_EVERY"
+  --stage-save-iters "${STAGE_SAVE_ITERS:-}"
   --test-stride "$TEST_STRIDE"
   --expected-width "$EXPECTED_WIDTH"
   --expected-height "$EXPECTED_HEIGHT"
@@ -246,6 +292,18 @@ cmd=(
   --gaussian-length-overlap "$GAUSSIAN_LENGTH_OVERLAP"
   --projected-init-views "$PROJECTED_INIT_VIEWS"
   --projected-init-min-confidence "$PROJECTED_INIT_MIN_CONFIDENCE"
+  --clean-flow-init-k "$CLEAN_FLOW_INIT_K"
+  --clean-flow-init-min-confidence "$CLEAN_FLOW_INIT_MIN_CONFIDENCE"
+  --clean-flow-anchor-min-confidence "$CLEAN_FLOW_ANCHOR_MIN_CONFIDENCE"
+  --clean-flow-lift-min "$CLEAN_FLOW_LIFT_MIN"
+  --clean-flow-lift-max "$CLEAN_FLOW_LIFT_MAX"
+  --clean-flow-length-init-scale "$CLEAN_FLOW_LENGTH_INIT_SCALE"
+  --clean-flow-length-init-min-confidence "$CLEAN_FLOW_LENGTH_INIT_MIN_CONFIDENCE"
+  --clean-flow-length-init-min "$CLEAN_FLOW_LENGTH_INIT_MIN"
+  --clean-flow-length-init-max "$CLEAN_FLOW_LENGTH_INIT_MAX"
+  --clean-flow-anchor-weight "$CLEAN_FLOW_ANCHOR_WEIGHT"
+  --clean-flow-guide-anchor-weight "$CLEAN_FLOW_GUIDE_ANCHOR_WEIGHT"
+  --clean-flow-3d-smooth-weight "$CLEAN_FLOW_3D_SMOOTH_WEIGHT"
   --guide-root-count "$GUIDE_ROOT_COUNT"
   --guide-candidate-multiplier "$GUIDE_CANDIDATE_MULTIPLIER"
   --guide-interpolation-k "$GUIDE_INTERPOLATION_K"
@@ -260,6 +318,12 @@ cmd=(
   --guide-clump-residual-scale "$GUIDE_CLUMP_RESIDUAL_SCALE"
   --guide-curl-residual-scale "$GUIDE_CURL_RESIDUAL_SCALE"
   --guide-frizz-residual-scale "$GUIDE_FRIZZ_RESIDUAL_SCALE"
+  --guide-region-body-residual-multiplier "$GUIDE_REGION_BODY_RESIDUAL_MULTIPLIER"
+  --guide-region-head-residual-multiplier "$GUIDE_REGION_HEAD_RESIDUAL_MULTIPLIER"
+  --guide-region-body-shape-multiplier "$GUIDE_REGION_BODY_SHAPE_MULTIPLIER"
+  --guide-region-head-shape-multiplier "$GUIDE_REGION_HEAD_SHAPE_MULTIPLIER"
+  --guide-region-body-coverage-multiplier "$GUIDE_REGION_BODY_COVERAGE_MULTIPLIER"
+  --guide-region-head-coverage-multiplier "$GUIDE_REGION_HEAD_COVERAGE_MULTIPLIER"
   --guide-prior-weight "$GUIDE_PRIOR_WEIGHT"
   --guide-prior-flow-weight "$GUIDE_PRIOR_FLOW_WEIGHT"
   --guide-prior-bend-weight "$GUIDE_PRIOR_BEND_WEIGHT"
@@ -274,7 +338,14 @@ cmd=(
   --guide-residual-unlock-start "$GUIDE_RESIDUAL_UNLOCK_START"
   --guide-residual-unlock-end "$GUIDE_RESIDUAL_UNLOCK_END"
   --guide-residual-initial-multiplier "$GUIDE_RESIDUAL_INITIAL_MULTIPLIER"
+  --guide-coverage-residual-unlock-start "$GUIDE_COVERAGE_RESIDUAL_UNLOCK_START"
+  --guide-coverage-residual-unlock-end "$GUIDE_COVERAGE_RESIDUAL_UNLOCK_END"
+  --guide-coverage-residual-initial-multiplier "$GUIDE_COVERAGE_RESIDUAL_INITIAL_MULTIPLIER"
   --guide-freeze-until "$GUIDE_FREEZE_UNTIL"
+  --shape-detail-freeze-until "$SHAPE_DETAIL_FREEZE_UNTIL"
+  --shape-bend-scale "$SHAPE_BEND_SCALE"
+  --shape-curl-scale "$SHAPE_CURL_SCALE"
+  --shape-frizz-scale "$SHAPE_FRIZZ_SCALE"
   --guide-densify-start "$GUIDE_DENSIFY_START"
   --guide-densify-interval "$GUIDE_DENSIFY_INTERVAL"
   --guide-densify-until "$GUIDE_DENSIFY_UNTIL"
@@ -297,8 +368,15 @@ cmd=(
   --mask-weight "$MASK_WEIGHT"
   --orientation-weight "$ORIENTATION_WEIGHT"
   --orientation-detail-weight "$ORIENTATION_DETAIL_WEIGHT"
+  --rgb-flow-weight "$RGB_FLOW_WEIGHT"
+  --rgb-flow-detail-weight "$RGB_FLOW_DETAIL_WEIGHT"
+  --rgb-flow-min-confidence "$RGB_FLOW_MIN_CONFIDENCE"
   --smooth-weight "$SMOOTH_WEIGHT"
   --strand-shape-smooth-weight "$STRAND_SHAPE_SMOOTH_WEIGHT"
+  --effective-smooth-weight "$EFFECTIVE_SMOOTH_WEIGHT"
+  --clean-flow-length-anchor-weight "${CLEAN_FLOW_LENGTH_ANCHOR_WEIGHT:-0}"
+  --clean-flow-length-anchor-multiplier "${CLEAN_FLOW_LENGTH_ANCHOR_MULTIPLIER:-2.0}"
+  --clean-flow-length-anchor-min-confidence "${CLEAN_FLOW_LENGTH_ANCHOR_MIN_CONFIDENCE:-0.50}"
   --shape-prior-weight "$SHAPE_PRIOR_WEIGHT"
   --effective-geometry-budget-weight "$EFFECTIVE_GEOMETRY_BUDGET_WEIGHT"
   --effective-length-target "$EFFECTIVE_LENGTH_TARGET"
@@ -342,9 +420,14 @@ cmd=(
   --orientation-min-confidence "$ORIENTATION_MIN_CONFIDENCE"
   --backing-color-min "$BACKING_COLOR_MIN"
   --backing-color-max "$BACKING_COLOR_MAX"
+  --mesh-backing-texture-strength "$MESH_BACKING_TEXTURE_STRENGTH"
+  --mesh-backing-texture-octaves "$MESH_BACKING_TEXTURE_OCTAVES"
   --mesh-depth-abs-tolerance "$MESH_DEPTH_ABS_TOLERANCE"
   --mesh-depth-rel-tolerance "$MESH_DEPTH_REL_TOLERANCE"
   --mesh-depth-local-kernel "$MESH_DEPTH_LOCAL_KERNEL"
+  --strand-shape-normal-mode "$STRAND_SHAPE_NORMAL_MODE"
+  --gpu-memory-limit-gb "${GPU_MEMORY_LIMIT_GB:-0}"
+  --gpu-memory-check-interval "${GPU_MEMORY_CHECK_INTERVAL:-20}"
   --densify-warmup "$DENSIFY_WARMUP"
   --densify-interval "$DENSIFY_INTERVAL"
   --densify-until "$DENSIFY_UNTIL"
@@ -407,8 +490,32 @@ cmd=(
 if [[ "$RANDOM_BACKING_COLOR" == "0" ]]; then
   cmd+=(--disable-random-backing-color)
 fi
+if [[ "$RANDOM_MESH_BACKING_TEXTURE" == "0" ]]; then
+  cmd+=(--disable-random-mesh-backing-texture)
+fi
 if [[ "$GUIDE_CONTROLS_FLOW" == "1" ]]; then
   cmd+=(--guide-controls-flow)
+fi
+if [[ "$GUIDE_DIRECTION_PRIMARY" == "1" ]]; then
+  cmd+=(--guide-direction-primary)
+fi
+if [[ "$GUIDE_ROOTS_FROM_CLEAN_FLOW" == "1" ]]; then
+  cmd+=(--guide-roots-from-clean-flow)
+fi
+if [[ -n "${CLEAN_FLOW_TARGET:-}" ]]; then
+  cmd+=(--clean-flow-target "$CLEAN_FLOW_TARGET")
+elif [[ "$CLEAN_FLOW_INIT" == "1" || "$CLEAN_FLOW_LENGTH_INIT" == "1" || "$CLEAN_FLOW_ANCHOR_WEIGHT" != "0" || "$CLEAN_FLOW_GUIDE_ANCHOR_WEIGHT" != "0" ]]; then
+  echo "[stage1] clean-flow requested but CLEAN_FLOW_TARGET is empty" >&2
+  exit 2
+fi
+if [[ "$CLEAN_FLOW_INIT" == "1" ]]; then
+  cmd+=(--clean-flow-init)
+fi
+if [[ "$CLEAN_FLOW_LENGTH_INIT" == "1" ]]; then
+  cmd+=(--clean-flow-length-init)
+fi
+if [[ "$CLEAN_FLOW_INIT_LIFT" == "0" ]]; then
+  cmd+=(--disable-clean-flow-init-lift)
 fi
 if [[ "$MESH_DEPTH_CLIPPING" == "0" ]]; then
   cmd+=(--disable-mesh-depth-clipping)
@@ -430,6 +537,9 @@ if [[ -n "${TRAIN_VIEWS:-}" ]]; then
 fi
 if [[ -n "${TEST_VIEWS:-}" ]]; then
   cmd+=(--test-views "$TEST_VIEWS")
+fi
+if [[ "${RESUME_OPTIMIZER:-1}" == "0" ]]; then
+  cmd+=(--no-resume-optimizer)
 fi
 
 if [[ "${RUN_BATCH_PREFLIGHT:-1}" != "0" ]]; then
@@ -454,7 +564,23 @@ if [[ "${RUN_BATCH_PREFLIGHT:-1}" != "0" ]]; then
   fi
 fi
 
+if [[ "${STAGE1_PREFLIGHT_ONLY:-0}" == "1" ]]; then
+  echo "[stage1] STAGE1_PREFLIGHT_ONLY=1; stopping before training"
+  exit 0
+fi
+
+if [[ -n "${RESUME_CHECKPOINT:-}" ]]; then
+  if [[ ! -f "$RESUME_CHECKPOINT" ]]; then
+    echo "[stage1] RESUME_CHECKPOINT does not exist: $RESUME_CHECKPOINT" >&2
+    exit 2
+  fi
+  cmd+=(--resume-checkpoint "$RESUME_CHECKPOINT")
+fi
+
 printf '[stage1] command:'
 printf ' %q' "${cmd[@]}"
 printf '\n'
 "${cmd[@]}"
+rc=$?
+echo "[stage1] exit_code=$rc"
+exit "$rc"

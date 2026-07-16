@@ -35,7 +35,7 @@ class GroomRanges:
     tip_width_ratio: tuple[float, float] = (0.10, 0.85)
     width_taper: tuple[float, float] = (0.45, 3.00)
     flow_strength: tuple[float, float] = (0.05, 1.10)
-    lift: tuple[float, float] = (0.04, 0.55)
+    lift: tuple[float, float] = (0.008, 0.55)
     sag: tuple[float, float] = (0.00, 0.85)
     stiffness: tuple[float, float] = (0.05, 0.98)
     curl_radius: tuple[float, float] = (0.0, 0.030)
@@ -214,6 +214,7 @@ def build_strands(
     samples: int,
     gravity_direction: torch.Tensor | tuple[float, float, float] = (0.0, -1.0, 0.0),
     use_gravity_sag: bool = True,
+    shape_normal_mode: str = "full",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate differentiable strand samples from mesh roots and groom controls.
 
@@ -234,6 +235,8 @@ def build_strands(
     flow_local = _normalize(groom.flow_xy)
     flow = _normalize(flow_local[:, [0]] * tangents + flow_local[:, [1]] * bitangents)
 
+    if shape_normal_mode not in {"full", "outward", "tangent"}:
+        raise ValueError(f"unknown shape_normal_mode: {shape_normal_mode}")
     side = _normalize(torch.cross(normals, flow, dim=-1))
     curl_up = _normalize(torch.cross(flow, side, dim=-1))
     flex = (1.0 - groom.stiffness).clamp(0.0, 1.0)
@@ -250,21 +253,13 @@ def build_strands(
         sag = torch.zeros_like(groom.sag)
     bend = groom.bend * (0.35 + 0.65 * flex)
     brush = groom.flow_strength
+    groom_direction = _normalize(groom.lift * normals + brush * flow)
 
     p0 = roots
-    p1 = roots + groom.length * (
-        groom.lift * normals
-        + brush * flow
-        + sag * gravity_tangent
-        + 0.24 * bend * side
-    )
-    m0 = groom.length * _normalize((0.75 + 0.60 * groom.lift) * normals + 0.18 * brush * flow)
-    m1 = groom.length * (
-        0.12 * normals
-        + brush * flow
-        + sag * gravity_tangent
-        + 0.55 * bend * side
-    )
+    p1_direction = _normalize(groom_direction + sag * gravity_tangent + 0.24 * bend * side)
+    p1 = roots + groom.length * p1_direction
+    m0 = groom.length * groom_direction
+    m1 = groom.length * _normalize(groom_direction + sag * gravity_tangent + 0.55 * bend * side)
 
     t = torch.linspace(0.0, 1.0, samples, device=roots.device, dtype=roots.dtype).view(1, samples, 1)
     t2 = t * t
@@ -276,14 +271,25 @@ def build_strands(
     points = h00 * p0[:, None] + h10 * m0[:, None] + h01 * p1[:, None] + h11 * m1[:, None]
     phase = 2.0 * torch.pi * groom.curl_frequency[:, None] * t + groom.curl_phase[:, None]
     curl_envelope = torch.sin(0.5 * torch.pi * t).clamp(0.0, 1.0)
+    curl_side = torch.sin(phase)
+    curl_normal = torch.cos(phase)
+    if shape_normal_mode == "outward":
+        curl_normal = torch.relu(curl_normal)
+    elif shape_normal_mode == "tangent":
+        curl_normal = torch.zeros_like(curl_normal)
     curl_offset = groom.curl_radius[:, None] * curl_envelope * (
-        torch.sin(phase) * side[:, None] + torch.cos(phase) * curl_up[:, None]
+        curl_side * side[:, None] + curl_normal * curl_up[:, None]
     )
     frizz_phase = 2.0 * torch.pi * (3.0 * groom.curl_frequency[:, None] + 1.0) * t + 1.618 * groom.curl_phase[:, None]
     frizz_envelope = (t * (1.0 - 0.35 * t)).clamp(0.0, 1.0)
+    frizz_normal = torch.sin(1.7 * frizz_phase + 0.3)
+    if shape_normal_mode == "outward":
+        frizz_normal = torch.relu(frizz_normal)
+    elif shape_normal_mode == "tangent":
+        frizz_normal = torch.zeros_like(frizz_normal)
     frizz_offset = groom.frizz[:, None] * frizz_envelope * (
         0.65 * torch.sin(frizz_phase) * side[:, None]
-        + 0.35 * torch.sin(1.7 * frizz_phase + 0.3) * curl_up[:, None]
+        + 0.35 * frizz_normal * curl_up[:, None]
     )
     points = points + curl_offset + frizz_offset
 

@@ -1,8 +1,7 @@
 """Mesh-surface root initialization for AniGroom.
 
-This module is intentionally narrow: it reads a mesh, samples dense surface
-candidates, and selects approximately uniform roots with farthest point
-sampling. It does not contain rendering, training, or grooming losses.
+This module is intentionally narrow: it reads a mesh and creates legal surface
+roots.  It does not contain rendering, training, or grooming losses.
 """
 
 from __future__ import annotations
@@ -122,6 +121,52 @@ def sample_surface_candidates(mesh: TriangleMesh, count: int, seed: int) -> Surf
     )
 
 
+def sample_surface_stratified(mesh: TriangleMesh, count: int, seed: int) -> SurfaceCandidates:
+    """Create exactly ``count`` area-stratified surface samples.
+
+    Dense render roots do not need exact FPS; for 100k+ roots, exact FPS is an
+    O(candidate_count * root_count) bottleneck.  This routine allocates a
+    deterministic number of samples per face from surface area, then draws
+    uniform barycentric coordinates inside each selected face.  It preserves the
+    mesh-surface contract while scaling linearly with the number of roots.
+    """
+
+    if count <= 0:
+        raise ValueError("sample count must be positive")
+    areas = triangle_areas(mesh.vertices, mesh.faces)
+    total_area = float(areas.sum())
+    if total_area <= 0.0:
+        raise ValueError("mesh has zero total face area")
+    expected = areas / total_area * int(count)
+    per_face = np.floor(expected).astype(np.int64)
+    remainder = int(count) - int(per_face.sum())
+    if remainder > 0:
+        frac = expected - per_face
+        add_faces = np.argpartition(-frac, kth=min(remainder, frac.size - 1))[:remainder]
+        per_face[add_faces] += 1
+    elif remainder < 0:
+        removable = np.nonzero(per_face > 0)[0]
+        if removable.size < -remainder:
+            raise RuntimeError("internal stratified sampling count underflow")
+        frac = expected[removable] - per_face[removable]
+        remove_local = np.argpartition(frac, kth=min(-remainder, frac.size - 1))[: -remainder]
+        per_face[removable[remove_local]] -= 1
+
+    face_ids = np.repeat(np.arange(mesh.face_count, dtype=np.int64), per_face)
+    if int(face_ids.shape[0]) != int(count):
+        raise RuntimeError(f"stratified sample count mismatch: {face_ids.shape[0]} != {count}")
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(int(count))
+    face_ids = face_ids[order]
+    barycentric = random_barycentric(int(count), rng)
+    points = barycentric_to_points(mesh.vertices, mesh.faces, face_ids, barycentric)
+    return SurfaceCandidates(
+        points=points,
+        face_ids=face_ids.astype(np.int64),
+        barycentric=barycentric.astype(np.float32),
+    )
+
+
 def _resolve_device(device: str | torch.device) -> torch.device:
     if isinstance(device, torch.device):
         return device
@@ -185,6 +230,76 @@ def farthest_point_sample(
     return selected.cpu().numpy().astype(np.int64)
 
 
+@torch.no_grad()
+def weighted_farthest_point_sample(
+    points: np.ndarray,
+    weights: np.ndarray,
+    count: int,
+    *,
+    seed: int,
+    device: str | torch.device = "auto",
+    chunk_size: int = 262_144,
+    start: Literal["centroid", "random"] = "centroid",
+) -> np.ndarray:
+    """Run FPS with a spatially varying density preference.
+
+    This keeps the same surface-candidate pool as ordinary FPS, but chooses the
+    next root by maximizing current uncovered distance times a positive
+    candidate weight.  Uniform weights are equivalent to ordinary FPS up to
+    numeric tie breaks.  The function is generic: it does not know animal
+    parts, image coordinates, or semantic labels.
+    """
+
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError(f"points must have shape [N, 3], got {points.shape}")
+    if weights.ndim != 1 or int(weights.shape[0]) != int(points.shape[0]):
+        raise ValueError(f"weights must have shape [N], got {weights.shape} for points {points.shape}")
+    candidate_count = int(points.shape[0])
+    if count <= 0:
+        raise ValueError("sample count must be positive")
+    if count > candidate_count:
+        raise ValueError(f"cannot sample {count} roots from {candidate_count} candidates")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+
+    resolved = _resolve_device(device)
+    pts = torch.as_tensor(points, dtype=torch.float32, device=resolved)
+    raw_weights = torch.as_tensor(weights, dtype=torch.float32, device=resolved)
+    if not bool(torch.isfinite(raw_weights).all()):
+        raise ValueError("weights contain non-finite values")
+    density_weight = raw_weights.clamp_min(0.0)
+    if float(density_weight.max().detach().cpu()) <= 0.0:
+        raise ValueError("weights must contain at least one positive value")
+    positive = density_weight[density_weight > 0.0]
+    scale = torch.quantile(positive, 0.90).clamp_min(1.0e-8)
+    density_weight = (density_weight / scale).clamp(0.05, 10.0)
+
+    selected = torch.empty((int(count),), dtype=torch.long, device=resolved)
+    min_dist = torch.full((candidate_count,), torch.inf, dtype=torch.float32, device=resolved)
+
+    if start == "random":
+        generator = torch.Generator(device=resolved)
+        generator.manual_seed(int(seed))
+        current = torch.randint(0, candidate_count, (1,), generator=generator, device=resolved).long()[0]
+    elif start == "centroid":
+        centroid = pts.mean(dim=0, keepdim=True)
+        dist_to_center = (pts - centroid).square().sum(dim=1)
+        current = torch.argmax(dist_to_center * density_weight)
+    else:
+        raise ValueError(f"unknown FPS start mode: {start}")
+
+    for sample_idx in range(int(count)):
+        selected[sample_idx] = current
+        current_point = pts[current : current + 1]
+        for begin in range(0, candidate_count, int(chunk_size)):
+            end = min(begin + int(chunk_size), candidate_count)
+            dist = (pts[begin:end] - current_point).square().sum(dim=1)
+            min_dist[begin:end] = torch.minimum(min_dist[begin:end], dist)
+        current = torch.argmax(min_dist * density_weight)
+
+    return selected.cpu().numpy().astype(np.int64)
+
+
 def initialize_surface_roots_fps(
     mesh: TriangleMesh,
     root_count: int,
@@ -217,6 +332,47 @@ def initialize_surface_roots_fps(
         barycentric=candidates.barycentric[selected].astype(np.float32),
         selected_candidate_ids=selected.astype(np.int64),
         candidate_count=int(candidate_count),
+    )
+
+
+def initialize_surface_roots_stratified(
+    mesh: TriangleMesh,
+    root_count: int,
+    *,
+    seed: int = 13,
+) -> SurfaceRoots:
+    """Create dense render roots with scalable area-stratified sampling."""
+
+    candidates = sample_surface_stratified(mesh, int(root_count), seed)
+    selected = np.arange(int(root_count), dtype=np.int64)
+    return SurfaceRoots(
+        points=candidates.points.astype(np.float32),
+        face_ids=candidates.face_ids.astype(np.int64),
+        barycentric=candidates.barycentric.astype(np.float32),
+        selected_candidate_ids=selected,
+        candidate_count=int(root_count),
+    )
+
+
+def initialize_surface_roots_from_candidates(
+    candidates: SurfaceCandidates,
+    selected_candidate_ids: np.ndarray,
+) -> SurfaceRoots:
+    """Create a SurfaceRoots object from a candidate pool and selected ids."""
+
+    selected = np.asarray(selected_candidate_ids, dtype=np.int64)
+    if selected.ndim != 1:
+        raise ValueError("selected_candidate_ids must be a 1D array")
+    if selected.size == 0:
+        raise ValueError("selected_candidate_ids cannot be empty")
+    if selected.min(initial=0) < 0 or selected.max(initial=0) >= int(candidates.points.shape[0]):
+        raise ValueError("selected_candidate_ids contain out-of-range values")
+    return SurfaceRoots(
+        points=candidates.points[selected].astype(np.float32),
+        face_ids=candidates.face_ids[selected].astype(np.int64),
+        barycentric=candidates.barycentric[selected].astype(np.float32),
+        selected_candidate_ids=selected.astype(np.int64),
+        candidate_count=int(candidates.points.shape[0]),
     )
 
 

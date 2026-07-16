@@ -163,6 +163,58 @@ def render_mesh_depth_from_tensors(
     return MeshDepthResult(depth=depth_map, face_id=face_id, valid=valid)
 
 
+def render_mesh_vertex_color_from_tensors(
+    vertices: torch.Tensor,
+    faces: torch.Tensor,
+    vertex_colors: torch.Tensor,
+    viewmat: torch.Tensor,
+    k: torch.Tensor,
+    width: int,
+    height: int,
+    *,
+    device: torch.device,
+    ctx=None,
+    background: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rasterize a vertex-color mesh image in the dataset camera convention."""
+
+    if not torch.cuda.is_available() or device.type != "cuda":
+        raise RuntimeError("render_mesh_vertex_color requires CUDA; do not use a CPU fallback for formal projection")
+    dr = _require_nvdiffrast()
+    if ctx is None:
+        ctx = dr.RasterizeCudaContext(device=device)
+
+    vertices = vertices.to(device=device, dtype=torch.float32)
+    faces = faces.to(device=device, dtype=torch.int32).contiguous()
+    vertex_colors = vertex_colors.to(device=device, dtype=torch.float32).contiguous()
+    if vertex_colors.ndim != 2 or vertex_colors.shape[0] != vertices.shape[0] or vertex_colors.shape[1] != 3:
+        raise ValueError("vertex_colors must have shape [num_vertices, 3]")
+
+    xy, depth, _ = project_points(vertices, viewmat.to(device=device), k.to(device=device))
+    x_ndc = xy[:, 0] / max(int(width) - 1, 1) * 2.0 - 1.0
+    y_ndc = 1.0 - xy[:, 1] / max(int(height) - 1, 1) * 2.0
+    positive = depth > 1.0e-6
+    if not bool(positive.any()):
+        raise RuntimeError("all mesh vertices are behind the camera")
+    near = depth[positive].min()
+    far = depth[positive].max()
+    z_clip = ((depth - near) / (far - near).clamp_min(1.0e-6)).clamp(0.0, 1.0) * 2.0 - 1.0
+    clip = torch.stack([x_ndc, y_ndc, z_clip, torch.ones_like(depth)], dim=-1)[None]
+    rast, _ = dr.rasterize(ctx, clip, faces, resolution=[int(height), int(width)])
+    color_attr, _ = dr.interpolate(vertex_colors[None].contiguous(), rast.contiguous(), faces)
+    face_id = rast[0, :, :, 3].long() - 1
+    valid = face_id >= 0
+    color_map = color_attr[0]
+    color_map = torch.flip(color_map, dims=[0])
+    valid = torch.flip(valid, dims=[0])
+    if background is not None:
+        bg = background.to(device=device, dtype=torch.float32).view(1, 1, 3).expand_as(color_map)
+    else:
+        bg = torch.zeros_like(color_map)
+    color_map = torch.where(valid[..., None], color_map, bg)
+    return color_map.clamp(0.0, 1.0), valid
+
+
 def _local_min_depth(depth: torch.Tensor, kernel_size: int) -> torch.Tensor:
     if kernel_size <= 1:
         return depth
