@@ -13,7 +13,7 @@ PHASE_A_OUTPUT="${RUN_ROOT}/phase_a_0_9k"
 PHASE_B_OUTPUT="${RUN_ROOT}/phase_b_9k_30k"
 PHASE_A_CONFIG="${PROJECT_ROOT}/configs/r004_evidence_localmax_0_9k.env"
 PHASE_B_CONFIG="${PROJECT_ROOT}/configs/r004_evidence_localmax_9k_30k.env"
-FLOW_TARGET="${PROJECT_ROOT}/_downloads/tiger_hair_flow_36/shell_fused_smal_head500_body4000_candidate65536_headk24_bodyk12_v4_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz"
+FLOW_TARGET="${FLOW_TARGET:-${PROJECT_ROOT}/_downloads/tiger_hair_flow_36/shell_fused_smal_head500_body4000_candidate65536_headk24_bodyk12_v4_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz}"
 
 mkdir -p "$RUN_ROOT" "$LOG_ROOT"
 cd "$PROJECT_ROOT"
