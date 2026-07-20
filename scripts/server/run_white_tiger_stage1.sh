@@ -3,6 +3,12 @@ set -euo pipefail
 
 PROJECT_ROOT="${PROJECT_ROOT:-/ssdwork/liuhaohan/petsgaussianhair}"
 PYTHON="${PYTHON:-/opt/conda/envs/gs/bin/python}"
+EXPLICIT_DATA_ROOT="${DATA_ROOT+x}"
+EXPLICIT_MESH_PATH="${MESH_PATH+x}"
+EXPLICIT_CLEAN_FLOW_TARGET="${CLEAN_FLOW_TARGET+x}"
+DATA_ROOT_OVERRIDE="${DATA_ROOT:-}"
+MESH_PATH_OVERRIDE="${MESH_PATH:-}"
+CLEAN_FLOW_TARGET_OVERRIDE="${CLEAN_FLOW_TARGET:-}"
 DATA_ROOT="${DATA_ROOT:-${PROJECT_ROOT}/data/neuralfur_work/whiteTiger_processed/roaringwalk}"
 MESH_PATH="${MESH_PATH:-${PROJECT_ROOT}/data_sources/neuralfur_official_results/whiteTiger/furless_reshaped.obj}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)}"
@@ -15,6 +21,15 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
 fi
 # shellcheck source=/dev/null
 source "$CONFIG_PATH"
+if [[ -n "$EXPLICIT_DATA_ROOT" ]]; then
+  DATA_ROOT="$DATA_ROOT_OVERRIDE"
+fi
+if [[ -n "$EXPLICIT_MESH_PATH" ]]; then
+  MESH_PATH="$MESH_PATH_OVERRIDE"
+fi
+if [[ -n "$EXPLICIT_CLEAN_FLOW_TARGET" ]]; then
+  CLEAN_FLOW_TARGET="$CLEAN_FLOW_TARGET_OVERRIDE"
+fi
 
 require_var() {
   local name="$1"
