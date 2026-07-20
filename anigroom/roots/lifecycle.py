@@ -12,6 +12,12 @@ from dataclasses import dataclass
 
 import torch
 
+from anigroom.surface_interpolation import (
+    build_local_surface_support,
+    interpolate_physical,
+    local_surface_weights,
+)
+
 
 EPS = 1e-8
 
@@ -712,10 +718,8 @@ def interpolate_child_attributes(
     faces: torch.Tensor,
     *,
     neighbor_count: int = 8,
-    parent_weight: float = 3.0,
-    chunk_size: int = 1024,
 ) -> torch.Tensor:
-    """Initialize child root attributes from parent + local root neighbors.
+    """Initialize child root attributes from topology-local root support.
 
     Call this before applying the prune mask.  Parents remain available for
     interpolation, then can be removed by ``apply_attribute_update``.
@@ -726,24 +730,17 @@ def interpolate_child_attributes(
         raise ValueError("attributes must have one row per old root")
     if update.new_barycentric.numel() == 0:
         return attributes.new_empty((0, *attributes.shape[1:]))
-    flat = attributes.reshape(attributes.shape[0], -1)
     child_points = barycentric_to_points(vertices, faces, update.new_face_ids, update.new_barycentric)
-    k = max(1, min(int(neighbor_count), int(state.points.shape[0])))
-    chunk_size = max(1, int(chunk_size))
-    child_flat = flat.new_empty((child_points.shape[0], flat.shape[1]))
-    for begin in range(0, int(child_points.shape[0]), chunk_size):
-        end = min(begin + chunk_size, int(child_points.shape[0]))
-        dist = torch.cdist(child_points[begin:end], state.points)
-        knn = torch.topk(dist, k=k, largest=False, dim=-1).indices
-        parent_ids = update.child_parent_indices[begin:end].reshape(-1, 1)
-        ids = torch.cat([parent_ids, knn], dim=1)
-        gathered_dist = torch.gather(dist, 1, ids).clamp_min(EPS)
-        weights = 1.0 / gathered_dist.square()
-        weights[:, 0] = weights[:, 0] * float(parent_weight)
-        weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(EPS)
-        values = flat[ids]
-        child_flat[begin:end] = (values * weights[:, :, None]).sum(dim=1)
-    return child_flat.reshape((child_flat.shape[0], *attributes.shape[1:]))
+    support = build_local_surface_support(
+        faces=faces,
+        source_points=state.points,
+        source_face_ids=state.face_ids,
+        query_points=child_points,
+        query_face_ids=update.new_face_ids,
+        neighbor_count=neighbor_count,
+    )
+    weights = local_surface_weights(child_points, state.points, support)
+    return interpolate_physical(attributes, support.indices, weights)
 
 
 def apply_attribute_update(

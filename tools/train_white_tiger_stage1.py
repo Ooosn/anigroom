@@ -79,6 +79,15 @@ from anigroom.roots.lifecycle import (  # noqa: E402
     normalized_root_need,
 )
 from anigroom.roots.statistics import RootStatsWindow  # noqa: E402
+from anigroom.surface_interpolation import (  # noqa: E402
+    SurfaceFieldInterpolator,
+    SurfaceSupport,
+    build_local_surface_support,
+    interpolate_directions,
+    interpolate_periodic,
+    interpolate_physical,
+    local_surface_weights,
+)
 
 
 EPS = 1.0e-8
@@ -2111,11 +2120,10 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.register_parameter("guide_clump_strength_raw", None)
             self.register_parameter("guide_flow_xy", None)
         self.register_buffer("guide_interp_ids_cache", torch.empty((0, 0), device=device, dtype=torch.long), persistent=False)
-        self.register_buffer("guide_interp_weights_cache", torch.empty((0, 0), device=device), persistent=False)
-        self._guide_interp_cache_root_count = -1
-        self._guide_interp_cache_guide_count = -1
-        self._guide_interp_cache_k = -1
+        self.register_buffer("guide_interp_vertex_paths_cache", torch.empty((0, 0, 3), device=device), persistent=False)
+        self._guide_surface_interpolator: SurfaceFieldInterpolator | None = None
         self.initialize_default_groom()
+        self.rebuild_guide_surface_interpolation()
 
     def initialize_default_groom(self) -> None:
         ranges = self.groom.ranges
@@ -2162,47 +2170,44 @@ class WhiteTigerStage1Model(torch.nn.Module):
     def invalidate_guide_interpolation_cache(self) -> None:
         device = self.vertices.device
         self.guide_interp_ids_cache = torch.empty((0, 0), device=device, dtype=torch.long)
-        self.guide_interp_weights_cache = torch.empty((0, 0), device=device)
-        self._guide_interp_cache_root_count = -1
-        self._guide_interp_cache_guide_count = -1
-        self._guide_interp_cache_k = -1
+        self.guide_interp_vertex_paths_cache = torch.empty((0, 0, 3), device=device)
 
     @torch.no_grad()
-    def guide_interpolation_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def rebuild_guide_surface_interpolation(self) -> None:
+        self.invalidate_guide_interpolation_cache()
         if not self.guide_enabled():
-            raise RuntimeError("guide interpolation cache requested but guide roots are disabled")
-        root_support = self.anchor_local.detach()
-        guide_support = self.guide_points_local.detach()
-        root_count = int(root_support.shape[0])
-        guide_count = int(guide_support.shape[0])
-        k = max(1, min(int(self.guide_interpolation_k), guide_count))
-        cache_valid = (
-            int(self._guide_interp_cache_root_count) == root_count
-            and int(self._guide_interp_cache_guide_count) == guide_count
-            and int(self._guide_interp_cache_k) == k
-            and tuple(self.guide_interp_ids_cache.shape) == (root_count, k)
-            and tuple(self.guide_interp_weights_cache.shape) == (root_count, k)
+            self._guide_surface_interpolator = None
+            return
+        self._guide_surface_interpolator = SurfaceFieldInterpolator(
+            vertices=self.vertices,
+            faces=self.faces,
+            source_points=self.guide_points_local,
+            source_face_ids=self.guide_face_ids,
+            neighbor_count=self.guide_interpolation_k,
+            device=self.vertices.device,
         )
-        if cache_valid:
-            return self.guide_interp_ids_cache, self.guide_interp_weights_cache
+        support = self._guide_surface_interpolator.build_support(self.anchor_local, self.face_ids)
+        self.guide_interp_ids_cache = support.indices.detach()
+        self.guide_interp_vertex_paths_cache = support.vertex_path_distances.detach()
 
-        guide_np = np.ascontiguousarray(guide_support.to(device="cpu", dtype=torch.float32).numpy())
-        root_np = np.ascontiguousarray(root_support.to(device="cpu", dtype=torch.float32).numpy())
-        guide_tree = cKDTree(guide_np)
-        values_np, ids_np = guide_tree.query(root_np, k=k, workers=-1)
-        if k == 1:
-            values_np = values_np[:, None]
-            ids_np = ids_np[:, None]
-        ids = torch.as_tensor(ids_np, device=root_support.device, dtype=torch.long)
-        values = torch.as_tensor(values_np, device=root_support.device, dtype=root_support.dtype)
-        weights = 1.0 / values.clamp_min(1.0e-6).square()
-        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(EPS)
-        self.guide_interp_ids_cache = ids.detach()
-        self.guide_interp_weights_cache = weights.detach()
-        self._guide_interp_cache_root_count = root_count
-        self._guide_interp_cache_guide_count = guide_count
-        self._guide_interp_cache_k = k
-        return self.guide_interp_ids_cache, self.guide_interp_weights_cache
+    @torch.no_grad()
+    def guide_interpolation_support(self) -> SurfaceSupport:
+        if not self.guide_enabled():
+            raise RuntimeError("guide interpolation support requested but guide roots are disabled")
+        expected = (
+            int(self.anchor_local.shape[0]),
+            min(int(self.guide_interpolation_k), int(self.guide_points_local.shape[0])),
+        )
+        if tuple(self.guide_interp_ids_cache.shape) != expected:
+            self.rebuild_guide_surface_interpolation()
+        return SurfaceSupport(
+            indices=self.guide_interp_ids_cache,
+            vertex_path_distances=self.guide_interp_vertex_paths_cache,
+            report={
+                "query_count": int(self.guide_interp_ids_cache.shape[0]),
+                "neighbor_count": int(self.guide_interp_ids_cache.shape[1]),
+            },
+        )
 
     def guide_lifecycle_state(self) -> RootLifecycleState:
         if not self.guide_enabled():
@@ -2222,7 +2227,55 @@ class WhiteTigerStage1Model(torch.nn.Module):
             return {"old_guide_root_count": old_count, "guide_root_count_after": old_count}
 
         device = self.vertices.device
-        guide_params = {
+        child_count = int(update.new_barycentric.shape[0])
+        child_points = (
+            (
+                self.vertices[self.faces[update.new_face_ids]]
+                * update.new_barycentric[:, :, None]
+            ).sum(dim=1)
+            if child_count
+            else old_state.points.new_empty((0, 3))
+        )
+        if child_count:
+            child_support = build_local_surface_support(
+                faces=self.faces,
+                source_points=old_state.points,
+                source_face_ids=old_state.face_ids,
+                query_points=child_points,
+                query_face_ids=update.new_face_ids,
+                neighbor_count=8,
+            )
+            child_weights = local_surface_weights(child_points, old_state.points, child_support)
+            child_ids = child_support.indices
+        else:
+            child_ids = old_state.face_ids.new_empty((0, 0))
+            child_weights = old_state.points.new_empty((0, 0))
+
+        ranges = self.groom.ranges
+        physical_sources = {
+            "guide_length_raw": GroomParameterField._decode_range(self.guide_length_raw.detach(), ranges.length),
+            "guide_root_width_raw": GroomParameterField._decode_range(self.guide_root_width_raw.detach(), ranges.root_width),
+            "guide_flow_strength_raw": GroomParameterField._decode_range(self.guide_flow_strength_raw.detach(), ranges.flow_strength),
+            "guide_lift_raw": GroomParameterField._decode_range(self.guide_lift_raw.detach(), ranges.lift),
+            "guide_bend_raw": torch.tanh(self.guide_bend_raw.detach()),
+            "guide_stiffness_raw": GroomParameterField._decode_range(self.guide_stiffness_raw.detach(), ranges.stiffness),
+            "guide_curl_radius_raw": GroomParameterField._decode_range(self.guide_curl_radius_raw.detach(), ranges.curl_radius),
+            "guide_frizz_raw": GroomParameterField._decode_range(self.guide_frizz_raw.detach(), ranges.frizz),
+            "guide_child_radius_raw": GroomParameterField._decode_range(self.guide_child_radius_raw.detach(), ranges.child_radius),
+            "guide_clump_strength_raw": GroomParameterField._decode_range(self.guide_clump_strength_raw.detach(), ranges.clump_strength),
+        }
+        raw_bounds = {
+            "guide_length_raw": ranges.length,
+            "guide_root_width_raw": ranges.root_width,
+            "guide_flow_strength_raw": ranges.flow_strength,
+            "guide_lift_raw": ranges.lift,
+            "guide_stiffness_raw": ranges.stiffness,
+            "guide_curl_radius_raw": ranges.curl_radius,
+            "guide_frizz_raw": ranges.frizz,
+            "guide_child_radius_raw": ranges.child_radius,
+            "guide_clump_strength_raw": ranges.clump_strength,
+        }
+        old_raw = {
             "guide_length_raw": self.guide_length_raw.detach(),
             "guide_root_width_raw": self.guide_root_width_raw.detach(),
             "guide_flow_strength_raw": self.guide_flow_strength_raw.detach(),
@@ -2233,29 +2286,95 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "guide_frizz_raw": self.guide_frizz_raw.detach(),
             "guide_child_radius_raw": self.guide_child_radius_raw.detach(),
             "guide_clump_strength_raw": self.guide_clump_strength_raw.detach(),
+        }
+        new_params: dict[str, torch.Tensor] = {}
+        for name, source in physical_sources.items():
+            child_physical = (
+                interpolate_physical(source, child_ids, child_weights)
+                if child_count
+                else source.new_empty((0, *source.shape[1:]))
+            )
+            if name == "guide_bend_raw":
+                child_raw = torch.atanh(child_physical.clamp(-0.999, 0.999))
+            else:
+                child_raw = raw_from_range(child_physical, raw_bounds[name])
+            new_params[name] = apply_attribute_update(old_raw[name], update, child_raw)
+
+        guide_normals, guide_tangents, guide_bitangents = self.guide_normals_and_tangent_frames()
+        child_normals, child_tangents, child_bitangents = self.tangent_frames_for_face_ids(update.new_face_ids)
+        if self.guide_flow_xy is not None:
+            source_direction = controls_direction_3d(
+                self.guide_flow_xy.detach(),
+                physical_sources["guide_flow_strength_raw"],
+                physical_sources["guide_lift_raw"],
+                guide_normals,
+                guide_tangents,
+                guide_bitangents,
+            )
+            child_direction = (
+                interpolate_directions(
+                    source_direction,
+                    guide_normals,
+                    child_normals,
+                    child_ids,
+                    child_weights,
+                )
+                if child_count
+                else source_direction.new_empty((0, 3))
+            )
+            child_flow, child_lift, child_strength = direction_to_flow_lift_strength(
+                child_direction,
+                child_normals,
+                child_tangents,
+                child_bitangents,
+                lift_bounds=ranges.lift,
+                flow_strength_bounds=ranges.flow_strength,
+            )
+            new_params["guide_flow_xy"] = apply_attribute_update(
+                self.guide_flow_xy.detach(),
+                update,
+                child_flow,
+            )
+            new_params["guide_lift_raw"] = apply_attribute_update(
+                self.guide_lift_raw.detach(),
+                update,
+                raw_from_range(child_lift, ranges.lift),
+            )
+            new_params["guide_flow_strength_raw"] = apply_attribute_update(
+                self.guide_flow_strength_raw.detach(),
+                update,
+                raw_from_range(child_strength, ranges.flow_strength),
+            )
+
+        evidence_sources = {
             "guide_region_weight": self.guide_region_weight.detach(),
-            "guide_clean_flow_direction_target": self.guide_clean_flow_direction_target.detach(),
             "guide_clean_flow_anchor_confidence": self.guide_clean_flow_anchor_confidence.detach().reshape(-1, 1),
             "guide_clean_flow_length_target": self.guide_clean_flow_length_target.detach().reshape(-1, 1),
             "guide_clean_flow_length_confidence": self.guide_clean_flow_length_confidence.detach().reshape(-1, 1),
         }
-        if self.guide_flow_xy is not None:
-            guide_params["guide_flow_xy"] = self.guide_flow_xy.detach()
-
-        new_params: dict[str, torch.Tensor] = {}
-        for name, values in guide_params.items():
-            child = interpolate_child_attributes(
-                values,
-                old_state,
-                update,
-                self.vertices,
-                self.faces,
-                neighbor_count=8,
-                parent_weight=3.0,
+        for name, source in evidence_sources.items():
+            child = (
+                interpolate_physical(source, child_ids, child_weights)
+                if child_count
+                else source.new_empty((0, *source.shape[1:]))
             )
-            if name in {"guide_flow_xy", "guide_clean_flow_direction_target"} and child.numel() > 0:
-                child = F.normalize(child, dim=-1, eps=1.0e-8)
-            new_params[name] = apply_attribute_update(values, update, child)
+            new_params[name] = apply_attribute_update(source, update, child)
+        child_clean_direction = (
+            interpolate_directions(
+                self.guide_clean_flow_direction_target.detach(),
+                guide_normals,
+                child_normals,
+                child_ids,
+                child_weights,
+            )
+            if child_count
+            else self.guide_clean_flow_direction_target.new_empty((0, 3))
+        )
+        new_params["guide_clean_flow_direction_target"] = apply_attribute_update(
+            self.guide_clean_flow_direction_target.detach(),
+            update,
+            child_clean_direction,
+        )
 
         new_state = apply_structure_update(old_state, update, self.vertices, self.faces)
         new_count = int(new_state.points.shape[0])
@@ -2281,22 +2400,35 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.guide_clean_flow_length_confidence = new_params["guide_clean_flow_length_confidence"].to(device=device).reshape(-1).detach().clamp(0.0, 1.0)
         if self.guide_flow_xy is not None:
             self.guide_flow_xy = torch.nn.Parameter(new_params["guide_flow_xy"].to(device=device))
-        self.invalidate_guide_interpolation_cache()
+        self.rebuild_guide_surface_interpolation()
         return {"old_guide_root_count": old_count, "guide_root_count_after": new_count}
 
-    def interpolate_guide_controls(
+    def sample_guide_controls(
         self,
         roots_local: torch.Tensor,
+        root_face_ids: torch.Tensor,
         root_normals: torch.Tensor,
         root_tangents: torch.Tensor,
         root_bitangents: torch.Tensor,
+        support: SurfaceSupport | None = None,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor | None]:
         if not self.guide_enabled():
             return {}, None
-        guide_count = int(self.guide_points_local.shape[0])
-        if int(roots_local.shape[0]) != int(self.anchor_local.shape[0]):
-            raise RuntimeError("guide interpolation root count does not match render root support count")
-        ids, weights = self.guide_interpolation_cache()
+        if self._guide_surface_interpolator is None:
+            self.rebuild_guide_surface_interpolation()
+        if self._guide_surface_interpolator is None:
+            raise RuntimeError("guide surface interpolator is unavailable")
+        if support is None:
+            support = self._guide_surface_interpolator.build_support(
+                roots_local.detach(),
+                root_face_ids.detach(),
+            )
+        weights = self._guide_surface_interpolator.weights(
+            roots_local,
+            root_face_ids,
+            support,
+        )
+        ids = support.indices
         ranges = self.groom.ranges
         guide_values = {
             "length": GroomParameterField._decode_range(self.guide_length_raw, ranges.length),
@@ -2311,8 +2443,6 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "clump_strength": GroomParameterField._decode_range(self.guide_clump_strength_raw, ranges.clump_strength),
             "region_head_weight": self.guide_region_weight.clamp(0.0, 1.0),
         }
-        interp = {name: [] for name in guide_values}
-        direction_out = []
         if self.guide_flow_xy is not None:
             guide_normals, guide_tangents, guide_bitangents = self.guide_normals_and_tangent_frames()
             guide_direction = controls_direction_3d(
@@ -2323,14 +2453,39 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 guide_tangents,
                 guide_bitangents,
             )
-        for name, guide_value in guide_values.items():
-            interp[name].append((guide_value[ids] * weights[..., None]).sum(dim=1))
+        guide_interp = {
+            name: interpolate_physical(guide_value, ids, weights)
+            for name, guide_value in guide_values.items()
+        }
         if self.guide_flow_xy is not None:
-            direction = F.normalize((guide_direction[ids] * weights[..., None]).sum(dim=1), dim=-1, eps=1.0e-8)
-            direction_out.append(direction)
-        guide_interp = {name: torch.cat(parts, dim=0) for name, parts in interp.items()}
-        guide_direction = torch.cat(direction_out, dim=0) if direction_out else None
-        return guide_interp, guide_direction
+            guide_direction_out = interpolate_directions(
+                guide_direction,
+                guide_normals,
+                root_normals,
+                ids,
+                weights,
+            )
+        else:
+            guide_direction_out = None
+        return guide_interp, guide_direction_out
+
+    def interpolate_guide_controls(
+        self,
+        roots_local: torch.Tensor,
+        root_normals: torch.Tensor,
+        root_tangents: torch.Tensor,
+        root_bitangents: torch.Tensor,
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor | None]:
+        if int(roots_local.shape[0]) != int(self.anchor_local.shape[0]):
+            raise RuntimeError("guide interpolation root count does not match render root support count")
+        return self.sample_guide_controls(
+            roots_local,
+            self.face_ids,
+            root_normals,
+            root_tangents,
+            root_bitangents,
+            support=self.guide_interpolation_support(),
+        )
 
     def apply_guide_controls(
         self,
@@ -2576,6 +2731,17 @@ class WhiteTigerStage1Model(torch.nn.Module):
             bitangents = F.normalize(torch.cross(normals, tangents, dim=-1), dim=-1, eps=1.0e-8)
         return normals, tangents, bitangents
 
+    def tangent_frames_for_face_ids(self, face_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        normals = F.normalize(self.face_normals[face_ids], dim=-1, eps=1.0e-8)
+        if self.face_tangents.numel() == 0:
+            tangents, bitangents = make_tangent_frames(normals)
+        else:
+            tangents = self.face_tangents[face_ids]
+            tangents = tangents - (tangents * normals).sum(dim=-1, keepdim=True) * normals
+            tangents = F.normalize(tangents, dim=-1, eps=1.0e-8)
+            bitangents = F.normalize(torch.cross(normals, tangents, dim=-1), dim=-1, eps=1.0e-8)
+        return normals, tangents, bitangents
+
     def render_parameters(self, samples: int, child_count: int, min_segments: int, max_segments: int, length_overlap: float):
         roots, normals, roots_local = self.roots_and_normals()
         tangents, bitangents = self.tangent_frames(normals)
@@ -2707,40 +2873,45 @@ class WhiteTigerStage1Model(torch.nn.Module):
         old_params = {name: param.detach() for name, param in self.groom.named_parameters()}
         old_child_color_delta = self.child_color_delta_raw.detach() if self.child_color_delta_raw is not None else None
         old_child_opacity_delta = self.child_opacity_delta_raw.detach() if self.child_opacity_delta_raw is not None else None
-        new_values: dict[str, torch.Tensor] = {}
-        for name, values in old_params.items():
-            if update.new_barycentric.numel() == 0:
-                child = values.new_empty((0, *values.shape[1:]))
-            elif name == "curl_phase":
-                child_cos = interpolate_child_attributes(
-                    torch.cos(values),
-                    old_state,
-                    update,
-                    self.vertices,
-                    self.faces,
-                    neighbor_count=8,
-                    parent_weight=3.0,
-                )
-                child_sin = interpolate_child_attributes(
-                    torch.sin(values),
-                    old_state,
-                    update,
-                    self.vertices,
-                    self.faces,
-                    neighbor_count=8,
-                    parent_weight=3.0,
-                )
-                child = torch.atan2(child_sin, child_cos)
-            else:
-                child = interpolate_child_attributes(
-                    values,
-                    old_state,
-                    update,
-                    self.vertices,
-                    self.faces,
-                    neighbor_count=8,
-                    parent_weight=3.0,
-                )
+        child_count = int(update.new_barycentric.shape[0])
+        child_points = (
+            (
+                self.vertices[self.faces[update.new_face_ids]]
+                * update.new_barycentric[:, :, None]
+            ).sum(dim=1)
+            if child_count
+            else old_state.points.new_empty((0, 3))
+        )
+        if child_count:
+            child_support = build_local_surface_support(
+                faces=self.faces,
+                source_points=old_state.points,
+                source_face_ids=old_state.face_ids,
+                query_points=child_points,
+                query_face_ids=update.new_face_ids,
+                neighbor_count=8,
+            )
+            child_ids = child_support.indices
+            child_weights = local_surface_weights(child_points, old_state.points, child_support)
+            old_normals, old_tangents, old_bitangents = self.tangent_frames_for_face_ids(old_state.face_ids)
+            child_normals, child_tangents, child_bitangents = self.tangent_frames_for_face_ids(update.new_face_ids)
+        else:
+            child_ids = old_state.face_ids.new_empty((0, 0))
+            child_weights = old_state.points.new_empty((0, 0))
+            old_normals = old_state.points.new_empty((old_count, 3))
+            old_tangents = old_state.points.new_empty((old_count, 3))
+            old_bitangents = old_state.points.new_empty((old_count, 3))
+            child_normals = old_state.points.new_empty((0, 3))
+            child_tangents = old_state.points.new_empty((0, 3))
+            child_bitangents = old_state.points.new_empty((0, 3))
+
+        def empty_like_source(source: torch.Tensor) -> torch.Tensor:
+            return source.new_empty((0, *source.shape[1:]))
+
+        def interpolate_source(source: torch.Tensor) -> torch.Tensor:
+            return interpolate_physical(source, child_ids, child_weights) if child_count else empty_like_source(source)
+
+        def apply_overlong_override(name: str, child: torch.Tensor) -> torch.Tensor:
             if child.numel() > 0:
                 override_key = f"overlong_child_{name}"
                 if override_key in update.scores:
@@ -2759,7 +2930,102 @@ class WhiteTigerStage1Model(torch.nn.Module):
                         if override.shape != child.shape:
                             raise RuntimeError(f"{override_key} override shape mismatch")
                         child[override_mask] = override[override_mask]
-            new_values[name] = apply_attribute_update(values, update, child)
+            return child
+
+        decoded = self.groom.decode()
+        tip_width_ratio = (decoded.tip_width / decoded.root_width.clamp_min(EPS)).clamp(
+            float(ranges.tip_width_ratio[0]),
+            float(ranges.tip_width_ratio[1]),
+        )
+        tip_opacity_ratio = (decoded.tip_opacity / decoded.root_opacity.clamp_min(EPS)).clamp(
+            float(ranges.tip_opacity_ratio[0]),
+            float(ranges.tip_opacity_ratio[1]),
+        )
+        physical_sources = {
+            "length_raw": decoded.length.detach(),
+            "root_width_raw": decoded.root_width.detach(),
+            "tip_width_ratio_raw": tip_width_ratio.detach(),
+            "width_taper_raw": decoded.width_taper.detach(),
+            "flow_strength_raw": decoded.flow_strength.detach(),
+            "lift_raw": decoded.lift.detach(),
+            "bend_raw": decoded.bend.detach(),
+            "sag_raw": decoded.sag.detach(),
+            "stiffness_raw": decoded.stiffness.detach(),
+            "curl_radius_raw": decoded.curl_radius.detach(),
+            "curl_frequency_raw": decoded.curl_frequency.detach(),
+            "frizz_raw": decoded.frizz.detach(),
+            "child_radius_raw": decoded.child_radius.detach(),
+            "clump_strength_raw": decoded.clump_strength.detach(),
+            "root_color_raw": decoded.root_color.detach(),
+            "tip_color_raw": decoded.tip_color.detach(),
+            "opacity_raw": decoded.root_opacity.detach(),
+            "tip_opacity_ratio_raw": tip_opacity_ratio.detach(),
+        }
+        raw_bounds = {
+            "length_raw": ranges.length,
+            "root_width_raw": ranges.root_width,
+            "tip_width_ratio_raw": ranges.tip_width_ratio,
+            "width_taper_raw": ranges.width_taper,
+            "flow_strength_raw": ranges.flow_strength,
+            "lift_raw": ranges.lift,
+            "sag_raw": ranges.sag,
+            "stiffness_raw": ranges.stiffness,
+            "curl_radius_raw": ranges.curl_radius,
+            "curl_frequency_raw": ranges.curl_frequency,
+            "frizz_raw": ranges.frizz,
+            "child_radius_raw": ranges.child_radius,
+            "clump_strength_raw": ranges.clump_strength,
+            "opacity_raw": ranges.opacity,
+            "tip_opacity_ratio_raw": ranges.tip_opacity_ratio,
+        }
+        child_raw: dict[str, torch.Tensor] = {}
+        for name, source in physical_sources.items():
+            child_value = interpolate_source(source)
+            if name == "bend_raw":
+                child_raw[name] = torch.atanh(child_value.clamp(-0.999, 0.999))
+            elif name in {"root_color_raw", "tip_color_raw"}:
+                child_raw[name] = inv_sigmoid(child_value.clamp(1.0e-5, 1.0 - 1.0e-5))
+            else:
+                child_raw[name] = raw_from_range(child_value, raw_bounds[name])
+        child_raw["curl_phase"] = (
+            interpolate_periodic(self.groom.curl_phase.detach(), child_ids, child_weights)
+            if child_count
+            else self.groom.curl_phase.new_empty((0, 1))
+        )
+        if child_count:
+            source_direction = controls_direction_3d(
+                decoded.flow_xy.detach(),
+                decoded.flow_strength.detach(),
+                decoded.lift.detach(),
+                old_normals,
+                old_tangents,
+                old_bitangents,
+            )
+            child_direction = interpolate_directions(
+                source_direction,
+                old_normals,
+                child_normals,
+                child_ids,
+                child_weights,
+            )
+            child_flow, child_lift, child_strength = direction_to_flow_lift_strength(
+                child_direction,
+                child_normals,
+                child_tangents,
+                child_bitangents,
+                lift_bounds=ranges.lift,
+                flow_strength_bounds=ranges.flow_strength,
+            )
+            child_raw["flow_xy"] = child_flow
+            child_raw["lift_raw"] = raw_from_range(child_lift, ranges.lift)
+            child_raw["flow_strength_raw"] = raw_from_range(child_strength, ranges.flow_strength)
+        else:
+            child_raw["flow_xy"] = self.groom.flow_xy.new_empty((0, 2))
+
+        new_values = {
+            name: apply_attribute_update(values, update, apply_overlong_override(name, child_raw[name]))
+            for name, values in old_params.items()
+        }
 
         new_state = apply_structure_update(old_state, update, self.vertices, self.faces)
         new_count = int(new_state.points.shape[0])
@@ -2779,38 +3045,14 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.bary_logits = torch.nn.Parameter(torch.log(self.bary_initial.clamp_min(1.0e-5)))
         self.groom = new_groom
         if old_child_color_delta is not None:
-            child_delta = interpolate_child_attributes(
-                old_child_color_delta,
-                old_state,
-                update,
-                self.vertices,
-                self.faces,
-                neighbor_count=8,
-                parent_weight=3.0,
-            )
+            child_delta = interpolate_source(old_child_color_delta)
             self.child_color_delta_raw = torch.nn.Parameter(apply_attribute_update(old_child_color_delta, update, child_delta))
         if old_child_opacity_delta is not None:
-            child_delta = interpolate_child_attributes(
-                old_child_opacity_delta,
-                old_state,
-                update,
-                self.vertices,
-                self.faces,
-                neighbor_count=8,
-                parent_weight=3.0,
-            )
+            child_delta = interpolate_source(old_child_opacity_delta)
             self.child_opacity_delta_raw = torch.nn.Parameter(apply_attribute_update(old_child_opacity_delta, update, child_delta))
         old_conf = self.root_observation_confidence.detach()
         child_conf = (
-            interpolate_child_attributes(
-                old_conf[:, None],
-                old_state,
-                update,
-                self.vertices,
-                self.faces,
-                neighbor_count=8,
-                parent_weight=3.0,
-            ).reshape(-1)
+            interpolate_source(old_conf[:, None]).reshape(-1)
             if update.new_barycentric.numel() > 0
             else old_conf.new_empty((0,))
         )
@@ -2818,25 +3060,15 @@ class WhiteTigerStage1Model(torch.nn.Module):
         old_clean_dir = self.clean_flow_direction_target.detach()
         old_clean_conf = self.clean_flow_anchor_confidence.detach()
         if update.new_barycentric.numel() > 0:
-            child_clean_dir = interpolate_child_attributes(
+            child_clean_dir = interpolate_directions(
                 old_clean_dir,
-                old_state,
-                update,
-                self.vertices,
-                self.faces,
-                neighbor_count=8,
-                parent_weight=3.0,
+                old_normals,
+                child_normals,
+                child_ids,
+                child_weights,
             )
             child_clean_dir = F.normalize(child_clean_dir, dim=-1, eps=1.0e-8)
-            child_clean_conf = interpolate_child_attributes(
-                old_clean_conf[:, None],
-                old_state,
-                update,
-                self.vertices,
-                self.faces,
-                neighbor_count=8,
-                parent_weight=3.0,
-            ).reshape(-1)
+            child_clean_conf = interpolate_source(old_clean_conf[:, None]).reshape(-1)
         else:
             child_clean_dir = old_clean_dir.new_empty((0, 3))
             child_clean_conf = old_clean_conf.new_empty((0,))
@@ -2847,30 +3079,14 @@ class WhiteTigerStage1Model(torch.nn.Module):
         old_length_target = self.clean_flow_length_target.detach()
         old_length_conf = self.clean_flow_length_confidence.detach()
         if update.new_barycentric.numel() > 0:
-            child_length_target = interpolate_child_attributes(
-                old_length_target[:, None],
-                old_state,
-                update,
-                self.vertices,
-                self.faces,
-                neighbor_count=8,
-                parent_weight=3.0,
-            ).reshape(-1)
-            child_length_conf = interpolate_child_attributes(
-                old_length_conf[:, None],
-                old_state,
-                update,
-                self.vertices,
-                self.faces,
-                neighbor_count=8,
-                parent_weight=3.0,
-            ).reshape(-1)
+            child_length_target = interpolate_source(old_length_target[:, None]).reshape(-1)
+            child_length_conf = interpolate_source(old_length_conf[:, None]).reshape(-1)
         else:
             child_length_target = old_length_target.new_empty((0,))
             child_length_conf = old_length_conf.new_empty((0,))
         self.clean_flow_length_target = apply_attribute_update(old_length_target, update, child_length_target).detach().clamp_min(0.0)
         self.clean_flow_length_confidence = apply_attribute_update(old_length_conf, update, child_length_conf).detach().clamp(0.0, 1.0)
-        self.invalidate_guide_interpolation_cache()
+        self.rebuild_guide_surface_interpolation()
         return {"old_root_count": old_count, "root_count_after": new_count}
 
 
@@ -3261,6 +3477,19 @@ def initialize_guide_controls_from_roots(
     root_direction = groom_direction_3d(groom, normals, tangents, bitangents)
     guide_normals, guide_tangents, guide_bitangents = model.guide_normals_and_tangent_frames()
     root_conf = model.root_observation_confidence.detach().reshape(-1).clamp(0.0, 1.0)
+    support = build_local_surface_support(
+        faces=model.faces,
+        source_points=roots_local.detach(),
+        source_face_ids=model.face_ids.detach(),
+        query_points=model.guide_points_local.detach(),
+        query_face_ids=model.guide_face_ids.detach(),
+        neighbor_count=k,
+    )
+    ids = support.indices
+    weights = local_surface_weights(model.guide_points_local, roots_local.detach(), support)
+    confidence_weight = (0.15 + root_conf[ids]).clamp_min(0.15)
+    weights = weights * confidence_weight
+    weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(EPS)
     guide_targets = {
         "length": groom.length,
         "root_width": groom.root_width,
@@ -3273,39 +3502,30 @@ def initialize_guide_controls_from_roots(
         "child_radius": groom.child_radius,
         "clump_strength": groom.clump_strength,
     }
-    target_out = {name: [] for name in guide_targets}
-    flow_out = []
-    confidence_out = []
-    chunk = 2048
-    for begin in range(0, guide_count, chunk):
-        end = min(begin + chunk, guide_count)
-        dist = torch.cdist(model.guide_points_local[begin:end], roots_local)
-        values, ids = torch.topk(dist, k=k, largest=False, dim=-1)
-        weights = 1.0 / values.clamp_min(1.0e-6).square()
-        conf = root_conf[ids]
-        weighted_conf = (0.15 + conf).clamp_min(0.15)
-        weights = weights * weighted_conf
-        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(EPS)
-        for name, target in guide_targets.items():
-            target_out[name].append((target[ids] * weights[..., None]).sum(dim=1))
-        direction = F.normalize((root_direction[ids] * weights[..., None]).sum(dim=1), dim=-1, eps=1.0e-8)
-        local_normals = guide_normals[begin:end]
-        local_tangents = guide_tangents[begin:end]
-        local_bitangents = guide_bitangents[begin:end]
-        tangent_part = direction - (direction * local_normals).sum(dim=-1, keepdim=True) * local_normals
-        flow = torch.stack(
+    guide_values = {
+        name: interpolate_physical(target, ids, weights)
+        for name, target in guide_targets.items()
+    }
+    direction = interpolate_directions(
+        root_direction,
+        normals,
+        guide_normals,
+        ids,
+        weights,
+    )
+    tangent_part = direction - (direction * guide_normals).sum(dim=-1, keepdim=True) * guide_normals
+    guide_flow = F.normalize(
+        torch.stack(
             [
-                (tangent_part * local_tangents).sum(dim=-1),
-                (tangent_part * local_bitangents).sum(dim=-1),
+                (tangent_part * guide_tangents).sum(dim=-1),
+                (tangent_part * guide_bitangents).sum(dim=-1),
             ],
             dim=-1,
-        )
-        flow_out.append(F.normalize(flow, dim=-1, eps=1.0e-8))
-        confidence_out.append((conf * weights).sum(dim=-1))
-
-    guide_values = {name: torch.cat(parts, dim=0) for name, parts in target_out.items()}
-    guide_flow = torch.cat(flow_out, dim=0)
-    guide_confidence = torch.cat(confidence_out, dim=0)
+        ),
+        dim=-1,
+        eps=1.0e-8,
+    )
+    guide_confidence = interpolate_physical(root_conf, ids, weights)
     model.guide_length_raw.copy_(raw_from_range(guide_values["length"], model.groom.ranges.length))
     model.guide_root_width_raw.copy_(raw_from_range(guide_values["root_width"], model.groom.ranges.root_width))
     if not preserve_direction_controls:
@@ -3324,6 +3544,7 @@ def initialize_guide_controls_from_roots(
         "guide_init_count": guide_count,
         "guide_init_k": k,
         "guide_init_mean_confidence": float(guide_confidence.mean().detach().cpu()),
+        "guide_init_surface_support_max_rings": int(support.report.get("max_rings_used", 0)),
         "guide_init_flow_enabled": int(model.guide_flow_xy is not None),
         "guide_init_direction_preserved": int(bool(preserve_direction_controls)),
     }
