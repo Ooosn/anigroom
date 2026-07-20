@@ -53,9 +53,9 @@ The current baseline densification state is:
   roots.
 - Render-root parents are retained.  This is insertion/clone-style growth, not
   split-and-delete.
-- Render-root attributes for inserted children are inherited from nearest old
-  roots with a Euclidean KNN helper.  This is one of the R003 interpolation
-  call sites.
+- Render-root attributes for inserted children are inherited from old render
+  roots.  In R003 this inheritance is surface-local and typed, not unrestricted
+  Euclidean KNN.
 - Guide-root densification is active from iteration 11000 through 16000, every
   200 iterations.
 - Guide-root candidates are selected from render-root need interpolated to
@@ -112,11 +112,12 @@ Implemented call sites:
 - `guide -> render`: the previous Euclidean guide KNN cache is replaced by a
   cached surface support.  Support IDs are fixed until topology changes, while
   weights are recomputed from the current render-root surface position.
-- `render -> guide startup initialization`: guide control initialization from
-  dense render roots now uses topology-local face-ring support and transported
-  3D directions instead of Euclidean render-root KNN.  This keeps startup guide
-  length, lift, bend, width, and other controls consistent with the same
-  surface rule.
+- `clean-flow guide startup`: in the accepted clean-flow route, guide roots are
+  created directly from the clean-flow target.  The old render-root-to-guide
+  startup backfill is skipped so it cannot overwrite those guide controls.
+- `render -> guide startup initialization`: retained only for non-clean-flow
+  guide routes.  When that path is used, it now uses topology-local face-ring
+  support and transported 3D directions instead of Euclidean render-root KNN.
 - `guide-root newborn inheritance`: guide densification children inherit from
   topology-local guide support, not unrestricted Euclidean neighbors.
 - `render-root newborn inheritance`: render densification children still inherit
@@ -178,10 +179,13 @@ Current pre-training checks:
 - Pre-lock audit check: guide-root structure updates cover guide physical
   controls, 3D clean-flow direction targets, length targets, confidence
   buffers, and region weights.
-- Pre-lock audit fix: `initialize_guide_controls_from_roots()` was still using
-  Euclidean KNN for startup guide control initialization.  It now uses local
-  surface support plus transported 3D direction interpolation.  The dedicated
-  mini-model path check passed.
+- Pre-lock audit fix: the accepted clean-flow route should not run
+  `initialize_guide_controls_from_roots()` at all, because guide roots are
+  already initialized directly from the clean-flow target.  The trainer now
+  skips this render-root-to-guide backfill when `GUIDE_ROOTS_FROM_CLEAN_FLOW`,
+  `CLEAN_FLOW_TARGET`, and `CLEAN_FLOW_INIT` are active.  The retained
+  non-clean-flow path uses local surface support plus transported 3D direction
+  interpolation, and its mini-model path check passed.
 
 ## Training Result
 
@@ -222,10 +226,10 @@ allocated CUDA memory was about `15.6 GB`; the run completed without OOM or
 traceback after the high-rank interpolation fix.
 
 Important lock-status note: this 30k metric was produced before the pre-lock
-startup guide-initialization leak was fixed.  It remains useful evidence that
-the typed interpolation path trains stably, but the final locked R003 baseline
-must be refreshed from zero with the startup guide-init fix included before it
-is tagged as the canonical baseline.
+clean-flow startup audit disabled the redundant render-root-to-guide backfill.
+It remains useful evidence that the typed interpolation path trains stably, but
+the final locked R003 baseline must be refreshed from zero with that skip
+included before it is tagged as the canonical baseline.
 
 ## Visual Audit
 
@@ -261,10 +265,11 @@ rule as the accepted V4 flow target, and the completed 30k run improved over
 the exact R001/V11 reproduction.
 
 R003 is not yet tagged as the final canonical baseline after the pre-lock
-audit, because the startup guide-init leak changes the from-zero training
-contract.  The next immediate action is to refresh the same two-phase R003 run
-with the fixed code.  If the refreshed run stays stable and comparable, tag
-that commit/output as the locked R003 baseline.
+audit, because disabling the redundant clean-flow render-to-guide backfill
+changes the from-zero startup contract.  The next immediate action is to
+refresh the same two-phase R003 run with the fixed code.  If the refreshed run
+stays stable and comparable, tag that commit/output as the locked R003
+baseline.
 
 After that lock, the next experiments should not redo interpolation.  They
 should target the remaining edge/length/bend behavior: edge confidence, edge

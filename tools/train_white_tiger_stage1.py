@@ -5389,12 +5389,25 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             root_init_count=int(clean_flow_report.get("clean_flow_root_init_count", 0)),
             guide_init_count=int(clean_flow_report.get("clean_flow_guide_init_count", 0)),
         )
-        preserve_clean_flow_direction = bool(config.clean_flow_target) and bool(config.clean_flow_init)
-        setup_progress("guide_control_init_start")
-        guide_init_report = initialize_guide_controls_from_roots(
-            model,
-            preserve_direction_controls=preserve_clean_flow_direction,
+        skip_render_to_guide_init = (
+            bool(config.guide_roots_from_clean_flow)
+            and bool(config.clean_flow_target)
+            and bool(config.clean_flow_init)
         )
+        if skip_render_to_guide_init:
+            guide_init_report = {
+                "guide_init_enabled": 0,
+                "skipped": "guide_roots_from_clean_flow",
+                "reason": "clean-flow guide roots are initialized directly from the clean-flow target",
+            }
+            setup_progress("guide_control_init_skipped", reason=str(guide_init_report["skipped"]))
+        else:
+            preserve_clean_flow_direction = bool(config.clean_flow_target) and bool(config.clean_flow_init)
+            setup_progress("guide_control_init_start")
+            guide_init_report = initialize_guide_controls_from_roots(
+                model,
+                preserve_direction_controls=preserve_clean_flow_direction,
+            )
         (output_dir / "guide_control_init_report.json").write_text(
             json.dumps(guide_init_report, indent=2) + "\n",
             encoding="utf-8",
