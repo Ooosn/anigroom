@@ -21,6 +21,7 @@ cd "$PROJECT_ROOT"
 cat > "${RUN_ROOT}/expected_source.sha256" <<'EOF'
 b402044c521b437211dfcb8be260f2c69737c33319fe0bbfe65367091c6f8519  tools/train_white_tiger_stage1.py
 44572b47573bdc462f517946d968d073724987d37cee7ef44efce4cfcaa6e804  anigroom/grooming/strand_gaussians.py
+9793028a9dd742ec86e4d832bf5bf8b4e67de280eba7a207c4a144a6951b1e57  anigroom/roots/statistics.py
 ebfd78a846fd21d768d44068323dfa702d2c324fe447b2355647e199bad95430  anigroom/flow/clean_flow.py
 d531fdd7b2d806f442c2a144d2cb2b135e83fd8a6633fcb1b5d84a44ec2c63b1  anigroom/flow/direction_geometry.py
 7849b61f9d67b61a44ed1cc38f6cf935db0ab2388486336095cbeea195b661f3  anigroom/flow/surface_graph.py
@@ -28,7 +29,7 @@ d531fdd7b2d806f442c2a144d2cb2b135e83fd8a6633fcb1b5d84a44ec2c63b1  anigroom/flow/
 0ac0c4f3f23230ae50d58bd73c5a4e7e212360ef603d5a3d23c18f8b3feceb2a  anigroom/mesh_roots.py
 7a8f8e021859c602b996c978880b3f8463070b4856a597a5277bc3a829e8dffe  anigroom/projection/__init__.py
 ee1913ff51821ea5f1b192984e088127bc00a51a8de577c961a442261e4eae14  anigroom/projection/mesh_visibility.py
-04981d4fe4d89fe50d2adf9dae8c285f033be14780024f6a075075d09ec21b70  configs/white_tiger_stage1_cleanflow_multiview_30k_rgbflow.env
+c361c68a31f8587622219a882ee193f16f27ca211a38a40ae7a29699ae5e36e9  configs/white_tiger_stage1_cleanflow_multiview_30k_rgbflow.env
 92fa18872528cdc01bd69cc3ab2c62247ff9ab3adbc2411e1b1be5edf7a8e7cc  configs/white_tiger_stage1_cleanflow_view09.env
 9613d7aa5a2f102a169936f15793037e8b67a9fc9eb0febb0002283fed5a2474  configs/white_tiger_stage1_formal.env
 a07fe96d16ccee4f0ed29bd4c76a7d4b233132bf90ce4f991c9c5e5931607540  configs/v11_v4_parent_0_9k.env
@@ -87,6 +88,7 @@ check_directory_manifest() {
   sha256sum \
     tools/train_white_tiger_stage1.py \
     anigroom/grooming/strand_gaussians.py \
+    anigroom/roots/statistics.py \
     anigroom/flow/clean_flow.py \
     anigroom/flow/direction_geometry.py \
     anigroom/flow/surface_graph.py \

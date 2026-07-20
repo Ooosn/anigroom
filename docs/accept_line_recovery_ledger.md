@@ -1,0 +1,103 @@
+# Accept-Line Recovery Ledger
+
+## Purpose
+
+This is the single source of truth for the recovery of the accepted white-tiger
+Stage 1 line. The goal is to recover a reproducible baseline first, then make
+one validated change at a time. This document must be updated before any code
+or configuration change is made in this worktree.
+
+## Non-Negotiable Rules
+
+1. `D:/petsgaussianhair` is a dirty historical/reconstruction worktree and is
+   not an experiment source.
+2. This worktree is isolated at a fixed Git commit. No code is copied from the
+   dirty worktree without an evidence-backed audit entry below.
+3. The accept line is evidence, not proof that every implementation detail is
+   correct. Later fixes must be located, classified, and independently tested.
+4. Every experiment changes one algorithmic variable only. Its config diff,
+   hypothesis, measurements, and canonical visualizations are recorded here.
+5. A run is only comparable when source revision, input contract, resolution,
+   train/test split, evaluation metric, and visualization pipeline match.
+
+## Frozen Sources
+
+| Item | Value | Role |
+| --- | --- | --- |
+| Recovery worktree | `D:/petsgaussianhair-accept-line` | Only local source edited for this recovery |
+| Git revision | `09de8c4911d290e64d9d3fc2c3681016d72aeca4` | Last V11/flow lock commit before the accepted July 17 run |
+| Historical source archive | `D:/RTS/_tmp_upload/petsgaussianhair_sync_20260707_020044/petsgaussianhair_code_sync.tar.gz` | Evidence only; never blindly overlaid |
+| Archive SHA-256 | `d495a7db6852b4167a66a899b6075c07fd55c5254a811cb28eeb53de703aa554` | Archive identity |
+| Accepted output | `D:/petsgaussianhair/outputs/20260717022328` | Metric/checkpoint/config reference |
+| Parent checkpoint | `D:/petsgaussianhair/outputs/20260717002440/checkpoint_009000.pt` | Required V11 handoff state |
+
+## Accepted Line Contract
+
+The accepted V11 result is a two-part route, not a single from-zero V11 run:
+
+1. Parent route: iteration 0 through 9000, producing the parent checkpoint.
+2. V11 continuation: construct the V11 model, load model and RNG state from
+   the parent checkpoint, reset optimizer state, and continue to iteration
+   30000.
+
+Historical acceptance targets from the saved run/audit:
+
+| Iteration | Test composite PSNR |
+| ---: | ---: |
+| 1000 | 21.1935 |
+| 5000 | 23.2514 |
+| 9000 | 24.0695 |
+| 10000 | 28.4462 |
+| 12000 | 30.0485 |
+| 16000 | 31.2587 |
+| 20000 | 31.9110 |
+| 30000 | 32.1814 |
+
+The final reference has approximately 187,993 render roots and 8.50M generated
+Gaussians. Metrics alone are insufficient: full-resolution RGB, pure-fur asset,
+effective direction, and effective length must all be compared with the
+canonical visualization module.
+
+## Audit Register
+
+| ID | Status | Finding | Evidence | Decision |
+| --- | --- | --- | --- | --- |
+| A-001 | partial | The July 16 locked source passes every stored V11 source hash when checked on Linux. | H100 `sha256sum -c` against the V11 launcher manifest. | Fresh reproduction is still required. |
+| A-002 | in progress | The July 7 archive differs from the locked source in 68 entries: 14 same-path changes and 54 archive-only, untracked historical artifacts. | Content-hash archive audit. | The archive must remain read-only evidence; it cannot be overlaid. |
+| A-003 | passed | Current project `images` and `orientations_2` do not match acceptance manifests; the frozen `petsgaussianhair_v11_repro` data copy does match all image, silhouette, orientation, mesh, and camera checks. | Independent SHA-256/manifest audit plus H100 launcher preflight. | Use only the frozen data copy for H100 reproduction. |
+| A-004 | open | Audit retained tensors, zero-weight losses, and lifecycle statistics for memory/runtime bugs without changing acceptance behavior. | Profile and tensor-lifetime trace. | Optimization changes become separate experiments. |
+| A-005 | resolved | The saved July 17 output `config.json` is not a reliable historical command record: it says zero render/guide split budgets although the retained July 12 phase-A log records `target_direct`, 512 parents x 2 children, and 1,024 inserted roots per event. | `outputs/20260717002440/config.json` versus `petsgaussianhair_v11_repro/logs/20260712162626/phase_a.log` and the retained lifecycle records. | Treat captured phase logs and lifecycle records as runtime ground truth; use saved config only as a secondary artifact. |
+| A-006 | passed | The locked V4 configuration chain no longer defined 11 variables that its unchanged runner marks required, so the V4 launcher failed before Python started. The missing values were removed from `white_tiger_stage1_multiroot*.env`, not intentionally changed in the V4 algorithm. | H100 dry-run with `PYTHON=/bin/echo`; after restoring only the retained V11 defaults, the launcher returned `RC=0` with no environment-variable injection. | The configuration inheritance regression is repaired. This is a launcher repair, not an algorithmic change. |
+| A-007 | passed | The locked V4 source differs from the verified V11 source only in normal-aware clean-flow interpolation plus the V4 target path, and six trainer call-site arguments that pass normals into that interpolation. | File-level diff: trainer +6 lines, `clean_flow.py` +49/-10, V4 target path change; strand Gaussian and runner are otherwise identical. | The V4 clean-flow change can be tested as a single, isolated variable once the configuration regression is repaired. |
+| A-008 | passed | The historical V11 `RootStatsWindow` assumes `radii` is scalar per Gaussian. H100 gsplat returns two radii values per Gaussian, so the first backward pass aborts before densification. | The four-layout visibility test passed; the official V11 qlogin parent preflight completed model setup, forward, backward, and root statistics in 16.0 seconds. The patch adds only `[N,2] -> amax(dim=1) > 0` visibility semantics while retaining `[N]` and `[1,N]`. | Keep this compatibility repair in the accept line; it is independent of the later batch-device failure. |
+| A-009 | open | H100 batch job `124538373` saw an empty physical GPU `GPU-6cdbda3c...` at PCI `97:00.0`, but V11 failed at its first CUDA tensor placement. Separate batch diagnostics, including actual float64 OBJ-vertex transfer, pass on other scheduled H100 devices. | `124537920` and `124538373` fail at `torch.from_numpy(mesh.vertices).to(device)`; `124538174` passes basic allocation and `124538732` passes the actual mesh-vertex transfer. The stable held qlogin uses a different GPU at PCI `96:00.0` and passes the full official preflight. | Do not treat this as a model or data bug, and do not repeatedly submit full jobs to an unverified batch GPU. Run the exact reproduction on the held qlogin GPU; revisit scheduler pinning separately. |
+
+## Experiment Register
+
+| ID | Base | Single change | Status | Result | Artifacts |
+| --- | --- | --- | --- | --- | --- |
+| R-000 | Historical V11 contract | Fresh exact reproduction audit | ready | - | H100 source/data preflight, V4 flow/surface tests, and repaired launcher audit passed |
+| R-001 | Historical V11 baseline | Reproduce the retained V11 phase-A/B command on H100 | passed | Phase A 9k test composite `24.0688`; Phase B 30k test composite `32.1891` versus accepted `32.1814`; `RC=0`. | `/work/anigroom-v11-reference/outputs/v11_reference_h100_qlogin_r002`, including phase-A 5k/9k and phase-B 10k/12k/14k/15k/16k/18k/20k/21k/24k/25k/27k/30k checkpoints plus metrics/configs |
+| R-002 | R-001 | Replace only V3 clean-flow interpolation/target with V4 | preflight | V4 source/data hash checks passed; resolved A/B commands exposed one non-flow drift, `lr-calibration=0.0005`, now restored to R-001's `0.0`. | Must use the same resolved config and canonical visualizations |
+
+## Change Log
+
+| Time | Change | Reason | Verification |
+| --- | --- | --- | --- |
+| 2026-07-19 | Created isolated recovery worktree and this ledger. | Prevent the dirty reconstruction line from contaminating accept-line recovery. | Worktree is detached at `09de8c4`; no source overlay applied. |
+| 2026-07-19 | Verified the locked source on H100 against the original V11 source-hash manifest. | Confirm that the Linux checkout is byte-compatible with the accepted launch contract. | All trainer, representation, flow, projection, config, and launcher hashes passed. |
+| 2026-07-19 | Rejected current-project image/orientation inputs and selected the frozen V11 data copy. | Current data would make any resulting metric non-comparable. | Frozen data manifests match the original launcher values exactly. |
+| 2026-07-19 | Built the H100 runtime from the locked Git checkout and verified the original launcher in `VERIFY_ONLY=1` mode. | Validate the complete source/data/runtime contract before GPU training. | Every stored source and data hash passed; Python compilation passed; no training launched. |
+| 2026-07-19 | Compared the parent checkpoint runtime configuration with the frozen V11 launcher configuration. | A from-zero baseline must reproduce historical runtime behavior, not merely a similarly named script. | Found a material lifecycle-budget discrepancy; reproduction is paused until the root-growth source is identified. |
+| 2026-07-20 | Recovered the retained V11 phase-A log and lifecycle records, and dry-ran the locked V4 launcher with `/bin/echo`. | Resolve the apparent split-budget contradiction without consuming a GPU run. | The phase-A log proves 1,024 direct insertions/event; the V4 launcher currently fails on 11 removed required defaults before Python begins. |
+| 2026-07-20 | Ran the locked V4 clean-flow/surface unit tests on H100. | Check the isolated V4 representation before any configuration repair. | `3 passed in 57.37s`; no training source or configuration was changed. |
+| 2026-07-20 | Restored 11 runner-required baseline defaults to the two configuration base files. | The values are present in the retained exact phase-A command and were removed from config inheritance, while the runner still requires them. | Pending H100 patched-checkout argument audit; no training schedule or algorithmic parameter changed. |
+| 2026-07-20 | Repeated the V4 parent launcher audit on H100 after the configuration repair. | Confirm that the runner resolves its entire argument contract from the repaired config chain rather than from temporary shell variables. | `RC=0`; the expanded command has `root-init-method=stratified`, direct render-root densification from iteration 600 at interval 100 with 512 selected parents x 2 children, and the frozen V4 flow target. |
+| 2026-07-20 | Rebuilt the historical V11 reference in `/work/anigroom-v11-reference` on H100 from commit `881245ab` plus the retained archive. | Keep V11 and V4 physically separate and recover the source that the exact local reproduction used. | Archive SHA-256 matches `d495a7...aa554`; all source/data hashes in `reproduce_v11_from_zero.sh` pass in `VERIFY_ONLY=1` mode after adding the exact V3 clean-flow artifact (`70a3c0...2349b`). |
+| 2026-07-20 | Applied the isolated portable-radii patch only in the H100 V11 reference checkout and ran the original one-iteration parent preflight. | Verify that root visibility supports the observed gsplat `[N,2]` layout without changing lifecycle behavior. | Standalone layout test passed; qlogin preflight returned `RC=0` after full forward, backward, root-statistics update, and metric emission. |
+| 2026-07-20 | Submitted the same parent preflight through H100 batch job `124537920`. | Verify the scheduler path before starting a 30k reproduction. | Job failed before model construction at first CUDA tensor placement despite the qlogin success; scheduler CUDA allocation is now isolated as A-009. |
+| 2026-07-20 | Re-ran batch preflight with GPU UUID logging and performed two source-independent H100 allocation diagnostics. | Separate device/runtime instability from the V11 source repair. | The failed V11 batch sees empty GPU `...6cdbda3c` at `97:00.0`; both basic and actual float64 OBJ vertex transfers pass on other scheduled H100 devices. |
+| 2026-07-20 | Started R-001 through the held qlogin H100 instead of repeatedly submitting to unverified batch devices. | Preserve the exact V11 route while avoiding the isolated scheduler-device defect. | New run ID and log path are recorded in the launch command; Phase A must create `checkpoint_009000.pt` before Phase B begins. |
+| 2026-07-20 | Completed R-001 Phase A on the held H100 and handed its checkpoint to the historical V11 continuation. | Verify the 0-to-9k parent route before allowing any later V11 behavior to be interpreted. | At iteration 9000, train/test composite PSNR is `23.8249 / 24.0688` (historical target `24.0695`); 176,724 evaluated roots and 7,073,665 Gaussians. `checkpoint_009000.pt` was loaded with model/RNG state and the optimizer reset; Phase B began at iteration 9001. |
+| 2026-07-20 | Completed R-001 Phase B on the same held H100. | Finish the exact accepted V11 reproduction before any single-variable V4 or new-line experiment. | `RC=0`; 30k train/test composite PSNR is `33.1498 / 32.1891` against accepted test `32.1814`; 187,988 roots and 8,498,929 generated Gaussians. Intermediate test composite PSNR also matched the retained curve: 10k `28.4588`, 12k `30.0232`, 16k `31.2821`, 20k `31.9271`, 25k `32.0800`. Peak allocated memory was `15.04 GB` and post-eval allocated memory returned to about `2.08 GB`. |
+| 2026-07-20 | Audited R-002 against the exact R-001 parent and continuation commands on a held H100. | Enforce the promised one-variable V3-to-V4 comparison before consuming another full training run. | Source/data `VERIFY_ONLY=1` passed. The expanded Phase A and B commands differ only in V3/V4 clean-flow target plus an inherited `LR_CALIBRATION=0.0005` drift. The latter is reset to the R-001 value `0.0`; the portable gsplat-radii compatibility check is added to the R-002 source lock. |

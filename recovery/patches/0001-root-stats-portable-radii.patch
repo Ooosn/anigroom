@@ -1,0 +1,27 @@
+diff --git a/anigroom/roots/statistics.py b/anigroom/roots/statistics.py
+index 078e672..efeb17f 100644
+--- a/anigroom/roots/statistics.py
++++ b/anigroom/roots/statistics.py
+@@ -62,15 +62,15 @@ class RootStatsWindow:
+         if not isinstance(info, dict) or "radii" not in info:
+             raise RuntimeError("gsplat info must contain radii for formal visibility accumulation")
+         radii = info["radii"].detach().to(device=device)
+-        if radii.ndim == 2:
+-            if radii.shape[0] != 1:
+-                raise RuntimeError(f"expected one camera in radii, got shape {tuple(radii.shape)}")
++        if radii.ndim >= 2 and radii.shape[0] == 1:
+             radii = radii[0]
++        if radii.numel() == gaussian_count:
++            visible = radii.reshape(-1) > 0
++        elif radii.ndim >= 2 and radii.shape[0] == gaussian_count:
++            visible = radii.reshape(gaussian_count, -1).amax(dim=1) > 0
+         else:
+-            radii = radii.reshape(-1)
+-        if radii.numel() != gaussian_count:
+-            raise RuntimeError(f"radii count {radii.numel()} does not match gaussian count {gaussian_count}")
+-        return (radii > 0).float().reshape(-1, 1)
++            raise RuntimeError(f"radii shape {tuple(radii.shape)} does not match gaussian count {gaussian_count}")
++        return visible.float().reshape(-1, 1)
+ 
+     def add(
+         self,
