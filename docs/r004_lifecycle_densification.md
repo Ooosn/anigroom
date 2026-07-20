@@ -52,6 +52,11 @@ That route does this:
 8. Delete the selected parent, so this is a true root split rather than a direct
    pixel insertion.
 
+In R003, `target_direct` consumes the residual image for direct mesh insertion,
+so the lifecycle report shows zero root-level residual. In R004, the same
+residual image is also projected back to roots and accumulated into
+`RootStats.residual_sum`, making residual part of the parent-selection evidence.
+
 ## Budget Normalization
 
 R003 `target_direct` inserts children and keeps parents. With
