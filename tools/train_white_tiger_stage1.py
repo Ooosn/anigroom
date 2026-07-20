@@ -6938,8 +6938,22 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
 
 
 def main() -> None:
-    args = build_arg_parser().parse_args()
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    explicit_paths = {
+        "data_root": args.data_root,
+        "mesh_path": args.mesh_path,
+        "output_dir": args.output_dir,
+    }
+    default_paths = {
+        "data_root": parser.get_default("data_root"),
+        "mesh_path": parser.get_default("mesh_path"),
+        "output_dir": parser.get_default("output_dir"),
+    }
     apply_alignment_to_namespace(args, load_alignment_config(args.alignment_config), include_uv=False)
+    for name, value in explicit_paths.items():
+        if value != default_paths[name]:
+            setattr(args, name, value)
     train_white_tiger_stage1(config_from_args(args))
 
 
