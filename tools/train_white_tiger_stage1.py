@@ -6636,7 +6636,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--densify-pixel-evidence-root-k", type=int, default=4)
     parser.add_argument("--densify-pixel-evidence-min", type=float, default=0.02)
     parser.add_argument("--densify-pixel-evidence-chunk", type=int, default=512)
-    parser.add_argument("--densify-parent-selection", choices=("score", "target", "target_direct"), default="score")
+    parser.add_argument("--densify-parent-selection", choices=("score", "evidence_local_max", "target", "target_direct"), default="score")
     parser.add_argument("--densify-target-placement-weight", type=float, default=0.0)
     parser.add_argument("--lifecycle-score-mode", choices=("raw", "sample_normalized"), default="raw")
     parser.add_argument("--stroke-drag-diagnostics", action="store_true")

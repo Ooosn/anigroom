@@ -166,6 +166,68 @@ def select_densify_parents(stats: RootStats, config: DensifyConfig) -> tuple[tor
     return parents, scores
 
 
+def select_local_max_densify_parents(
+    state: RootLifecycleState,
+    stats: RootStats,
+    config: DensifyConfig,
+    faces: torch.Tensor | None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Select evidence roots after topology-local non-maximum suppression.
+
+    Thresholds decide whether a root is allowed to densify.  Mesh-neighborhood
+    local maxima then keep only representative roots for each high-evidence
+    surface region, so one residual patch does not clone every adjacent root.
+    """
+
+    state.validate()
+    stats.validate()
+    if faces is None:
+        raise ValueError("evidence_local_max parent selection requires mesh faces")
+    if state.face_ids.shape[0] != stats.root_count:
+        raise ValueError("state and stats root counts do not match")
+
+    scores = normalized_root_need(stats, score_mode=config.score_mode)
+    need = scores["need"]
+    valid = scores["raw_visibility"] >= float(config.visibility_threshold)
+    valid = valid & (need >= float(config.grad_threshold))
+    if float(config.residual_threshold) > 0.0:
+        valid = valid & (scores["residual"] >= float(config.residual_threshold))
+    candidates = torch.nonzero(valid, as_tuple=False).reshape(-1)
+    if candidates.numel() == 0:
+        return candidates, scores
+
+    face_ids = state.face_ids.to(device=need.device, dtype=torch.long)
+    face_count = int(faces.shape[0])
+    if face_ids.numel() != stats.root_count:
+        raise ValueError("state face_ids and stats root counts do not match")
+    if int(face_ids.min().item()) < 0 or int(face_ids.max().item()) >= face_count:
+        raise ValueError("state face_ids are out of mesh face range")
+
+    neg_inf = torch.full((face_count,), -torch.inf, device=need.device, dtype=need.dtype)
+    candidate_need = torch.where(valid, need, torch.full_like(need, -torch.inf))
+    face_max = neg_inf.clone()
+    face_max.scatter_reduce_(0, face_ids, candidate_need, reduce="amax", include_self=True)
+
+    candidate_faces = face_ids[candidates]
+    unique_faces, inverse = torch.unique(candidate_faces, sorted=True, return_inverse=True)
+    face_neighborhoods = _topology_face_neighborhoods(
+        unique_faces.to(device=state.face_ids.device, dtype=state.face_ids.dtype),
+        faces,
+        candidate_rings=int(config.candidate_rings),
+        candidate_face_count=max(1, int(config.candidate_face_count)),
+    ).to(device=need.device, dtype=torch.long)
+    local_face_max = face_max[face_neighborhoods].amax(dim=1)
+    local_keep = need[candidates] >= (local_face_max[inverse] - 1.0e-12)
+    parents = candidates[local_keep]
+    if parents.numel() == 0:
+        return parents, scores
+
+    order = torch.argsort(need[parents], descending=True)
+    limit = max(0, int(config.max_new_roots) // max(1, int(config.children_per_parent)))
+    parents = parents[order[:limit]]
+    return parents, scores
+
+
 def select_target_densify_parents(
     stats: RootStats,
     config: DensifyConfig,
@@ -607,6 +669,8 @@ def propose_structure_update(
 ) -> RootStructureUpdate:
     if str(densify.parent_selection_mode) == "score":
         parents, scores = select_densify_parents(stats, densify)
+    elif str(densify.parent_selection_mode) == "evidence_local_max":
+        parents, scores = select_local_max_densify_parents(state, stats, densify, faces)
     elif str(densify.parent_selection_mode) == "target":
         if child_target_weights is None:
             raise ValueError("target parent selection requires child_target_weights")
