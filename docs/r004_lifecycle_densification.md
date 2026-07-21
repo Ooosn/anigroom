@@ -79,6 +79,50 @@ the local-max face neighborhood is too broad or the evidence threshold is too
 strict for the current root density. Do not compensate with screen/luma/overlong
 hardcoded routes in this experiment.
 
+## 30k Result
+
+Run:
+
+```text
+job: 124598861
+commit: 30f0554d88e6aa60c80f3eaeb18fb3d991d06b86
+output: /home/wangyy/anigroom-r004-localmax/outputs/r004_localmax_30f0554_20260721_051239
+log: /home/wangyy/logs/r004_localmax_30f0554_20260721_051239/job.log
+```
+
+The job finished successfully on H100 with `exit_status=0`.
+
+Metric comparison against the locked R003 refresh:
+
+| Iteration | R003 test composite | R004 test composite |
+| ---: | ---: | ---: |
+| 9000 | 24.3561 | 24.0019 |
+| 10000 | 29.1621 | 29.2422 |
+| 12000 | 30.6575 | 30.6393 |
+| 16000 | 31.7910 | 31.7875 |
+| 20000 | 32.3734 | 32.3642 |
+| 24000 | 32.5708 | 32.5649 |
+| 29000 | 32.7361 | 32.7423 |
+| 30000 | 32.5895 | 32.6023 |
+
+Final R004 state:
+
+```text
+roots: 197280
+generated Gaussians: 8780735
+peak allocated CUDA memory: 15.5 GB
+wallclock: 27301 s
+```
+
+Conclusion: R004 is an equivalent-quality lifecycle candidate, not a PSNR
+improvement. It recovers from a slower Phase A and matches R003 after Phase B.
+The topology-local split/delete rule does not damage the accepted baseline, but
+its speed is worse in this run: recent normal training segments are around
+`2.7-3.1 it/s`, while long progress gaps reduce end-to-end throughput. Before
+making R004 the default, compare canonical pure-fur visualizations and identify
+whether the long gaps come from lifecycle selection, diagnostic output, or HGC
+node/runtime jitter.
+
 ## Files
 
 - `anigroom/roots/lifecycle.py`
