@@ -1,8 +1,8 @@
 # Brush Curve Representation
 
-Status: design accepted; implementation is the next representation focus after
-the active hard-range audit is closed. This document is a design contract, not
-evidence that the current trainer already implements the representation.
+Status: the base brush curve and non-periodic bend are implemented by the R038
+candidate. This document remains the representation contract; only a formal
+from-zero run can promote R038 over the frozen R036 baseline.
 
 ## Purpose
 
@@ -130,8 +130,8 @@ transient flattened Gaussian array index.
 
 ## Hard-Range Replacement
 
-Implementing this design closes the physical decoder-range audit only if the
-old definitions are removed rather than disabled:
+The complete future design closes the physical decoder-range audit only if old
+definitions are removed rather than disabled:
 
 - remove the legacy `tanh` bend interval;
 - remove fixed curl radius and frequency intervals;
@@ -141,6 +141,11 @@ old definitions are removed rather than disabled:
   child-spread representations;
 - retain only semantic domains such as normalized direction, opacity/color,
   tip ratio, clump weight, and brush curve strength.
+
+R038 intentionally implements only the base brush curve and the unbounded
+non-periodic bend. Curl and frizz remain disabled and deferred so their future
+representation is not mixed into this experiment. Their inactive legacy
+ranges therefore do not count as R038 acceptance failures.
 
 Positive shape amplitudes may use positive unbounded coordinates and relative
 soft priors. Stability must come from guide ownership, intrinsic interpolation,
@@ -180,8 +185,8 @@ Before this representation replaces the current baseline:
 4. Guide interpolation remains smooth across mesh faces and lifecycle changes.
 5. Final-curve Gaussian allocation increases for real arc-length/turning
    complexity and has no maximum cap.
-6. The old bend, lift, curl, and frizz physical ranges are absent from source,
-   config, checkpoints, tests, and active documentation.
+6. The old bend interval and independent lift path are absent; curl and frizz
+   remain disabled and are evaluated only in a later isolated candidate.
 7. Fixed-view visualizations show straight, brushed, bent, curly, and frizzy
    cases with one canonical renderer and camera protocol.
 8. A strict from-zero white-tiger run preserves the accepted composite metric

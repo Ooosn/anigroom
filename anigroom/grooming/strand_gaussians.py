@@ -92,9 +92,10 @@ class DecodedGroom:
     """Decoded per-root groom controls.
 
     All tensors are shaped ``[R, C]``.  These are explicit editor-like controls:
-    length, tapering width, a normalized 3D direction in the root frame, bend,
-    curl, frizz, child layout, color, and opacity. Extra growth gates and
-    color-darkening shortcuts are intentionally outside this core parameter set.
+    length, tapering width, a normalized 3D direction in the root frame, brush
+    curve strength, bend, curl, frizz, child layout, color, and opacity. Extra
+    growth gates and color-darkening shortcuts are intentionally outside this
+    core parameter set.
     """
 
     length: torch.Tensor
@@ -102,6 +103,7 @@ class DecodedGroom:
     tip_width: torch.Tensor
     width_taper: torch.Tensor
     direction_local: torch.Tensor
+    brush_curve_strength: torch.Tensor
     bend: torch.Tensor
     curl_radius: torch.Tensor
     curl_frequency: torch.Tensor
@@ -198,7 +200,8 @@ class GroomParameterField(nn.Module):
         self.direction_local_raw = nn.Parameter(
             torch.tensor([[0.55, 0.04, 0.22]], dtype=torch.float32, device=dev).repeat(self.root_count, 1)
         )
-        self.bend_raw = repeated(-0.20)
+        self.brush_curve_strength_raw = repeated(0.0)
+        self.bend_raw = repeated(0.0)
         self.curl_radius_raw = repeated(raw_from_range(0.001, self.ranges.curl_radius))
         self.curl_frequency_raw = repeated(raw_from_range(0.35, self.ranges.curl_frequency))
         self.curl_phase = nn.Parameter(torch.zeros((self.root_count, 1), dtype=torch.float32, device=dev))
@@ -240,7 +243,8 @@ class GroomParameterField(nn.Module):
             tip_width=root_width * tip_ratio,
             width_taper=decode_positive_asinh(self.width_taper_raw),
             direction_local=_normalize(self.direction_local_raw),
-            bend=torch.tanh(self.bend_raw),
+            brush_curve_strength=torch.sigmoid(self.brush_curve_strength_raw),
+            bend=self.bend_raw,
             curl_radius=self._decode_range(self.curl_radius_raw, ranges.curl_radius),
             curl_frequency=self._decode_range(self.curl_frequency_raw, ranges.curl_frequency),
             curl_phase=self.curl_phase,
@@ -272,6 +276,56 @@ def make_tangent_frames(normals: torch.Tensor, preferred_axis: torch.Tensor | No
     tangent = _normalize(torch.cross(axis, normals, dim=-1))
     bitangent = _normalize(torch.cross(normals, tangent, dim=-1))
     return tangent, bitangent
+
+
+def build_brush_centerline(
+    roots: torch.Tensor,
+    normals: torch.Tensor,
+    directions: torch.Tensor,
+    lengths: torch.Tensor,
+    brush_curve_strength: torch.Tensor,
+    samples: int,
+) -> torch.Tensor:
+    """Build a smooth normal-to-groom curve with fixed root and tip.
+
+    ``directions`` and ``lengths`` retain their direct editor meaning:
+    ``tip = root + length * direction``.  A strength of zero reproduces that
+    exact straight segment.  Increasing strength accumulates the endpoint's
+    normal displacement earlier and its tangent displacement later without
+    changing either endpoint.
+    """
+
+    if samples < 2:
+        raise ValueError("samples must be at least 2")
+    if roots.shape != normals.shape or roots.shape != directions.shape:
+        raise ValueError("roots, normals, and directions must all have shape [R, 3]")
+    if lengths.shape != (roots.shape[0], 1):
+        raise ValueError("lengths must have shape [R, 1]")
+    if brush_curve_strength.shape != (roots.shape[0], 1):
+        raise ValueError("brush_curve_strength must have shape [R, 1]")
+
+    normals = _normalize(normals)
+    directions = _normalize(directions)
+    delta = lengths * directions
+    normal_delta = (delta * normals).sum(dim=-1, keepdim=True) * normals
+    tangent_delta = delta - normal_delta
+
+    t = torch.linspace(
+        0.0,
+        1.0,
+        samples,
+        device=roots.device,
+        dtype=roots.dtype,
+    ).view(1, samples, 1)
+    strength = brush_curve_strength.clamp(0.0, 1.0)[:, None]
+    transition = t * (1.0 - t)
+    normal_progress = t + strength * transition
+    tangent_progress = t - strength * transition
+    return (
+        roots[:, None]
+        + normal_progress * normal_delta[:, None]
+        + tangent_progress * tangent_delta[:, None]
+    )
 
 
 def build_strands(
@@ -313,22 +367,23 @@ def build_strands(
         raise ValueError(f"unknown shape_normal_mode: {shape_normal_mode}")
     side = _normalize(torch.cross(normals, flow, dim=-1))
     curl_up = _normalize(torch.cross(flow, side, dim=-1))
-    bend = groom.bend
-
-    p0 = roots
-    p1_direction = _normalize(groom_direction + 0.24 * bend * side)
-    p1 = roots + groom.length * p1_direction
-    m0 = groom.length * groom_direction
-    m1 = groom.length * _normalize(groom_direction + 0.55 * bend * side)
-
     t = torch.linspace(0.0, 1.0, samples, device=roots.device, dtype=roots.dtype).view(1, samples, 1)
-    t2 = t * t
-    t3 = t2 * t
-    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
-    h10 = t3 - 2.0 * t2 + t
-    h01 = -2.0 * t3 + 3.0 * t2
-    h11 = t3 - t2
-    points = h00 * p0[:, None] + h10 * m0[:, None] + h01 * p1[:, None] + h11 * m1[:, None]
+    points = build_brush_centerline(
+        roots,
+        normals,
+        groom_direction,
+        groom.length,
+        groom.brush_curve_strength,
+        samples,
+    )
+    bend_envelope = 16.0 * t.square() * (1.0 - t).square()
+    bend_offset = (
+        groom.length[:, None]
+        * groom.bend[:, None]
+        * bend_envelope
+        * side[:, None]
+    )
+    points = points + bend_offset
     phase = 2.0 * torch.pi * groom.curl_frequency[:, None] * t + groom.curl_phase[:, None]
     curl_envelope = torch.sin(0.5 * torch.pi * t).clamp(0.0, 1.0)
     curl_side = torch.sin(phase)

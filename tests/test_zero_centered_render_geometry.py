@@ -112,6 +112,7 @@ def test_zero_residual_ignores_render_endpoint_geometry() -> None:
         model.groom.root_width_raw.fill_(20.0)
         model.groom.tip_width_ratio_raw.fill_(20.0)
         model.groom.width_taper_raw.fill_(20.0)
+        model.groom.brush_curve_strength_raw.fill_(20.0)
         model.groom.direction_local_raw.copy_(
             torch.tensor([[-1.0, 0.0, 0.0]]).expand_as(
                 model.groom.direction_local_raw
@@ -127,6 +128,7 @@ def test_zero_residual_ignores_render_endpoint_geometry() -> None:
         "root_width",
         "tip_width",
         "width_taper",
+        "brush_curve_strength",
         "direction_local",
         "bend",
         "curl_radius",
@@ -209,6 +211,17 @@ def test_hierarchical_width_profile_backpropagates_to_guide_and_residual_only() 
     assert model.groom.child_radius_raw.grad is None
 
 
+def test_brush_curve_strength_is_guide_owned_and_differentiable() -> None:
+    model = make_model()
+    groom = effective_groom(model)
+    groom.brush_curve_strength.mean().backward()
+
+    assert model.guide_brush_curve_strength_raw.grad is not None
+    assert bool(torch.isfinite(model.guide_brush_curve_strength_raw.grad).all())
+    assert bool((model.guide_brush_curve_strength_raw.grad.abs() > 0.0).any())
+    assert model.groom.brush_curve_strength_raw.grad is None
+
+
 def test_optimizer_contains_residuals_not_legacy_geometry() -> None:
     model = make_model()
     config = Stage1Config(
@@ -236,17 +249,20 @@ def test_optimizer_contains_residuals_not_legacy_geometry() -> None:
     assert "render_geometry_residual.tip_width_ratio_raw" in names
     assert "render_geometry_residual.width_taper_raw" in names
     assert "render_geometry_residual.child_radius_raw" in names
+    assert "guide_brush_curve_strength_raw" in names
     assert "groom.length_raw" not in names
     assert "groom.root_width_raw" not in names
     assert "groom.tip_width_ratio_raw" not in names
     assert "groom.width_taper_raw" not in names
     assert "groom.child_radius_raw" not in names
+    assert "groom.brush_curve_strength_raw" not in names
     assert "groom.direction_local_raw" not in names
     assert id(model.render_geometry_residual.length_raw) in optimized_ids
     assert id(model.render_geometry_residual.root_width_raw) in optimized_ids
     assert id(model.render_geometry_residual.tip_width_ratio_raw) in optimized_ids
     assert id(model.render_geometry_residual.width_taper_raw) in optimized_ids
     assert id(model.render_geometry_residual.child_radius_raw) in optimized_ids
+    assert id(model.guide_brush_curve_strength_raw) in optimized_ids
     assert id(model.groom.length_raw) not in optimized_ids
     assert id(model.groom.direction_local_raw) not in optimized_ids
 
@@ -445,6 +461,7 @@ def test_guide_densification_updates_direct_direction_and_loads_strict_state() -
         model.guide_tip_width_ratio_raw.fill_(0.2)
         model.guide_width_taper_reference.fill_(1.8)
         model.guide_width_taper_raw.fill_(0.4)
+        model.guide_brush_curve_strength_raw.fill_(0.3)
         model.guide_child_radius_reference.fill_(0.0028)
         model.guide_child_radius_raw.fill_(0.3)
     guide_before, _ = model.interpolate_guide_controls(
@@ -467,6 +484,7 @@ def test_guide_densification_updates_direct_direction_and_loads_strict_state() -
     assert model.guide_root_width_reference.shape == (5, 1)
     assert model.guide_tip_width_ratio_reference.shape == (5, 1)
     assert model.guide_width_taper_reference.shape == (5, 1)
+    assert model.guide_brush_curve_strength_raw.shape == (5, 1)
     assert model.guide_child_radius_reference.shape == (5, 1)
     torch.testing.assert_close(
         model.guide_length_reference[-1],
@@ -487,7 +505,13 @@ def test_guide_densification_updates_direct_direction_and_loads_strict_state() -
         guide_tangents[-1:],
         guide_bitangents[-1:],
     )[0]
-    for name in ("root_width", "tip_width_ratio", "width_taper", "child_radius"):
+    for name in (
+        "root_width",
+        "tip_width_ratio",
+        "width_taper",
+        "brush_curve_strength",
+        "child_radius",
+    ):
         torch.testing.assert_close(
             guide_after[name],
             guide_before[name][0:1],
@@ -503,6 +527,10 @@ def test_guide_densification_updates_direct_direction_and_loads_strict_state() -
     torch.testing.assert_close(
         clone.guide_direction_local_raw,
         model.guide_direction_local_raw,
+    )
+    torch.testing.assert_close(
+        clone.guide_brush_curve_strength_raw,
+        model.guide_brush_curve_strength_raw,
     )
     torch.testing.assert_close(
         clone.guide_length_reference,

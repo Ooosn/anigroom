@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,26 +19,48 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def git_blob_sha256(project_root: Path, source_ref: str, relative_path: str) -> str:
+    result = subprocess.run(
+        ["git", "show", f"{source_ref}:{relative_path}"],
+        cwd=project_root,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return hashlib.sha256(result.stdout).hexdigest()
+
+
 def verify_baseline_lock(
     project_root: Path = PROJECT_ROOT,
     lock_path: Path = DEFAULT_LOCK,
 ) -> dict[str, object]:
     manifest = json.loads(lock_path.read_text(encoding="utf-8"))
+    source_ref = manifest.get("source_ref")
     failures: list[dict[str, str]] = []
     for relative_path, expected in manifest["local_files"].items():
-        path = project_root / relative_path
-        if not path.is_file():
-            failures.append(
-                {"path": relative_path, "expected": expected, "actual": "missing"}
-            )
-            continue
-        actual = file_sha256(path)
+        if source_ref:
+            try:
+                actual = git_blob_sha256(project_root, str(source_ref), relative_path)
+            except subprocess.CalledProcessError:
+                failures.append(
+                    {"path": relative_path, "expected": expected, "actual": "missing"}
+                )
+                continue
+        else:
+            path = project_root / relative_path
+            if not path.is_file():
+                failures.append(
+                    {"path": relative_path, "expected": expected, "actual": "missing"}
+                )
+                continue
+            actual = file_sha256(path)
         if actual != expected:
             failures.append(
                 {"path": relative_path, "expected": expected, "actual": actual}
             )
     return {
         "baseline_id": manifest["baseline_id"],
+        "source_ref": source_ref,
         "checked_files": len(manifest["local_files"]),
         "ok": not failures,
         "failures": failures,

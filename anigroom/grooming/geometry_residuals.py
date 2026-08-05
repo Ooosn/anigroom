@@ -72,7 +72,7 @@ class RenderGeometryResidualField(nn.Module):
             root_width_log_ratio=torch.asinh(self.root_width_raw),
             tip_width_logit_delta=torch.asinh(self.tip_width_ratio_raw),
             width_taper_log_ratio=torch.asinh(self.width_taper_raw),
-            bend=torch.tanh(self.bend_raw),
+            bend=self.bend_raw,
             curl_radius=torch.tanh(self.curl_radius_raw),
             frizz=torch.tanh(self.frizz_raw),
             child_radius_log_ratio=torch.asinh(self.child_radius_raw),
@@ -90,7 +90,7 @@ class RenderGeometryResidualField(nn.Module):
     def physical_scalar_deltas(self, ranges: GroomRanges) -> dict[str, torch.Tensor]:
         decoded = self.decode()
         return {
-            "bend": self.scalar_physical_delta(decoded.bend, (-1.0, 1.0)),
+            "bend": decoded.bend,
             "curl_radius": self.scalar_physical_delta(decoded.curl_radius, ranges.curl_radius),
             "frizz": self.scalar_physical_delta(decoded.frizz, ranges.frizz),
             "clump_strength": self.scalar_physical_delta(

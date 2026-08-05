@@ -1,5 +1,6 @@
 {
   "baseline_id": "stage1-r036",
+  "source_ref": "stage1-r036",
   "frozen_at": "2026-08-05",
   "formal_run": {
     "output": "/home/wangyy/anigroom-r036-hierarchical-child-spread-20260805/outputs/r036_from_zero_h100_20260805",

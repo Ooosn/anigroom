@@ -17,15 +17,21 @@ R036 is the frozen measured and executable Stage 1 baseline:
 - canonical asset render:
   `D:/RTS/_tmp/r036_30k_final/r036_030000_asset_side_y_v11_protocol.png`
 
-The active source, launcher, exporters, and schedule are byte-identical to the
-formal R036 runtime snapshot. The only path normalization is that the exact
-v4 target is now tracked under `baseline_inputs/`; its content hash is
-unchanged. `configs/stage1_baseline.lock.json` is the machine-readable lock.
+The `stage1-r036` Git tag is byte-identical to the formal runtime snapshot.
+`configs/stage1_baseline.lock.json` verifies that immutable tag, so candidate
+work can proceed without rewriting R036 evidence. The exact v4 target remains
+tracked under `baseline_inputs/` with unchanged content.
+
+R038 is the active, unaccepted candidate. It adds the guide-owned brush curve,
+replaces the legacy bounded bend geometry, and ends render lifecycle work after
+9k. Its design and verification ledger are in
+`r038_brush_curve_and_9k_lifecycle.md`.
 
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
-- configuration: `configs/stage1_baseline.env`
+- frozen configuration: `configs/stage1_baseline.env`
+- active candidate configuration: `configs/r038_brush_curve_0_30k.env`
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
 - Gaussian export: `tools/export_white_tiger_checkpoint_gaussians_ply.py`
@@ -48,6 +54,7 @@ The active explicit groom fields are:
 - length
 - root and tip width plus taper
 - normalized local 3D direction
+- guide-owned brush curve strength
 - bend
 - curl radius, frequency, and phase
 - frizz
@@ -55,9 +62,11 @@ The active explicit groom fields are:
 - root and tip color
 - root and tip opacity
 
-Bend acts directly. Curl and frizz remain legitimate optional shape controls,
-but the baseline configuration sets their effective scales to zero. Child
-expansion remains active in the current baseline.
+Brush curve strength controls a smooth normal-to-groom transition while
+preserving the root, tip, straight length, and 3D endpoint direction. Bend is
+an optional smooth interior deformation and no longer uses a fixed `tanh`
+interval. Curl and frizz remain legitimate optional shape controls but stay
+disabled in R038. Child expansion remains active.
 
 Render-root geometry is a zero-centered residual around the interpolated guide
 field. Direction residuals are local 3D vectors. Length uses the positive,
@@ -99,9 +108,9 @@ parameterization is stored beside the normalized 3D vector.
 
 - full resolution: `1920x1080`
 - initial guide/render roots: `4500 / 100000`
-- render-root lifecycle: every 100 iterations after warmup through 20k
-- guide-root lifecycle: every 200 iterations from 11k through 16k
-- guide geometry unlock: 10k to 20k
+- render-root lifecycle: every 100 iterations from 600 through 9k
+- guide-root lifecycle: disabled in R038
+- guide fields unlock after 9k; render-root geometry residuals ramp 10k to 20k
 - render child-spread coverage unlock: 1k to 7k
 - shape detail freeze: through 14k, then shared gradual unlock
 - pruning: disabled in the current baseline
@@ -184,14 +193,12 @@ Numerical epsilon clamps, normalized directions, RGB/opacity domains, tip
 ratios, and clump interpolation weights are representation or semantic domains
 rather than animal-specific physical thresholds; they remain.
 
-After the remaining hard-range audit is closed, the next representation focus
-is specified in
-[`brush_curve_representation.md`](brush_curve_representation.md). It keeps
-length as straight root-to-tip distance, derives a smooth normal-to-groom base
-curve from guide-owned brush stiffness/curve strength, allocates Gaussians from
-the final curve, and replaces the remaining legacy bend/curl/frizz physical
-ranges without reviving an independent lift field. It is not yet part of the
-executable baseline.
+The active R038 candidate implements the base design in
+[`brush_curve_representation.md`](brush_curve_representation.md): straight
+root-to-tip length, a smooth guide-owned normal-to-groom curve, final-curve
+Gaussian allocation, and an unbounded non-periodic bend. Curl/frizz redesign is
+deferred and disabled rather than mixed into this candidate. R038 is executable
+but is not the accepted baseline until its formal run and structural QA pass.
 
 ## Execution Memory Contract
 

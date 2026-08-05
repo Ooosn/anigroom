@@ -288,6 +288,7 @@ def main() -> None:
 
     values = {
         "length": groom.length.reshape(-1)[ids].detach().cpu().numpy(),
+        "brush_curve_strength": groom.brush_curve_strength.reshape(-1)[ids].detach().cpu().numpy(),
         "bend_signed": groom.bend.reshape(-1)[ids].detach().cpu().numpy(),
         "bend_magnitude": torch.abs(groom.bend.reshape(-1)[ids]).detach().cpu().numpy(),
         "curl_radius": groom.curl_radius.reshape(-1)[ids].detach().cpu().numpy(),

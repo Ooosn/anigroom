@@ -18,6 +18,7 @@ from .geometry_residuals import (
 )
 
 from .strand_gaussians import (
+    build_brush_centerline,
     DecodedGroom,
     GroomParameterField,
     GroomRanges,
@@ -37,6 +38,7 @@ from .strand_gaussians import (
 )
 
 __all__ = [
+    "build_brush_centerline",
     "DecodedGeometryResiduals",
     "DecodedGroom",
     "GroomParameterField",
