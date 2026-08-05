@@ -2,8 +2,9 @@
 
 Status date: 2026-08-05.
 
-R036 is the only frozen, measured, executable Stage 1 baseline. This document
-answers three questions:
+R036 is the frozen higher-PSNR metric control. R038 supersedes it as the active
+structural/lifecycle baseline; this document remains the immutable R036
+identity and evidence record. It answers three questions:
 
 1. Which exact source and input define the baseline?
 2. Which accepted R-series findings are present in the executable path?

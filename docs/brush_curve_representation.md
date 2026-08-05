@@ -1,8 +1,8 @@
 # Brush Curve Representation
 
-Status: the base brush curve and non-periodic bend are implemented by the R038
-candidate. This document remains the representation contract; only a formal
-from-zero run can promote R038 over the frozen R036 baseline.
+Status: the base brush curve and non-periodic bend are implemented and accepted
+by R038. This document is the representation contract; the formal result is
+recorded in `docs/r038_brush_curve_and_9k_lifecycle.md`.
 
 ## Purpose
 
@@ -142,10 +142,10 @@ definitions are removed rather than disabled:
 - retain only semantic domains such as normalized direction, opacity/color,
   tip ratio, clump weight, and brush curve strength.
 
-R038 intentionally implements only the base brush curve and the unbounded
-non-periodic bend. Curl and frizz remain disabled and deferred so their future
-representation is not mixed into this experiment. Their inactive legacy
-ranges therefore do not count as R038 acceptance failures.
+R038 implements only the base brush curve and the unbounded non-periodic bend.
+Curl and frizz remain disabled and deferred so their future representation is
+not mixed into this baseline. Their inactive legacy ranges therefore do not
+count as R038 acceptance failures.
 
 Positive shape amplitudes may use positive unbounded coordinates and relative
 soft priors. Stability must come from guide ownership, intrinsic interpolation,
@@ -159,35 +159,31 @@ length, root width, width taper, and child spread. Root/tip color and opacity,
 tip/root width ratio, clump weight, normalized direction, and the future brush
 curve strength retain semantic domains and are not hard-coded animal scales.
 
-The remaining active source definitions to replace are exactly:
+R038 removed the legacy `tanh` bend interval from the executable model. The
+remaining definitions to redesign are inactive curl radius/frequency and frizz
+amplitude. They have zero effective scale in the current white-tiger config and
+did not affect the accepted result, but they still matter to the general
+representation and must be addressed in a separate candidate. There is no
+independent lift or legacy stiffness field in the model; brush strength is the
+single guide-owned base-curve control.
 
-- legacy bend decoded with `tanh` into `[-1, 1]`;
-- curl radius decoded into `[0, 0.026]` in the formal trainer;
-- curl frequency decoded into `[0, 5.5]`;
-- frizz amplitude decoded into `[0, 0.010]`.
+## Acceptance Evidence
 
-Curl and frizz have zero effective scale in the current white-tiger config, so
-they did not affect R036. They still matter to the general representation and
-must be redesigned rather than merely left disabled. There is no active
-independent lift or stiffness field in the current model; the brush-curve
-implementation introduces one guide-owned control and must not revive the old
-lift path.
+R038 passes the scoped base-curve criteria:
 
-## Acceptance Criteria
-
-Before this representation replaces the current baseline:
-
-1. `c = 0` reproduces the exact straight strand and the same endpoint.
+1. `c = 0` reproduces the exact straight strand and endpoint.
 2. Increasing `c` preserves both endpoints and produces a continuous,
    monotonic normal-to-groom transition without a kink or loop.
-3. Direction, length, and brush-curve gradients are finite and nonzero in
-   differentiable tests.
-4. Guide interpolation remains smooth across mesh faces and lifecycle changes.
-5. Final-curve Gaussian allocation increases for real arc-length/turning
-   complexity and has no maximum cap.
-6. The old bend interval and independent lift path are absent; curl and frizz
-   remain disabled and are evaluated only in a later isolated candidate.
-7. Fixed-view visualizations show straight, brushed, bent, curly, and frizzy
-   cases with one canonical renderer and camera protocol.
-8. A strict from-zero white-tiger run preserves the accepted composite metric
-   range while improving the pure-fur structural visualization.
+3. Direction, length, brush strength, and bend have finite differentiable
+   gradients in focused tests.
+4. Guide interpolation and lifecycle insertion preserve brush strength across
+   mesh faces.
+5. Final-curve Gaussian allocation responds to physical arc/turn complexity
+   and has no maximum cap.
+6. The old bend interval and independent lift/stiffness paths are absent;
+   curl/frizz remain disabled.
+7. The strict 0-30k run and fixed 9k/30k canonical assets show controlled
+   curvature, zero backward segments, and no loop, foldback, or sparse spike.
+
+Curly and frizzy stress cases belong to the future curl/frizz candidate. They
+are not silently claimed as evidence for R038.

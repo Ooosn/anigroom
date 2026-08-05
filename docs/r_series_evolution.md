@@ -1,6 +1,7 @@
 # R-Series Evolution
 
-Status date: 2026-08-05. Current frozen baseline: R036.
+Status date: 2026-08-06. Active structural/lifecycle baseline: R038. Frozen
+higher-PSNR metric control: R036.
 
 This document is the compact decision history. Detailed measurements and
 artifact paths remain in `docs/accept_line_recovery_ledger.md` and the
@@ -19,6 +20,7 @@ individual R-series documents.
 | R030 | Removed sparse long-hair tail spikes without an absolute cap. |
 | R032 | Made guide-length smoothing invariant to guide density. |
 | R036 | Completed the current positive guide/render hierarchy for length, width profile, and child spread. |
+| R038 | Added the explicit normal-to-groom brush curve and a finite 600-9000 render lifecycle. |
 
 ## Recovery And Interpolation: R000-R007
 
@@ -66,7 +68,7 @@ individual R-series documents.
 | R029 | Replace L1 with full L4 norm | Rejected: reduced tail but over-suppressed ordinary residuals and lost about `0.245 dB`. |
 | R030 | Mean L1 plus unlock-scaled `L4-L2` concentration | Accepted: max length fell 63.94% with only `-0.045 dB`; tail spikes disappeared. |
 
-## Guide Lifecycle And Hard-Range Removal: R031-R036
+## Guide Lifecycle And Hard-Range Removal: R031-R038
 
 | Run | Test | Decision and lasting result |
 | --- | --- | --- |
@@ -77,6 +79,7 @@ individual R-series documents.
 | R035 | Hierarchical width profile | Accepted: final/best `32.6597/32.8440`; no width collapse. Guide owns low-frequency profile, render roots own relative residuals. |
 | R036 | Hierarchical positive child spread | Accepted and frozen: final/best `32.6632/32.8398`; coherent positive spread without physical endpoints. |
 | R037 | Move every coverage control to early schedule | Deferred before formal run. Only R036 child spread keeps its measured 1k-to-7k ramp. |
+| R038 | Guide-owned brush curve plus finite render lifecycle | Accepted structural/lifecycle baseline: final/best `32.3459/32.5168`; 34.0% fewer roots, 33.2% fewer Gaussians, and 43.2% less H100 time than R036, with zero backward strand segments. |
 
 ## What R036 Adds Over The Last Major Baseline R032
 
@@ -98,6 +101,23 @@ Measured change from R032 to R036:
 The gain is secondary to the representation result: length, root width,
 width taper, and child spread no longer depend on animal-scale physical
 decoder endpoints, while the canonical pure-fur coat remains coherent.
+
+## What R038 Adds Over R036
+
+R038 retains R036's clean-flow, interpolation, hierarchy, smoothing, optimizer,
+and positive-field contracts, then makes two isolated changes:
+
+1. A guide-owned brush strength explicitly controls a smooth
+   normal-to-groom transition while preserving root, tip, straight length, and
+   endpoint 3D direction. Bend becomes a smooth unbounded interior offset;
+   curl/frizz remain disabled.
+2. Evidence-driven render lifecycle runs every 100 iterations from 600 through
+   9000, then both root updates and lifecycle-only statistics stop.
+
+The final test metric is `0.31734 dB` below R036, so R038 is not a metric win.
+It is accepted because fixed-protocol structure remains coherent while root,
+Gaussian, memory, and runtime cost fall substantially. R036 stays frozen for
+metric comparisons.
 
 ## Effective Findings
 
@@ -121,6 +141,6 @@ The strongest reusable findings are:
 
 ## Current Boundary
 
-R036 does not yet contain Gaussian-level RGB appearance residuals or the future
-brush-stiffness/base-curve representation. Those are separate candidates and
-must not be described as part of this frozen baseline.
+R038 contains the base brush curve but does not redesign or enable curl/frizz,
+and it does not add Gaussian-level RGB appearance residuals. Those remain
+separate future candidates and must not be described as part of this baseline.

@@ -1,13 +1,29 @@
 # Current Route
 
-Status date: 2026-08-05.
+Status date: 2026-08-06.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
 
 ## Baseline Status
 
-R036 is the frozen measured and executable Stage 1 baseline:
+R038 is the active structural/lifecycle Stage 1 baseline:
+
+- final train/test composite PSNR: `33.03637 / 32.34588`
+- best test composite PSNR: `32.51677` at 29k
+- final render roots/Gaussians: `209220 / 9496145`
+- elapsed H100 training time: `12345.53 s`
+- formal checkpoint SHA-256:
+  `994578210640f7e586f3c2cbdfb0eced6b962680945ea8ca1b82c6444e1cdf41`
+- canonical asset render:
+  `D:/RTS/_tmp/r038_30k_final/r038_030000_asset_side_y_v11_protocol.png`
+
+The `stage1-r038` tag and `configs/r038_brush_curve.lock.json` freeze the
+executable source and formal evidence. R038 adds the guide-owned brush curve,
+uses the corrected non-periodic bend, and ends all render-lifecycle work after
+the final 9k event.
+
+R036 remains the immutable higher-PSNR metric control:
 
 - final train/test composite PSNR: `33.42397 / 32.66322`
 - best test composite PSNR: `32.83977` at 29k
@@ -17,21 +33,19 @@ R036 is the frozen measured and executable Stage 1 baseline:
 - canonical asset render:
   `D:/RTS/_tmp/r036_30k_final/r036_030000_asset_side_y_v11_protocol.png`
 
-The `stage1-r036` Git tag is byte-identical to the formal runtime snapshot.
-`configs/stage1_baseline.lock.json` verifies that immutable tag, so candidate
-work can proceed without rewriting R036 evidence. The exact v4 target remains
-tracked under `baseline_inputs/` with unchanged content.
-
-R038 is the active, unaccepted candidate. It adds the guide-owned brush curve,
-replaces the legacy bounded bend geometry, and ends render lifecycle work after
-9k. Its design and verification ledger are in
-`r038_brush_curve_and_9k_lifecycle.md`.
+The `stage1-r036` Git tag is byte-identical to its formal runtime snapshot, and
+`configs/stage1_baseline.lock.json` continues to verify that control. R038 is
+`0.31734 dB` lower at the final test metric but uses `34.0%` fewer render roots,
+`33.2%` fewer Gaussians, and `43.2%` less H100 training time. It is accepted
+for the representation and finite-lifecycle result, not reported as a PSNR
+gain. The exact v4 target remains tracked under `baseline_inputs/` with
+unchanged content.
 
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
-- frozen configuration: `configs/stage1_baseline.env`
-- active candidate configuration: `configs/r038_brush_curve_0_30k.env`
+- frozen R036 metric-control configuration: `configs/stage1_baseline.env`
+- active R038 baseline configuration: `configs/r038_brush_curve_0_30k.env`
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
 - Gaussian export: `tools/export_white_tiger_checkpoint_gaussians_ply.py`
@@ -131,7 +145,7 @@ guide anchoring, and residual concentration. The length residual term keeps the
 accepted mean absolute prior and adds the population-stable concentration term
 `L4 - L2` during unlock.
 
-## Frozen R036 Decoder
+## Representation Lineage
 
 The retired directional decomposition and the old gravity/sag/stiffness
 controls are no longer present in the executable representation. Bend,
@@ -149,7 +163,7 @@ reference, maximum-segment field, or absolute endpoint for those positive
 physical fields. Each schema-changing candidate must train from zero and
 intentionally does not load the preceding strict-schema checkpoint.
 
-Any candidate replaces the last measured reference only after:
+Any later candidate replaces the active structural reference only after:
 
 1. from-zero training completes with the strict current schema;
 2. full-resolution train/test composite metrics are recorded;
@@ -193,12 +207,13 @@ Numerical epsilon clamps, normalized directions, RGB/opacity domains, tip
 ratios, and clump interpolation weights are representation or semantic domains
 rather than animal-specific physical thresholds; they remain.
 
-The active R038 candidate implements the base design in
+The active R038 baseline implements the base design in
 [`brush_curve_representation.md`](brush_curve_representation.md): straight
 root-to-tip length, a smooth guide-owned normal-to-groom curve, final-curve
 Gaussian allocation, and an unbounded non-periodic bend. Curl/frizz redesign is
-deferred and disabled rather than mixed into this candidate. R038 is executable
-but is not the accepted baseline until its formal run and structural QA pass.
+deferred and disabled rather than mixed into this baseline. Its complete run,
+lifecycle audit, fixed-protocol QA, and acceptance decision are recorded in
+[`r038_brush_curve_and_9k_lifecycle.md`](r038_brush_curve_and_9k_lifecycle.md).
 
 ## Execution Memory Contract
 
