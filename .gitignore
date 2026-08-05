@@ -48,6 +48,9 @@ _platform_handoff/
 *.npy
 *.exr
 
+# Small immutable inputs required to reproduce the frozen Stage 1 baseline.
+!/baseline_inputs/v4_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz
+
 # Media generated from runs
 *.mp4
 *.mov

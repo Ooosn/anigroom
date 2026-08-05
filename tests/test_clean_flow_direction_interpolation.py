@@ -3,8 +3,13 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from anigroom.flow.clean_flow import CleanFlowTargets, sample_clean_flow_targets
+from anigroom.flow.clean_flow import (
+    CleanFlowTargets,
+    clean_flow_smoothness_loss,
+    sample_clean_flow_targets,
+)
 from anigroom.flow.direction_geometry import parallel_transport_vectors
+from anigroom.surface_interpolation import reconstruct_surface_directions
 
 
 def _targets() -> CleanFlowTargets:
@@ -94,3 +99,96 @@ def test_direction_is_surface_aware_while_scalar_sampling_stays_legacy() -> None
     torch.testing.assert_close(sampled["shell_height"], expected_shell)
     torch.testing.assert_close(sampled["raw_shell_height"], expected_raw_shell)
     torch.testing.assert_close(sampled["lambda"], expected_lambda)
+
+
+def test_direction_smoothness_prioritizes_uncertain_edges() -> None:
+    directions = torch.tensor(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    edges = torch.tensor([[0, 1], [2, 3]], dtype=torch.long)
+
+    uncertain_error = clean_flow_smoothness_loss(
+        directions,
+        edges,
+        torch.tensor([0.0, 0.0, 1.0, 1.0]),
+    )
+    observed_error = clean_flow_smoothness_loss(
+        directions,
+        edges,
+        torch.tensor([1.0, 1.0, 0.0, 0.0]),
+    )
+
+    assert float(uncertain_error) > float(observed_error)
+
+
+def test_surface_direction_reconstruction_preserves_coherent_field() -> None:
+    directions = F.normalize(
+        torch.tensor(
+            [[1.0, 0.0, 0.2], [1.0, 0.0, 0.2], [1.0, 0.0, 0.2]],
+            dtype=torch.float32,
+        ),
+        dim=-1,
+    )
+    normals = torch.tensor([[0.0, 0.0, 1.0]] * 3, dtype=torch.float32)
+    points = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    edges = torch.tensor([[0, 1], [1, 0], [1, 2], [2, 1]], dtype=torch.long)
+
+    reconstructed, reliability, supported = reconstruct_surface_directions(
+        directions,
+        normals,
+        points,
+        torch.ones(3),
+        edges,
+    )
+
+    torch.testing.assert_close(reconstructed, directions, atol=1.0e-6, rtol=1.0e-6)
+    torch.testing.assert_close(reliability, torch.ones(3), atol=1.0e-6, rtol=1.0e-6)
+    assert bool(supported.all())
+
+
+def test_surface_direction_reconstruction_repairs_isolated_outlier() -> None:
+    directions = torch.tensor(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+        dtype=torch.float32,
+    )
+    normals = torch.tensor([[0.0, 0.0, 1.0]] * 3, dtype=torch.float32)
+    points = torch.tensor([[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    edges = torch.tensor([[0, 2], [1, 0], [1, 2], [2, 0]], dtype=torch.long)
+
+    reconstructed, reliability, _ = reconstruct_surface_directions(
+        directions,
+        normals,
+        points,
+        torch.ones(3),
+        edges,
+    )
+
+    assert float(reconstructed[1, 0]) > 0.999
+    assert float(reconstructed[1, 1].abs()) < 1.0e-4
+    assert float(reliability[1]) < 1.0e-4
+
+
+def test_surface_direction_reconstruction_preserves_multidirectional_boundary() -> None:
+    directions = torch.tensor(
+        [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]],
+        dtype=torch.float32,
+    )
+    normals = torch.tensor([[0.0, 0.0, 1.0]] * 3, dtype=torch.float32)
+    points = torch.tensor([[0.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    edges = torch.tensor([[0, 1], [0, 2], [1, 0], [2, 0]], dtype=torch.long)
+
+    reconstructed, _, _ = reconstruct_surface_directions(
+        directions,
+        normals,
+        points,
+        torch.ones(3),
+        edges,
+    )
+
+    torch.testing.assert_close(reconstructed[0], directions[0], atol=1.0e-6, rtol=1.0e-6)

@@ -1,5 +1,11 @@
 # AniGroom Module Map
 
+Current source of truth: `docs/current_route.md`. R036 is the frozen measured
+Stage 1 baseline. R034's absolute segment repair, R035's hierarchical width
+profile, and R036's hierarchical child spread are retained; R034's direct
+render-root width learning and the unrun R037 schedule proposal are rejected or
+deferred.
+
 ## Flow Initialization
 
 - Code: `anigroom/flow`, `anigroom/projection`, and the flow-building tools.
@@ -9,20 +15,45 @@
 ## Strand-To-Gaussian Representation
 
 - Code: `anigroom/grooming/strand_gaussians.py`.
-- The checked-in implementation is the exact v11 version.
-- Details: `docs/modules/02_strand_gaussian_representation.md`.
+- It owns explicit groom decoding, strand construction, child expansion,
+  adaptive segment counts, and strand-to-Gaussian conversion.
+- Guide/render length, width, and child-spread controls use reference-relative,
+  positive-unbounded coordinates; opacity and tip-width ratio use semantic
+  unit intervals, while width taper is positive-unbounded. Segment allocation is linear in absolute physical
+  length and strand complexity, with a representation floor but no upper cap
+  or initialization-derived reference.
 
 ## Stage 1 Training Baseline
 
 - Formal entry: `tools/train_white_tiger_stage1.py`.
-- Exact from-zero runner: `scripts/server/reproduce_v11_from_zero.sh`.
-- Parent config: `configs/reproduce_v11_parent_0_9k.env`.
-- v11 config:
-  `configs/white_tiger_stage1_local_rgb_groom_v11_appearance_lenfree_from9k.env`.
-- Accepted result: train/test composite PSNR `33.1472 / 32.1938`.
-- Evidence: `docs/v11_exact_reproduction_audit.md`.
+- Generic runner: `scripts/server/run_white_tiger_stage1.sh`; `CONFIG_PATH` is
+  mandatory and has no fallback.
+- From-zero config: `configs/stage1_baseline.env`.
+- Frozen result: train/test composite PSNR `33.42397 / 32.66322`; best test
+  composite PSNR `32.83977` at 29k.
+- Lock manifest: `configs/stage1_baseline.lock.json`.
+- Evidence: `docs/stage1_baseline_r036.md`,
+  `docs/r036_hierarchical_child_spread.md`, and
+  `docs/accept_line_recovery_ledger.md`.
 
-The formal codebase exposes only this accepted v11 training route.
+The active schema is strict and has no historical checkpoint migration.
+
+## Surface Interpolation And Root Lifecycle
+
+- Surface interpolation: `anigroom/surface_interpolation.py`.
+- Root lifecycle: `anigroom/roots/lifecycle.py` and
+  `anigroom/roots/statistics.py`.
+- The recovery ledger records how these components reached the current
+  contract.
+- Guide-root lifecycle uses exact forward surface-support attribution and
+  intrinsic local maxima. Guide-length smoothness is an area-integrated
+  intrinsic log-gradient with fixed initial reference spacing, so
+  densification does not weaken the physical regularizer.
+- The formal render-root lifecycle has one path only: `pixel_to_root` evidence,
+  intrinsic local maxima, and topology-local split/delete placement. Old
+  target-directed placement branches are no longer present.
+- Densification and pruning remain part of the multi-level training method,
+  not standalone synthetic replacements.
 
 ## Visualization And Export
 
@@ -32,10 +63,12 @@ The formal codebase exposes only this accepted v11 training route.
 - `tools/visualize_white_tiger_groom_attributes.py`
 - `tools/blender_render_strand_npz.py`
 
-These tools are restored to the versions used with the exact v11 baseline.
+Structural QA and asset rendering use different fixed protocols. Their exact
+settings are recorded in `docs/current_route.md`; parent-only QA must not be
+presented as the asset result.
 
 ## Change Rule
 
-v11 is the current baseline. Training behavior changes only when explicitly
-requested, and no experiment replaces v11 without both metric and pure-fur
-acceptance.
+Training behavior changes only through a named, documented experiment. A new
+result replaces the last measured reference only after metric and canonical
+pure-fur acceptance.

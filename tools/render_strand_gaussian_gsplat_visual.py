@@ -137,7 +137,9 @@ def main() -> None:
     parser.add_argument("--segments", type=int, default=0)
     parser.add_argument("--adaptive-segments", action="store_true")
     parser.add_argument("--min-segments", type=int, default=12)
-    parser.add_argument("--max-segments", type=int, default=64)
+    parser.add_argument("--segment-length-origin", type=float, default=0.010)
+    parser.add_argument("--segments-per-unit-length", type=float, default=84.19047619047619)
+    parser.add_argument("--segments-per-unit-complexity", type=float, default=23.771428571428572)
     parser.add_argument("--hair-width", type=float, default=0.006)
     parser.add_argument("--image-width", type=int, default=1280)
     parser.add_argument("--image-height", type=int, default=720)
@@ -167,7 +169,9 @@ def main() -> None:
             opacities,
             lengths,
             min_segments=args.min_segments,
-            max_segments=args.max_segments,
+            length_origin=args.segment_length_origin,
+            segments_per_unit_length=args.segments_per_unit_length,
+            segments_per_unit_complexity=args.segments_per_unit_complexity,
         )
         segment_count = int(resampled.segment_counts.max().detach().cpu())
         segment_mode = "adaptive"

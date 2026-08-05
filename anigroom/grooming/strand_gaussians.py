@@ -26,25 +26,65 @@ def _inverse_sigmoid(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return torch.log(x / (1.0 - x))
 
 
+def decode_positive_asinh_ratio(
+    raw: torch.Tensor,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """Decode a positive field without a physical minimum or maximum.
+
+    ``raw == 0`` returns the data-derived reference exactly.  ``asinh`` keeps
+    the local log-ratio coordinate linear while avoiding exponential growth in
+    the far raw-coordinate tail.
+    """
+
+    tiny = torch.as_tensor(
+        torch.finfo(reference.dtype).tiny,
+        device=reference.device,
+        dtype=reference.dtype,
+    )
+    return reference.clamp_min(tiny) * torch.exp(torch.asinh(raw))
+
+
+def encode_positive_asinh_ratio(
+    value: torch.Tensor,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """Encode a positive physical field relative to its local reference."""
+
+    tiny = torch.as_tensor(
+        torch.finfo(value.dtype).tiny,
+        device=value.device,
+        dtype=value.dtype,
+    )
+    log_ratio = torch.log(value.clamp_min(tiny) / reference.clamp_min(tiny))
+    return torch.sinh(log_ratio)
+
+
+def decode_positive_asinh(raw: torch.Tensor) -> torch.Tensor:
+    """Decode a strictly positive scalar with neutral value one."""
+
+    return torch.exp(torch.asinh(raw))
+
+
+def encode_positive_asinh(value: torch.Tensor) -> torch.Tensor:
+    """Encode a strictly positive scalar whose neutral value is one."""
+
+    tiny = torch.as_tensor(
+        torch.finfo(value.dtype).tiny,
+        device=value.device,
+        dtype=value.dtype,
+    )
+    return torch.sinh(torch.log(value.clamp_min(tiny)))
+
+
 @dataclass(frozen=True)
 class GroomRanges:
-    """Physical ranges for decoded grooming controls."""
+    """Physical ranges that remain intrinsic to bounded groom controls."""
 
-    length: tuple[float, float] = (0.012, 0.105)
-    root_width: tuple[float, float] = (0.00008, 0.0020)
-    tip_width_ratio: tuple[float, float] = (0.10, 0.85)
-    width_taper: tuple[float, float] = (0.45, 3.00)
-    flow_strength: tuple[float, float] = (0.05, 1.10)
-    lift: tuple[float, float] = (0.008, 0.55)
-    sag: tuple[float, float] = (0.00, 0.85)
-    stiffness: tuple[float, float] = (0.05, 0.98)
     curl_radius: tuple[float, float] = (0.0, 0.030)
     curl_frequency: tuple[float, float] = (0.0, 8.0)
     frizz: tuple[float, float] = (0.0, 0.018)
-    child_radius: tuple[float, float] = (0.0, 0.018)
     clump_strength: tuple[float, float] = (0.0, 1.0)
-    opacity: tuple[float, float] = (0.05, 0.95)
-    tip_opacity_ratio: tuple[float, float] = (0.10, 1.00)
 
 
 @dataclass
@@ -52,21 +92,17 @@ class DecodedGroom:
     """Decoded per-root groom controls.
 
     All tensors are shaped ``[R, C]``.  These are explicit editor-like controls:
-    length, tapering width, brushed flow, lift, bend, sag, stiffness, color, and
-    opacity. Extra growth gates and color-darkening shortcuts are intentionally
-    outside this core parameter set.
+    length, tapering width, a normalized 3D direction in the root frame, bend,
+    curl, frizz, child layout, color, and opacity. Extra growth gates and
+    color-darkening shortcuts are intentionally outside this core parameter set.
     """
 
     length: torch.Tensor
     root_width: torch.Tensor
     tip_width: torch.Tensor
     width_taper: torch.Tensor
-    flow_xy: torch.Tensor
-    flow_strength: torch.Tensor
-    lift: torch.Tensor
+    direction_local: torch.Tensor
     bend: torch.Tensor
-    sag: torch.Tensor
-    stiffness: torch.Tensor
     curl_radius: torch.Tensor
     curl_frequency: torch.Tensor
     curl_phase: torch.Tensor
@@ -114,6 +150,7 @@ class GroomParameterField(nn.Module):
         self,
         root_count: int,
         ranges: GroomRanges | None = None,
+        init_length: float = 0.050,
         init_root_color: tuple[float, float, float] = (0.92, 0.90, 0.84),
         init_tip_color: tuple[float, float, float] = (0.86, 0.85, 0.78),
         device: torch.device | str | None = None,
@@ -134,26 +171,53 @@ class GroomParameterField(nn.Module):
             tensor = torch.as_tensor(value, dtype=torch.float32, device=dev).reshape(1, channels)
             return nn.Parameter(tensor.repeat(self.root_count, 1))
 
-        self.length_raw = repeated(raw_from_range(0.050, self.ranges.length))
-        self.root_width_raw = repeated(raw_from_range(0.00065, self.ranges.root_width))
-        self.tip_width_ratio_raw = repeated(raw_from_range(0.22, self.ranges.tip_width_ratio))
-        self.width_taper_raw = repeated(raw_from_range(1.25, self.ranges.width_taper))
-        self.flow_xy = nn.Parameter(torch.tensor([[0.55, 0.04]], dtype=torch.float32, device=dev).repeat(self.root_count, 1))
-        self.flow_strength_raw = repeated(raw_from_range(0.72, self.ranges.flow_strength))
-        self.lift_raw = repeated(raw_from_range(0.22, self.ranges.lift))
+        if not float(init_length) > 0.0:
+            raise ValueError("init_length must be positive")
+        self.register_buffer(
+            "length_reference",
+            torch.full(
+                (self.root_count, 1),
+                float(init_length),
+                dtype=torch.float32,
+                device=dev,
+            ),
+        )
+        self.length_raw = repeated(0.0)
+        self.register_buffer(
+            "root_width_reference",
+            torch.full(
+                (self.root_count, 1),
+                0.00065,
+                dtype=torch.float32,
+                device=dev,
+            ),
+        )
+        self.root_width_raw = repeated(0.0)
+        self.tip_width_ratio_raw = repeated(_inverse_sigmoid(torch.tensor(0.22, device=dev)))
+        self.width_taper_raw = repeated(encode_positive_asinh(torch.tensor(1.25, device=dev)))
+        self.direction_local_raw = nn.Parameter(
+            torch.tensor([[0.55, 0.04, 0.22]], dtype=torch.float32, device=dev).repeat(self.root_count, 1)
+        )
         self.bend_raw = repeated(-0.20)
-        self.sag_raw = repeated(raw_from_range(0.20, self.ranges.sag))
-        self.stiffness_raw = repeated(raw_from_range(0.72, self.ranges.stiffness))
         self.curl_radius_raw = repeated(raw_from_range(0.001, self.ranges.curl_radius))
         self.curl_frequency_raw = repeated(raw_from_range(0.35, self.ranges.curl_frequency))
         self.curl_phase = nn.Parameter(torch.zeros((self.root_count, 1), dtype=torch.float32, device=dev))
         self.frizz_raw = repeated(raw_from_range(0.001, self.ranges.frizz))
-        self.child_radius_raw = repeated(raw_from_range(0.001, self.ranges.child_radius))
+        self.register_buffer(
+            "child_radius_reference",
+            torch.full(
+                (self.root_count, 1),
+                0.001,
+                dtype=torch.float32,
+                device=dev,
+            ),
+        )
+        self.child_radius_raw = repeated(0.0)
         self.clump_strength_raw = repeated(raw_from_range(0.15, self.ranges.clump_strength))
         self.root_color_raw = nn.Parameter(_inverse_sigmoid(torch.tensor(init_root_color, device=dev)).view(1, 3).repeat(self.root_count, 1))
         self.tip_color_raw = nn.Parameter(_inverse_sigmoid(torch.tensor(init_tip_color, device=dev)).view(1, 3).repeat(self.root_count, 1))
-        self.opacity_raw = repeated(raw_from_range(0.72, self.ranges.opacity))
-        self.tip_opacity_ratio_raw = repeated(raw_from_range(0.68, self.ranges.tip_opacity_ratio))
+        self.opacity_raw = repeated(_inverse_sigmoid(torch.tensor(0.72, device=dev)))
+        self.tip_opacity_ratio_raw = repeated(_inverse_sigmoid(torch.tensor(0.68, device=dev)))
 
     @staticmethod
     def _decode_range(raw: torch.Tensor, bounds: tuple[float, float]) -> torch.Tensor:
@@ -162,31 +226,36 @@ class GroomParameterField(nn.Module):
 
     def decode(self) -> DecodedGroom:
         ranges = self.ranges
-        root_width = self._decode_range(self.root_width_raw, ranges.root_width)
-        tip_ratio = self._decode_range(self.tip_width_ratio_raw, ranges.tip_width_ratio)
+        root_width = decode_positive_asinh_ratio(
+            self.root_width_raw,
+            self.root_width_reference,
+        )
+        tip_ratio = torch.sigmoid(self.tip_width_ratio_raw)
         return DecodedGroom(
-            length=self._decode_range(self.length_raw, ranges.length),
+            length=decode_positive_asinh_ratio(
+                self.length_raw,
+                self.length_reference,
+            ),
             root_width=root_width,
             tip_width=root_width * tip_ratio,
-            width_taper=self._decode_range(self.width_taper_raw, ranges.width_taper),
-            flow_xy=self.flow_xy,
-            flow_strength=self._decode_range(self.flow_strength_raw, ranges.flow_strength),
-            lift=self._decode_range(self.lift_raw, ranges.lift),
+            width_taper=decode_positive_asinh(self.width_taper_raw),
+            direction_local=_normalize(self.direction_local_raw),
             bend=torch.tanh(self.bend_raw),
-            sag=self._decode_range(self.sag_raw, ranges.sag),
-            stiffness=self._decode_range(self.stiffness_raw, ranges.stiffness),
             curl_radius=self._decode_range(self.curl_radius_raw, ranges.curl_radius),
             curl_frequency=self._decode_range(self.curl_frequency_raw, ranges.curl_frequency),
             curl_phase=self.curl_phase,
             frizz=self._decode_range(self.frizz_raw, ranges.frizz),
-            child_radius=self._decode_range(self.child_radius_raw, ranges.child_radius),
+            child_radius=decode_positive_asinh_ratio(
+                self.child_radius_raw,
+                self.child_radius_reference,
+            ),
             clump_strength=self._decode_range(self.clump_strength_raw, ranges.clump_strength),
             root_color=torch.sigmoid(self.root_color_raw),
             tip_color=torch.sigmoid(self.tip_color_raw),
-            root_opacity=self._decode_range(self.opacity_raw, ranges.opacity),
-            tip_opacity=self._decode_range(self.opacity_raw, ranges.opacity)
-            * self._decode_range(self.tip_opacity_ratio_raw, ranges.tip_opacity_ratio),
-            opacity=self._decode_range(self.opacity_raw, ranges.opacity),
+            root_opacity=torch.sigmoid(self.opacity_raw),
+            tip_opacity=torch.sigmoid(self.opacity_raw)
+            * torch.sigmoid(self.tip_opacity_ratio_raw),
+            opacity=torch.sigmoid(self.opacity_raw),
         )
 
 
@@ -212,8 +281,6 @@ def build_strands(
     bitangents: torch.Tensor,
     groom: DecodedGroom,
     samples: int,
-    gravity_direction: torch.Tensor | tuple[float, float, float] = (0.0, -1.0, 0.0),
-    use_gravity_sag: bool = True,
     shape_normal_mode: str = "full",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate differentiable strand samples from mesh roots and groom controls.
@@ -232,34 +299,27 @@ def build_strands(
     if roots.shape != normals.shape or roots.shape != tangents.shape or roots.shape != bitangents.shape:
         raise ValueError("roots, normals, tangents, and bitangents must all have shape [R, 3]")
 
-    flow_local = _normalize(groom.flow_xy)
-    flow = _normalize(flow_local[:, [0]] * tangents + flow_local[:, [1]] * bitangents)
+    direction_local = _normalize(groom.direction_local)
+    groom_direction = _normalize(
+        direction_local[:, [0]] * tangents
+        + direction_local[:, [1]] * bitangents
+        + direction_local[:, [2]] * normals
+    )
+    tangent_component = groom_direction - (groom_direction * normals).sum(dim=-1, keepdim=True) * normals
+    tangent_norm = torch.linalg.norm(tangent_component, dim=-1, keepdim=True)
+    flow = torch.where(tangent_norm > EPS, tangent_component / tangent_norm.clamp_min(EPS), tangents)
 
     if shape_normal_mode not in {"full", "outward", "tangent"}:
         raise ValueError(f"unknown shape_normal_mode: {shape_normal_mode}")
     side = _normalize(torch.cross(normals, flow, dim=-1))
     curl_up = _normalize(torch.cross(flow, side, dim=-1))
-    flex = (1.0 - groom.stiffness).clamp(0.0, 1.0)
-    length_lo, length_hi = GroomRanges().length
-    length_norm = ((groom.length - length_lo) / max(length_hi - length_lo, EPS)).clamp(0.0, 1.0)
-    if use_gravity_sag:
-        gravity = torch.as_tensor(gravity_direction, device=roots.device, dtype=roots.dtype).view(1, 3)
-        gravity = _normalize(gravity.expand_as(roots))
-        gravity_tangent = gravity - (gravity * normals).sum(dim=-1, keepdim=True) * normals
-        gravity_tangent = _normalize(gravity_tangent + 1e-4 * flow)
-        sag = groom.sag * flex * (0.25 + 1.75 * length_norm.square())
-    else:
-        gravity_tangent = torch.zeros_like(flow)
-        sag = torch.zeros_like(groom.sag)
-    bend = groom.bend * (0.35 + 0.65 * flex)
-    brush = groom.flow_strength
-    groom_direction = _normalize(groom.lift * normals + brush * flow)
+    bend = groom.bend
 
     p0 = roots
-    p1_direction = _normalize(groom_direction + sag * gravity_tangent + 0.24 * bend * side)
+    p1_direction = _normalize(groom_direction + 0.24 * bend * side)
     p1 = roots + groom.length * p1_direction
     m0 = groom.length * groom_direction
-    m1 = groom.length * _normalize(groom_direction + sag * gravity_tangent + 0.55 * bend * side)
+    m1 = groom.length * _normalize(groom_direction + 0.55 * bend * side)
 
     t = torch.linspace(0.0, 1.0, samples, device=roots.device, dtype=roots.dtype).view(1, samples, 1)
     t2 = t * t
@@ -381,13 +441,16 @@ def strand_segment_budgets(
     strands: torch.Tensor,
     lengths: torch.Tensor,
     min_segments: int,
-    max_segments: int,
-    length_bounds: tuple[float, float] | None = None,
+    length_origin: float,
+    segments_per_unit_length: float,
+    segments_per_unit_complexity: float,
 ) -> tuple[torch.Tensor, dict[str, float | int]]:
-    """Choose a continuous segment budget from strand length and curvature.
+    """Choose an uncapped segment budget from absolute length and complexity.
 
     The returned budget is the number of *consecutive* Gaussian segments that
-    should represent each strand. It does not skip existing segments.
+    should represent each strand.  This is the accepted absolute-length linear
+    allocator with its upper clamps removed: equal physical lengths receive the
+    same length contribution, while curvature can only add representation.
     """
 
     if strands.ndim != 3 or strands.shape[-1] != 3:
@@ -396,34 +459,44 @@ def strand_segment_budgets(
         raise ValueError("strands must contain at least two samples")
     if lengths.shape[0] != strands.shape[0]:
         raise ValueError("lengths must have one row per strand")
-
     min_segments = int(max(1, min_segments))
-    max_segments = int(max(min_segments, max_segments))
+    length_origin = float(length_origin)
+    segments_per_unit_length = float(segments_per_unit_length)
+    segments_per_unit_complexity = float(segments_per_unit_complexity)
+    if length_origin < 0.0:
+        raise ValueError("length_origin must be non-negative")
+    if segments_per_unit_length <= 0.0 or segments_per_unit_complexity < 0.0:
+        raise ValueError("segment densities must be positive for length and non-negative for complexity")
 
     seg = strands[:, 1:] - strands[:, :-1]
-    arc = torch.linalg.norm(seg, dim=-1).sum(dim=1, keepdim=True)
+    seg_length = torch.linalg.norm(seg, dim=-1)
+    arc = seg_length.sum(dim=1, keepdim=True)
     chord = torch.linalg.norm(strands[:, -1] - strands[:, 0], dim=-1, keepdim=True).clamp_min(EPS)
     arc_excess = (arc / chord - 1.0).clamp_min(0.0)
     if seg.shape[1] > 1:
         dirs = _normalize(seg)
         turn = 1.0 - (dirs[:, 1:] * dirs[:, :-1]).sum(dim=-1).clamp(-1.0, 1.0)
-        turn = turn.mean(dim=1, keepdim=True)
+        valid_turn = (seg_length[:, 1:] > EPS) & (seg_length[:, :-1] > EPS)
+        turn = torch.where(valid_turn, turn, torch.zeros_like(turn))
+        turn = turn.sum(dim=1, keepdim=True) / valid_turn.sum(dim=1, keepdim=True).clamp_min(1)
         complexity = torch.maximum(arc_excess, 4.0 * turn)
     else:
         complexity = arc_excess
 
-    length_bounds = GroomRanges().length if length_bounds is None else length_bounds
-    length_abs = ((lengths.detach() - length_bounds[0]) / max(length_bounds[1] - length_bounds[0], EPS)).clamp(0.0, 1.0)
-    complexity_abs = (complexity.detach() / 0.35).clamp(0.0, 1.0)
-    score = (0.68 * length_abs + 0.32 * complexity_abs).clamp(0.0, 1.0)
-    budgets = torch.round(min_segments + score * (max_segments - min_segments)).long().view(-1)
-    budgets = budgets.clamp(min_segments, max_segments)
+    absolute_length = lengths.detach().reshape(strands.shape[0], -1)[:, :1]
+    length_extra = (absolute_length - length_origin).clamp_min(0.0) * segments_per_unit_length
+    complexity_extra = complexity.detach().clamp_min(0.0) * segments_per_unit_complexity
+    budgets = torch.round(float(min_segments) + length_extra + complexity_extra).long().view(-1)
+    budgets = budgets.clamp_min(min_segments)
 
     stats = {
         "adaptive_mean_segments": float(budgets.float().mean().detach().cpu()),
         "adaptive_min_segments": int(budgets.min().detach().cpu()),
         "adaptive_max_segments": int(budgets.max().detach().cpu()),
+        "adaptive_arc_length_mean": float(arc.mean().detach().cpu()),
         "adaptive_complexity_mean": float(complexity.mean().detach().cpu()),
+        "adaptive_length_extra_mean": float(length_extra.mean().detach().cpu()),
+        "adaptive_complexity_extra_mean": float(complexity_extra.mean().detach().cpu()),
     }
     return budgets, stats
 
@@ -519,12 +592,20 @@ def adaptive_resample_strands(
     opacities: torch.Tensor,
     lengths: torch.Tensor,
     min_segments: int,
-    max_segments: int,
-    length_bounds: tuple[float, float] | None = None,
+    length_origin: float,
+    segments_per_unit_length: float,
+    segments_per_unit_complexity: float,
 ) -> ResampledStrands:
     """Adaptive but continuous strand sampling for 3DGS conversion."""
 
-    counts, stats = strand_segment_budgets(strands, lengths, min_segments, max_segments, length_bounds=length_bounds)
+    counts, stats = strand_segment_budgets(
+        strands,
+        lengths,
+        min_segments,
+        length_origin,
+        segments_per_unit_length,
+        segments_per_unit_complexity,
+    )
     resampled = resample_strands_to_segment_budgets(strands, widths, colors, opacities, counts)
     resampled.stats.update(stats)
     return resampled

@@ -1,0 +1,40 @@
+{
+  "baseline_id": "stage1-r036",
+  "frozen_at": "2026-08-05",
+  "formal_run": {
+    "output": "/home/wangyy/anigroom-r036-hierarchical-child-spread-20260805/outputs/r036_from_zero_h100_20260805",
+    "checkpoint": {
+      "path": "checkpoint_030000.pt",
+      "bytes": 179249514,
+      "sha256": "b4bedaa3d111c529e38d43ed7ffd922391292a5977934d10c4f10b7aeaf85f6b"
+    },
+    "config_sha256": "2273fdbde92ced442b8d337bf007ac3fdb530de0a112209526185a6b0b73e263",
+    "metrics_sha256": "a0ae9c8170deb6d40952dc5ff32f77076e027f8f988a2823aee37170c7e4335d",
+    "final_train_composite_psnr": 33.42397308,
+    "final_test_composite_psnr": 32.66321945,
+    "best_test_composite_psnr": 32.83977127,
+    "best_test_iteration": 29000,
+    "render_roots": 317245,
+    "gaussians": 14215421
+  },
+  "local_files": {
+    "configs/stage1_baseline.env": "e00d4dd7a6576de4c0d73238952009bc84cc8cbe47382c90e79b73b15261d444",
+    "baseline_inputs/v4_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz": "60a33b360bb415cb47cd38173d6e0cf4504448203ef277a5861641b40fdb3141",
+    "anigroom/flow/__init__.py": "11fcbb13598f924dd70dc1b8b800aa2f62c10bd2e11174cda23f5b0f72484381",
+    "anigroom/flow/clean_flow.py": "17b659f7ef6c3df86fbaac982847209e76a68d5f53d8cd2fe03d2f2c3030b0f3",
+    "anigroom/grooming/__init__.py": "b759ac9d39111fdb6ffbc45016b5195701429bd06ffa74ee1521d98e26072f28",
+    "anigroom/grooming/geometry_residuals.py": "cf89697d6e9b90c58005c20bb0f6b89019a934840a51af155d8eb0df6e8f345a",
+    "anigroom/grooming/strand_gaussians.py": "d9273fb773e8e7d0f253ecb707f9a463ab92e9005f9bce7e0085b70cf80fa1e9",
+    "anigroom/roots/__init__.py": "17b965a4cd472226792d90766f852294fee0ed4971c21659cd83de6c926cdcad",
+    "anigroom/roots/lifecycle.py": "9b4121e7e3775fde6385e71bbb5a51dc757f96e3ef272e29d6aad54bec22b16e",
+    "anigroom/roots/statistics.py": "5c66bfb55581392c018ed0970f85396da61db8de2412480e729d158ed69d8416",
+    "anigroom/surface_interpolation.py": "bcc082a015aa1451a86c3be5e4f17ec08ab835f08cb64fe49c04ac0ac34f1d48",
+    "tools/train_white_tiger_stage1.py": "f3d7cadc5014103b83fed3c67d1410544dbf563b446a57dd00a67902d7d7b148",
+    "scripts/server/run_white_tiger_stage1.sh": "499383466f1d37523c38f53d165e3db6faea4f75692871a1f752d257ad4e2699",
+    "tools/export_white_tiger_checkpoint_strands.py": "84a6c725b1b718faf88481b92eac54bd76b793a19ca7f54d62dcb782cf287e61",
+    "tools/export_white_tiger_checkpoint_gaussians_ply.py": "a786b19b3cb383aaa8e58d0779850b1333fb71b5042bfe26af36d99a4b1f1721",
+    "tools/render_white_tiger_stage1_checkpoint_views.py": "ac3f59e2ff1e2f43ce48c9a3e9047c62fc2c3bd4ea8b911e8db5b3f0db7796de",
+    "tools/visualize_white_tiger_groom_attributes.py": "3b7036e7cc3acf54df53c1967259a408df63d2d72f234ce105ae85b6e3a8515f",
+    "tools/blender_render_strand_npz.py": "2aac9ac60d507e1081467c5df1511cc2e7a566b13e679f1a69ec2c022cbd66a7"
+  }
+}

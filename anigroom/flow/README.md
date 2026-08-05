@@ -5,7 +5,7 @@ conversion, and clean-flow losses.
 
 Current accepted line:
 
-`D:\petsgaussianhair\_downloads\tiger_hair_flow_36\shell_fused_smal_head500_body4000_candidate65536_headk24_bodyk12_v4_surface_direction`
+`baseline_inputs/v4_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
 Retained baselines:
 

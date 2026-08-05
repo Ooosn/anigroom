@@ -73,8 +73,8 @@ must not be used as a formal target-generation path.
 - `tools/build_white_tiger_smal_head_guides.py`
   - Builds SMAL/anatomy-aware head/body guide roots.
 - `tools/fuse_gpt_flow_shell_multiview.py`
-  - Fuses multi-view GPT/Gabor flow evidence with normal-shell lift and
-    direction consensus.
+  - Fuses multi-view GPT/Gabor flow evidence with normal-shell outward
+    evidence and direction consensus.
 - `tools/visualize_flow_targets_as_strands.py`
   - Canonical strand-like visualization for flow targets.
 
@@ -125,5 +125,5 @@ Current `v4_surface_direction` acceptance notes:
 ## Boundary
 
 This module may output target points, 3D directions, confidence, observed masks,
-anchor masks, and lift/lambda proxies. It must not decide densification timing,
+anchor masks, and shell-height/lambda evidence. It must not decide densification timing,
 residual unlock, PSNR reporting, or training-stage schedule.

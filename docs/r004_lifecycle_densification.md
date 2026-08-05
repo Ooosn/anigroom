@@ -57,6 +57,43 @@ so the lifecycle report shows zero root-level residual. In R004, the same
 residual image is also projected back to roots and accumulated into
 `RootStats.residual_sum`, making residual part of the parent-selection evidence.
 
+## Exact Evidence Statistics
+
+The lifecycle window accumulates statistics after each backward pass. It is
+reset immediately after every structure update, so the next densification/prune
+decision uses a fresh window.
+
+Visibility is computed from gsplat `info["radii"]`: a Gaussian is visible when
+its radius is positive. For the H100 gsplat layout where radii can have two
+values per Gaussian, the implementation uses `amax(dim=1) > 0`. The visible
+Gaussian counts are then scattered back to their owning render roots through
+`gaussians.root_indices`.
+
+The root-level evidence uses three terms:
+
+```text
+mean_grad      = abs(d loss / d gaussian_mean_xyz).sum_xyz
+scale_grad     = abs(d loss / d gaussian_scale).sum_channels
+gaussian_grad  = scatter_sum(mean_grad + 0.25 * scale_grad, root_id)
+contribution   = scatter_sum(visible_gaussian * opacity, root_id)
+root_grad      = abs(d loss / d root_xyz).sum_xyz
+residual       = residual_per_root, if available
+```
+
+With the current default `score_mode=raw`, the normalized terms are:
+
+```text
+gaussian_grad_term = gaussian_grad_abs_sum / gaussian_contrib_sum
+root_grad_term     = root_grad_abs_sum / visible_count
+residual_term      = residual_sum / visible_count
+need               = gaussian_grad_term + root_grad_term + residual_term
+```
+
+So the Gaussian term is not divided by plain visible count; it is divided by
+opacity-weighted visible contribution. The separate `visible_count` is still
+used as an absolute eligibility threshold, and it normalizes the direct root
+gradient and residual terms.
+
 ## Budget Normalization
 
 R003 `target_direct` inserts children and keeps parents. With

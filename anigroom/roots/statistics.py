@@ -42,6 +42,7 @@ class RootStatsWindow:
     def reset(self) -> None:
         shape = (self.root_count, 1)
         self.root_grad_abs_sum = torch.zeros(shape, device=self.device)
+        self.gaussian_mean_grad_abs_sum = torch.zeros(shape, device=self.device)
         self.gaussian_grad_abs_sum = torch.zeros(shape, device=self.device)
         self.gaussian_contrib_sum = torch.zeros(shape, device=self.device)
         self.visible_count = torch.zeros(shape, device=self.device)
@@ -123,6 +124,7 @@ class RootStatsWindow:
         root_sample_count.scatter_add_(0, root_ids[:, None], torch.ones_like(visible_g))
 
         self.root_grad_abs_sum += root_points.grad.detach().abs().sum(dim=-1, keepdim=True)
+        self.gaussian_mean_grad_abs_sum.scatter_add_(0, root_ids[:, None], mean_grad.to(device=self.device))
         self.gaussian_grad_abs_sum.scatter_add_(0, root_ids[:, None], gaussian_grad.to(device=self.device))
         self.gaussian_contrib_sum.scatter_add_(0, root_ids[:, None], visible_g * opacities.clamp_min(EPS))
         self.visible_count += root_visible_count
@@ -150,6 +152,7 @@ class RootStatsWindow:
             gaussian_sample_count=self.gaussian_sample_count.clone(),
             residual_sum=self.residual_sum.clone(),
             opacity_mean=opacity_mean.clone(),
+            gaussian_mean_grad_abs_sum=self.gaussian_mean_grad_abs_sum.clone(),
         )
 
     def summary(self) -> RootStatsSummary:

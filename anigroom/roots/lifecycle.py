@@ -50,6 +50,7 @@ class RootStats:
     gaussian_sample_count: torch.Tensor | None = None
     residual_sum: torch.Tensor | None = None
     opacity_mean: torch.Tensor | None = None
+    gaussian_mean_grad_abs_sum: torch.Tensor | None = None
 
     def validate(self) -> None:
         root_count = self.root_grad_abs_sum.shape[0]
@@ -66,6 +67,8 @@ class RootStats:
             raise ValueError("residual_sum has mismatched root dimension")
         if self.opacity_mean is not None and self.opacity_mean.shape[0] != root_count:
             raise ValueError("opacity_mean has mismatched root dimension")
+        if self.gaussian_mean_grad_abs_sum is not None and self.gaussian_mean_grad_abs_sum.shape[0] != root_count:
+            raise ValueError("gaussian_mean_grad_abs_sum has mismatched root dimension")
 
     @property
     def device(self) -> torch.device:
@@ -125,10 +128,19 @@ def normalized_root_need(stats: RootStats, score_mode: str = "raw") -> dict[str,
         gaussian_grad = stats.gaussian_grad_abs_sum / denom
         contribution = stats.gaussian_contrib_sum
         visibility = stats.visible_count
+        use_auxiliary_need_terms = True
     elif str(score_mode) == "sample_normalized":
         gaussian_grad = stats.gaussian_grad_abs_sum / sample_count
         contribution = stats.gaussian_contrib_sum / sample_count
         visibility = stats.visible_count / sample_count
+        use_auxiliary_need_terms = True
+    elif str(score_mode) == "mean_visible":
+        if stats.gaussian_mean_grad_abs_sum is None:
+            raise ValueError("mean_visible lifecycle score requires gaussian_mean_grad_abs_sum")
+        gaussian_grad = stats.gaussian_mean_grad_abs_sum / stats.visible_count.clamp_min(1.0)
+        contribution = stats.gaussian_contrib_sum
+        visibility = stats.visible_count
+        use_auxiliary_need_terms = False
     else:
         raise ValueError(f"unknown root lifecycle score_mode: {score_mode}")
     root_grad = stats.root_grad_abs_sum / stats.visible_count.clamp_min(1.0)
@@ -136,7 +148,10 @@ def normalized_root_need(stats: RootStats, score_mode: str = "raw") -> dict[str,
         residual = torch.zeros_like(root_grad)
     else:
         residual = stats.residual_sum / stats.visible_count.clamp_min(1.0)
-    need = gaussian_grad + root_grad + residual
+    if use_auxiliary_need_terms:
+        need = gaussian_grad + root_grad + residual
+    else:
+        need = gaussian_grad
     return {
         "need": need.reshape(-1),
         "gaussian_grad": gaussian_grad.reshape(-1),
@@ -150,6 +165,40 @@ def normalized_root_need(stats: RootStats, score_mode: str = "raw") -> dict[str,
     }
 
 
+def _parent_budget(config: DensifyConfig) -> int | None:
+    max_new_roots = int(config.max_new_roots)
+    if max_new_roots <= 0:
+        return None
+    return max(1, max_new_roots // max(1, int(config.children_per_parent)))
+
+
+def _record_selection_diagnostics(
+    scores: dict[str, torch.Tensor],
+    *,
+    threshold_candidate_count: int,
+    local_max_candidate_count: int | None,
+    parent_budget: int | None,
+) -> None:
+    device = scores["need"].device
+    dtype = scores["need"].dtype
+    scores["threshold_candidate_count"] = torch.tensor(float(threshold_candidate_count), device=device, dtype=dtype)
+    scores["local_max_candidate_count"] = torch.tensor(
+        -1.0 if local_max_candidate_count is None else float(local_max_candidate_count),
+        device=device,
+        dtype=dtype,
+    )
+    scores["parent_budget"] = torch.tensor(-1.0 if parent_budget is None else float(parent_budget), device=device, dtype=dtype)
+    scores["budget_saturated"] = torch.tensor(
+        float(
+            parent_budget is not None
+            and local_max_candidate_count is not None
+            and local_max_candidate_count > parent_budget
+        ),
+        device=device,
+        dtype=dtype,
+    )
+
+
 def select_densify_parents(stats: RootStats, config: DensifyConfig) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     scores = normalized_root_need(stats, score_mode=config.score_mode)
     need = scores["need"]
@@ -158,11 +207,27 @@ def select_densify_parents(stats: RootStats, config: DensifyConfig) -> tuple[tor
     if float(config.residual_threshold) > 0.0:
         valid = valid & (scores["residual"] >= float(config.residual_threshold))
     candidates = torch.nonzero(valid, as_tuple=False).reshape(-1)
+    budget = _parent_budget(config)
     if candidates.numel() == 0:
+        _record_selection_diagnostics(
+            scores,
+            threshold_candidate_count=0,
+            local_max_candidate_count=0,
+            parent_budget=budget,
+        )
         return candidates, scores
     order = torch.argsort(need[candidates], descending=True)
-    limit = max(0, int(config.max_new_roots) // max(1, int(config.children_per_parent)))
-    parents = candidates[order[:limit]]
+    ordered = candidates[order]
+    if budget is None:
+        parents = ordered
+    else:
+        parents = ordered[:budget]
+    _record_selection_diagnostics(
+        scores,
+        threshold_candidate_count=int(candidates.numel()),
+        local_max_candidate_count=int(candidates.numel()),
+        parent_budget=budget,
+    )
     return parents, scores
 
 
@@ -193,7 +258,14 @@ def select_local_max_densify_parents(
     if float(config.residual_threshold) > 0.0:
         valid = valid & (scores["residual"] >= float(config.residual_threshold))
     candidates = torch.nonzero(valid, as_tuple=False).reshape(-1)
+    budget = _parent_budget(config)
     if candidates.numel() == 0:
+        _record_selection_diagnostics(
+            scores,
+            threshold_candidate_count=0,
+            local_max_candidate_count=0,
+            parent_budget=budget,
+        )
         return candidates, scores
 
     face_ids = state.face_ids.to(device=need.device, dtype=torch.long)
@@ -220,33 +292,27 @@ def select_local_max_densify_parents(
     local_keep = need[candidates] >= (local_face_max[inverse] - 1.0e-12)
     parents = candidates[local_keep]
     if parents.numel() == 0:
+        _record_selection_diagnostics(
+            scores,
+            threshold_candidate_count=int(candidates.numel()),
+            local_max_candidate_count=0,
+            parent_budget=budget,
+        )
         return parents, scores
 
     order = torch.argsort(need[parents], descending=True)
-    limit = max(0, int(config.max_new_roots) // max(1, int(config.children_per_parent)))
-    parents = parents[order[:limit]]
-    return parents, scores
-
-
-def select_target_densify_parents(
-    stats: RootStats,
-    config: DensifyConfig,
-    target_weight: torch.Tensor,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    scores = normalized_root_need(stats, score_mode=config.score_mode)
-    if target_weight.shape[0] != stats.root_count:
-        raise ValueError("target_weight must have one row per root")
-    weight = target_weight.reshape(-1).to(device=stats.device, dtype=stats.root_grad_abs_sum.dtype)
-    valid = scores["raw_visibility"] >= float(config.visibility_threshold)
-    valid = valid & (weight > 0.0)
-    if float(config.residual_threshold) > 0.0:
-        valid = valid & (weight >= float(config.residual_threshold))
-    candidates = torch.nonzero(valid, as_tuple=False).reshape(-1)
-    if candidates.numel() == 0:
-        return candidates, scores
-    order = torch.argsort(weight[candidates], descending=True)
-    limit = max(0, int(config.max_new_roots) // max(1, int(config.children_per_parent)))
-    parents = candidates[order[:limit]]
+    ordered = parents[order]
+    local_max_count = int(ordered.numel())
+    if budget is None:
+        parents = ordered
+    else:
+        parents = ordered[:budget]
+    _record_selection_diagnostics(
+        scores,
+        threshold_candidate_count=int(candidates.numel()),
+        local_max_candidate_count=local_max_count,
+        parent_budget=budget,
+    )
     return parents, scores
 
 
@@ -414,8 +480,6 @@ def propose_split_children(
     candidate_rings: int = 3,
     candidate_face_count: int = 32,
     min_child_distance: float = 0.0,
-    child_target_points: torch.Tensor | None = None,
-    target_weight: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Place split children by choosing locally emptier surface candidates.
 
@@ -468,27 +532,7 @@ def propose_split_children(
             closest_flat[begin:end] = torch.min(dist, dim=-1).values
         too_close = closest_flat.view(candidate_points.shape[0], candidate_points.shape[1]) < float(min_child_distance)
         local_distance = local_distance.masked_fill(too_close, -torch.inf)
-    placement_score = local_distance
-    if child_target_points is not None and float(target_weight) > 0.0:
-        if child_target_points.shape != state.points.shape:
-            raise ValueError("child_target_points must match state.points shape")
-        parent_targets = child_target_points[parent_indices].to(device=state.points.device, dtype=state.points.dtype)
-        target_valid = torch.isfinite(parent_targets).all(dim=-1)
-        if bool(target_valid.any()):
-            target_distance = torch.linalg.norm(candidate_points - parent_targets[:, None, :], dim=-1)
-            finite_local = torch.isfinite(local_distance)
-            local_min = local_distance.masked_fill(~finite_local, torch.inf).amin(dim=1, keepdim=True)
-            local_max = local_distance.masked_fill(~finite_local, -torch.inf).amax(dim=1, keepdim=True)
-            local_range = (local_max - local_min).clamp_min(EPS)
-            spacing_score = (local_distance - local_min) / local_range
-            target_min = target_distance.amin(dim=1, keepdim=True)
-            target_max = target_distance.amax(dim=1, keepdim=True)
-            target_range = (target_max - target_min).clamp_min(EPS)
-            target_score = 1.0 - (target_distance - target_min) / target_range
-            combined = spacing_score + float(target_weight) * target_score
-            combined = combined.masked_fill(~finite_local, -torch.inf)
-            placement_score = torch.where(target_valid[:, None], combined, local_distance)
-    selected_ids = torch.topk(placement_score, k=min(children_per_parent, candidate_bary.shape[1]), largest=True, dim=-1).indices
+    selected_ids = torch.topk(local_distance, k=min(children_per_parent, candidate_bary.shape[1]), largest=True, dim=-1).indices
     selected = torch.gather(candidate_bary, 1, selected_ids[:, :, None].expand(-1, -1, 3))
     selected_faces = torch.gather(candidate_faces, 1, selected_ids)
     for child_idx in range(selected.shape[1]):
@@ -496,141 +540,6 @@ def propose_split_children(
         all_faces.append(selected_faces[:, child_idx])
         all_parents.append(parent_indices)
     return torch.cat(all_parents, dim=0), torch.cat(all_faces, dim=0), torch.cat(all_bary, dim=0)
-
-
-def propose_directional_split_children(
-    state: RootLifecycleState,
-    parent_indices: torch.Tensor,
-    parent_directions: torch.Tensor,
-    children_per_parent: int,
-    *,
-    vertices: torch.Tensor,
-    faces: torch.Tensor,
-    neighbor_count: int = 12,
-    candidate_rings: int = 3,
-    candidate_face_count: int = 32,
-    min_child_distance: float = 0.0,
-    target_distance: float = 0.006,
-    target_weight: float = 2.0,
-    child_target_points: torch.Tensor | None = None,
-    residual_target_weight: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Split over-capacity roots along their local surface flow direction.
-
-    This is used for roots whose strand became too long instead of allowing one
-    strand to keep covering a large image-space residual.  Children are selected
-    from topology-local face candidates, so the operation remains a surface
-    split and does not fall back to unconstrained 3D offsets.
-    """
-
-    state.validate()
-    if parent_indices.numel() == 0:
-        return (
-            state.face_ids.new_empty((0,)),
-            state.face_ids.new_empty((0,)),
-            state.barycentric.new_empty((0, 3)),
-        )
-    if parent_directions.shape != state.points.shape:
-        raise ValueError("parent_directions must match state.points shape")
-    children_per_parent = max(1, int(children_per_parent))
-    candidate_faces, candidate_bary, candidate_points = _multi_face_child_candidates(
-        state,
-        parent_indices,
-        vertices,
-        faces,
-        candidate_face_count=int(candidate_face_count),
-        candidate_rings=int(candidate_rings),
-    )
-
-    parent_points = state.points[parent_indices]
-    directions = parent_directions[parent_indices].to(device=state.points.device, dtype=state.points.dtype)
-    directions = directions / torch.linalg.norm(directions, dim=-1, keepdim=True).clamp_min(EPS)
-    if children_per_parent == 1:
-        offsets = torch.zeros((1,), device=state.points.device, dtype=state.points.dtype)
-    else:
-        offsets = torch.linspace(-0.5, 0.5, children_per_parent, device=state.points.device, dtype=state.points.dtype)
-    targets = parent_points[:, None] + directions[:, None] * (offsets[None, :, None] * float(target_distance))
-
-    nearest_count = max(1, min(int(neighbor_count), int(state.points.shape[0])))
-    flat_candidates = candidate_points.reshape(-1, 3)
-    local_distance_flat = torch.empty((flat_candidates.shape[0],), device=state.points.device, dtype=state.points.dtype)
-    closest_flat = torch.empty_like(local_distance_flat)
-    candidate_chunk = 1024
-    for begin in range(0, int(flat_candidates.shape[0]), candidate_chunk):
-        end = min(begin + candidate_chunk, int(flat_candidates.shape[0]))
-        dist = torch.cdist(flat_candidates[begin:end], state.points)
-        nearest_values = torch.topk(dist, k=nearest_count, largest=False, dim=-1).values
-        local_distance_flat[begin:end] = nearest_values[:, -1]
-        closest_flat[begin:end] = nearest_values[:, 0]
-    local_distance = local_distance_flat.view(candidate_points.shape[0], candidate_points.shape[1])
-    closest = closest_flat.view(candidate_points.shape[0], candidate_points.shape[1])
-    finite_local = torch.isfinite(local_distance)
-    if float(min_child_distance) > 0.0:
-        finite_local = finite_local & (closest >= float(min_child_distance))
-    valid_parent_mask = finite_local.any(dim=1)
-    if not bool(valid_parent_mask.all()):
-        parent_indices = parent_indices[valid_parent_mask]
-        if parent_indices.numel() == 0:
-            return (
-                state.face_ids.new_empty((0,)),
-                state.face_ids.new_empty((0,)),
-                state.barycentric.new_empty((0, 3)),
-            )
-        candidate_faces = candidate_faces[valid_parent_mask]
-        candidate_bary = candidate_bary[valid_parent_mask]
-        candidate_points = candidate_points[valid_parent_mask]
-        parent_points = parent_points[valid_parent_mask]
-        directions = directions[valid_parent_mask]
-        targets = targets[valid_parent_mask]
-        local_distance = local_distance[valid_parent_mask]
-        closest = closest[valid_parent_mask]
-        finite_local = finite_local[valid_parent_mask]
-    local_min = local_distance.masked_fill(~finite_local, torch.inf).amin(dim=1, keepdim=True)
-    local_max = local_distance.masked_fill(~finite_local, -torch.inf).amax(dim=1, keepdim=True)
-    local_range = (local_max - local_min).clamp_min(EPS)
-    spacing_score = (local_distance - local_min) / local_range
-    spacing_score = spacing_score.masked_fill(~finite_local, -torch.inf)
-    residual_targets = None
-    residual_target_valid = None
-    residual_target_score = None
-    if child_target_points is not None and float(residual_target_weight) > 0.0:
-        if child_target_points.shape != state.points.shape:
-            raise ValueError("child_target_points must match state.points shape")
-        residual_targets = child_target_points[parent_indices].to(device=state.points.device, dtype=state.points.dtype)
-        residual_target_valid = torch.isfinite(residual_targets).all(dim=-1)
-        if bool(residual_target_valid.any()):
-            residual_target_distance = torch.linalg.norm(candidate_points - residual_targets[:, None, :], dim=-1)
-            residual_target_min = residual_target_distance.masked_fill(~finite_local, torch.inf).amin(dim=1, keepdim=True)
-            residual_target_max = residual_target_distance.masked_fill(~finite_local, -torch.inf).amax(dim=1, keepdim=True)
-            residual_target_range = (residual_target_max - residual_target_min).clamp_min(EPS)
-            residual_target_score = 1.0 - (residual_target_distance - residual_target_min) / residual_target_range
-            residual_target_score = residual_target_score.masked_fill(~finite_local, -torch.inf)
-
-    selected_faces: list[torch.Tensor] = []
-    selected_bary: list[torch.Tensor] = []
-    selected_parents: list[torch.Tensor] = []
-    already_selected = torch.zeros_like(spacing_score, dtype=torch.bool)
-    for child_idx in range(children_per_parent):
-        target_distance_to_candidate = torch.linalg.norm(candidate_points - targets[:, child_idx : child_idx + 1], dim=-1)
-        target_min = target_distance_to_candidate.masked_fill(~finite_local, torch.inf).amin(dim=1, keepdim=True)
-        target_max = target_distance_to_candidate.masked_fill(~finite_local, -torch.inf).amax(dim=1, keepdim=True)
-        target_range = (target_max - target_min).clamp_min(EPS)
-        target_score = 1.0 - (target_distance_to_candidate - target_min) / target_range
-        score = spacing_score + float(target_weight) * target_score
-        if residual_target_score is not None and residual_target_valid is not None:
-            score = torch.where(
-                residual_target_valid[:, None],
-                score + float(residual_target_weight) * residual_target_score,
-                score,
-            )
-        score = score.masked_fill(already_selected | ~finite_local, -torch.inf)
-        chosen = torch.argmax(score, dim=1)
-        selected_faces.append(torch.gather(candidate_faces, 1, chosen[:, None]).reshape(-1))
-        selected_bary.append(torch.gather(candidate_bary, 1, chosen[:, None, None].expand(-1, 1, 3)).reshape(-1, 3))
-        selected_parents.append(parent_indices)
-        already_selected.scatter_(1, chosen[:, None], True)
-
-    return torch.cat(selected_parents, dim=0), torch.cat(selected_faces, dim=0), torch.cat(selected_bary, dim=0)
 
 
 def select_prune_mask(stats: RootStats, config: PruneConfig) -> torch.Tensor:
@@ -663,18 +572,11 @@ def propose_structure_update(
     *,
     vertices: torch.Tensor | None = None,
     faces: torch.Tensor | None = None,
-    child_target_points: torch.Tensor | None = None,
-    child_target_weights: torch.Tensor | None = None,
-    child_target_placement_weight: float = 0.0,
 ) -> RootStructureUpdate:
     if str(densify.parent_selection_mode) == "score":
         parents, scores = select_densify_parents(stats, densify)
     elif str(densify.parent_selection_mode) == "evidence_local_max":
         parents, scores = select_local_max_densify_parents(state, stats, densify, faces)
-    elif str(densify.parent_selection_mode) == "target":
-        if child_target_weights is None:
-            raise ValueError("target parent selection requires child_target_weights")
-        parents, scores = select_target_densify_parents(stats, densify, child_target_weights)
     else:
         raise ValueError(f"unknown densify parent_selection_mode: {densify.parent_selection_mode}")
     child_parent_indices, new_face_ids, new_barycentric = propose_split_children(
@@ -688,8 +590,6 @@ def propose_structure_update(
         candidate_rings=densify.candidate_rings,
         candidate_face_count=densify.candidate_face_count,
         min_child_distance=densify.min_child_distance,
-        child_target_points=child_target_points,
-        target_weight=float(child_target_placement_weight),
     )
     prune_mask = select_prune_mask(stats, prune)
     if densify.replace_parent and parents.numel() > 0:
@@ -700,43 +600,6 @@ def propose_structure_update(
         child_parent_indices=child_parent_indices,
         new_face_ids=new_face_ids,
         new_barycentric=new_barycentric,
-        prune_mask=prune_mask,
-        scores=scores,
-    )
-
-
-def propose_direct_target_structure_update(
-    state: RootLifecycleState,
-    stats: RootStats,
-    prune: PruneConfig,
-    *,
-    child_parent_indices: torch.Tensor,
-    new_face_ids: torch.Tensor,
-    new_barycentric: torch.Tensor,
-    score_mode: str = "raw",
-) -> RootStructureUpdate:
-    """Insert target-derived child roots directly on mesh faces.
-
-    This is a diagnostic path for hole-directed densification: residual pixels
-    nominate surface positions first, then nearest old roots are used only for
-    attribute inheritance.  It deliberately does not replace the parent roots.
-    """
-
-    state.validate()
-    stats.validate()
-    if child_parent_indices.numel() != new_face_ids.numel() or new_face_ids.numel() != new_barycentric.shape[0]:
-        raise ValueError("direct target child arrays must have matching lengths")
-    if child_parent_indices.numel() > 0:
-        if int(child_parent_indices.min().item()) < 0 or int(child_parent_indices.max().item()) >= stats.root_count:
-            raise ValueError("direct target child_parent_indices out of range")
-    scores = normalized_root_need(stats, score_mode=score_mode)
-    prune_mask = select_prune_mask(stats, prune)
-    parent_indices = torch.unique(child_parent_indices.reshape(-1)) if child_parent_indices.numel() > 0 else child_parent_indices
-    return RootStructureUpdate(
-        parent_indices=parent_indices,
-        child_parent_indices=child_parent_indices.reshape(-1),
-        new_face_ids=new_face_ids.reshape(-1),
-        new_barycentric=new_barycentric.reshape(-1, 3),
         prune_mask=prune_mask,
         scores=scores,
     )

@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import argparse
 import gc
+import importlib
 import json
 import math
 import os
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass, replace
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Iterable
+
+# Different views retain different numbers of depth-clipped Gaussians. Expandable
+# segments prevent the CUDA allocator from accumulating incompatible large blocks.
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np
 import torch
@@ -18,10 +24,28 @@ import torch.nn.functional as F
 from PIL import Image, ImageDraw
 from scipy.spatial import cKDTree
 from gsplat.rendering import rasterization
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+ACTIVATION_CHECKPOINT_MAX_DEVICE_MEMORY_BYTES = 48 * 1024**3
+CURRENT_CHECKPOINT_VERSION = 5
+
+
+def memory_constrained_activation_checkpointing(device: torch.device) -> bool:
+    """Use recomputation on GPUs where the full strand graph risks paging.
+
+    This changes only autograd storage. Forward values, rendered Gaussians, and
+    gradients are unchanged. Larger accelerator GPUs retain the faster path.
+    """
+
+    if not torch.is_grad_enabled() or device.type != "cuda" or not torch.cuda.is_available():
+        return False
+    properties = torch.cuda.get_device_properties(device)
+    return int(properties.total_memory) <= ACTIVATION_CHECKPOINT_MAX_DEVICE_MEMORY_BYTES
 
 from anigroom.data.white_tiger import build_stage1_input_report, list_images  # noqa: E402
 from anigroom.data.alignment import apply_alignment_to_namespace, load_alignment_config  # noqa: E402
@@ -30,22 +54,37 @@ from anigroom.flow import (  # noqa: E402
     CleanFlowTargets,
     clean_flow_anchor_loss,
     clean_flow_smoothness_loss,
-    controls_direction_3d,
-    direction_to_flow_lift_strength,
-    direction_to_local_controls,
     groom_direction_3d,
     load_clean_flow_targets,
     sample_clean_flow_targets,
 )
+from anigroom.flow.direction_geometry import parallel_transport_vectors  # noqa: E402
 from anigroom.grooming import (  # noqa: E402
     GroomParameterField,
     GroomRanges,
+    RenderGeometryResidualField,
+    apply_asinh_logit_residual,
+    apply_asinh_log_ratio_residual,
+    apply_direction_residual,
+    apply_log_ratio_residual,
     build_strands,
+    decode_positive_asinh,
+    decode_positive_asinh_ratio,
+    direction_to_local_components,
+    encode_positive_asinh,
+    encode_positive_asinh_ratio,
+    encode_asinh_logit_residual,
     expand_child_strands,
+    fourth_moment_norm,
+    length_residual_prior_coordinate,
+    local_components_to_world,
     make_tangent_frames,
+    population_stable_residual_norm,
     resample_strands_to_segment_budgets,
     strand_segment_budgets,
     strands_to_gaussians,
+    tail_concentration_residual_loss,
+    vector_to_local_components,
 )
 from anigroom.mesh_roots import (  # noqa: E402
     SurfaceRoots,
@@ -72,8 +111,6 @@ from anigroom.roots.lifecycle import (  # noqa: E402
     apply_attribute_update,
     apply_structure_update,
     interpolate_child_attributes,
-    propose_directional_split_children,
-    propose_direct_target_structure_update,
     propose_split_children,
     propose_structure_update,
     normalized_root_need,
@@ -81,16 +118,23 @@ from anigroom.roots.lifecycle import (  # noqa: E402
 from anigroom.roots.statistics import RootStatsWindow  # noqa: E402
 from anigroom.surface_interpolation import (  # noqa: E402
     SurfaceFieldInterpolator,
+    SurfaceSourceGraph,
     SurfaceSupport,
+    build_hierarchical_surface_edges,
     build_local_surface_support,
+    density_invariant_log_scalar_smoothness,
     interpolate_directions,
+    harmonic_inpaint_physical,
     interpolate_periodic,
     interpolate_physical,
     local_surface_weights,
+    reconstruct_surface_directions,
 )
 
 
 EPS = 1.0e-8
+CLEAN_FLOW_INIT_QUANTILE_LOW = 0.05
+CLEAN_FLOW_INIT_QUANTILE_HIGH = 0.95
 
 
 def release_cuda_cache() -> None:
@@ -144,14 +188,22 @@ def cuda_memory_guard_payload(device: torch.device) -> dict[str, float]:
             "max_memory_allocated_mb": 0.0,
             "max_memory_reserved_mb": 0.0,
             "nvidia_smi_process_mb": 0.0,
+            "device_used_mb": 0.0,
+            "device_free_mb": 0.0,
+            "device_total_mb": 0.0,
         }
     nvidia_smi_mb = current_process_gpu_memory_mb()
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    mib = 1024.0 * 1024.0
     return {
-        "memory_allocated_mb": float(torch.cuda.memory_allocated(device) / (1024 * 1024)),
-        "memory_reserved_mb": float(torch.cuda.memory_reserved(device) / (1024 * 1024)),
-        "max_memory_allocated_mb": float(torch.cuda.max_memory_allocated(device) / (1024 * 1024)),
-        "max_memory_reserved_mb": float(torch.cuda.max_memory_reserved(device) / (1024 * 1024)),
+        "memory_allocated_mb": float(torch.cuda.memory_allocated(device) / mib),
+        "memory_reserved_mb": float(torch.cuda.memory_reserved(device) / mib),
+        "max_memory_allocated_mb": float(torch.cuda.max_memory_allocated(device) / mib),
+        "max_memory_reserved_mb": float(torch.cuda.max_memory_reserved(device) / mib),
         "nvidia_smi_process_mb": float(nvidia_smi_mb) if nvidia_smi_mb is not None else 0.0,
+        "device_used_mb": float((total_bytes - free_bytes) / mib),
+        "device_free_mb": float(free_bytes / mib),
+        "device_total_mb": float(total_bytes / mib),
     }
 
 
@@ -166,16 +218,59 @@ def enforce_cuda_memory_guard(
     limit_gb = float(config.gpu_memory_limit_gb)
     if limit_gb <= 0.0:
         return
+    def tracked_process_memory(payload: dict[str, float]) -> tuple[float, float, float]:
+        allocated_peak_mb = max(
+            float(payload["memory_allocated_mb"]),
+            float(payload["max_memory_allocated_mb"]),
+        )
+        nvidia_smi_process_mb = float(payload["nvidia_smi_process_mb"])
+        external_process_overhead_mb = max(
+            0.0,
+            nvidia_smi_process_mb - float(payload["memory_reserved_mb"]),
+        )
+        process_tracked_mb = allocated_peak_mb + external_process_overhead_mb
+        if nvidia_smi_process_mb <= 0.0:
+            # WDDM often hides per-process usage. PyTorch's current allocator
+            # reservation is still process-local; whole-device usage is not.
+            process_tracked_mb = max(process_tracked_mb, float(payload["memory_reserved_mb"]))
+        return process_tracked_mb, allocated_peak_mb, external_process_overhead_mb
+
     payload = cuda_memory_guard_payload(device)
-    tracked_mb = max(float(value) for value in payload.values())
+    process_tracked_mb, allocated_peak_mb, external_process_overhead_mb = tracked_process_memory(payload)
+    tracked_mb = process_tracked_mb
     limit_mb = limit_gb * 1024.0
     if tracked_mb <= limit_mb:
         return
+
+    # A transient render can leave a large unused allocator cache. Release it
+    # once and remeasure before treating cached capacity as a live-memory fault.
+    if allocated_peak_mb <= limit_mb:
+        tracked_before_release_mb = tracked_mb
+        release_cuda_cache()
+        payload = cuda_memory_guard_payload(device)
+        process_tracked_mb, allocated_peak_mb, external_process_overhead_mb = tracked_process_memory(payload)
+        tracked_mb = process_tracked_mb
+        if callable(progress_event):
+            progress_event(
+                "gpu_memory_cache_released",
+                iteration=int(iteration),
+                guard_stage=stage,
+                limit_gb=limit_gb,
+                tracked_before_release_mb=tracked_before_release_mb,
+                tracked_after_release_mb=tracked_mb,
+                **payload,
+            )
+        if tracked_mb <= limit_mb:
+            return
+
     report = {
         "iteration": int(iteration),
-        "stage": stage,
+        "guard_stage": stage,
         "limit_gb": limit_gb,
         "tracked_mb": tracked_mb,
+        "process_tracked_mb": process_tracked_mb,
+        "allocated_peak_mb": allocated_peak_mb,
+        "external_process_overhead_mb": external_process_overhead_mb,
         **payload,
     }
     if callable(progress_event):
@@ -196,6 +291,35 @@ def parse_iteration_set(text: str) -> set[int]:
             raise ValueError(f"checkpoint iteration must be positive, got {value}")
         values.add(value)
     return values
+
+
+def restored_lifecycle_history(
+    checkpoint: dict[str, object] | None,
+    *,
+    start_iteration: int,
+) -> list[dict[str, object]]:
+    if checkpoint is None:
+        return []
+    raw_history = checkpoint.get("lifecycle_history", [])
+    if not isinstance(raw_history, list):
+        raise TypeError("checkpoint lifecycle_history must be a list")
+    history: list[dict[str, object]] = []
+    previous_iteration = -1
+    for index, raw_record in enumerate(raw_history):
+        if not isinstance(raw_record, dict):
+            raise TypeError(f"checkpoint lifecycle_history[{index}] must be a mapping")
+        if "iteration" not in raw_record:
+            raise ValueError(f"checkpoint lifecycle_history[{index}] has no iteration")
+        iteration = int(raw_record["iteration"])
+        if iteration <= previous_iteration:
+            raise ValueError("checkpoint lifecycle_history iterations must be strictly increasing")
+        if iteration > int(start_iteration):
+            raise ValueError(
+                f"checkpoint lifecycle event {iteration} is after checkpoint iteration {start_iteration}"
+            )
+        history.append(dict(raw_record))
+        previous_iteration = iteration
+    return history
 
 
 def optimizer_state_to_device(optimizer: torch.optim.Optimizer, device: torch.device) -> None:
@@ -225,11 +349,44 @@ def restore_training_rng_state(state: dict[str, object], generator: torch.Genera
         generator.set_state(state["train_view_generator"])
 
 
-def load_training_checkpoint(path: Path) -> dict[str, object]:
+@contextmanager
+def numpy_pickle_compat_aliases():
+    """Temporarily map NumPy 2 pickle module paths onto NumPy 1.x."""
+
+    module_aliases = {
+        "numpy._core": "numpy.core",
+        "numpy._core.multiarray": "numpy.core.multiarray",
+        "numpy._core.numeric": "numpy.core.numeric",
+        "numpy._core._multiarray_umath": "numpy.core._multiarray_umath",
+    }
+    installed: dict[str, object] = {}
+    for alias, source in module_aliases.items():
+        if alias not in sys.modules:
+            module = importlib.import_module(source)
+            sys.modules[alias] = module
+            installed[alias] = module
     try:
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    except TypeError:
-        checkpoint = torch.load(path, map_location="cpu")
+        yield
+    finally:
+        for alias, module in installed.items():
+            if sys.modules.get(alias) is module:
+                del sys.modules[alias]
+
+
+def load_training_checkpoint(path: Path) -> dict[str, object]:
+    def load() -> object:
+        try:
+            return torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:
+            return torch.load(path, map_location="cpu")
+
+    try:
+        checkpoint = load()
+    except ModuleNotFoundError as error:
+        if error.name is None or not error.name.startswith("numpy._core"):
+            raise
+        with numpy_pickle_compat_aliases():
+            checkpoint = load()
     if not isinstance(checkpoint, dict):
         raise RuntimeError(f"checkpoint is not a dict: {path}")
     return checkpoint
@@ -263,22 +420,22 @@ def set_color(raw: torch.Tensor, value: torch.Tensor) -> None:
     raw.copy_(inv_sigmoid(value).expand_as(raw))
 
 
+def set_unit_interval(raw: torch.Tensor, value: torch.Tensor | float) -> None:
+    v = torch.as_tensor(value, device=raw.device, dtype=raw.dtype)
+    raw.copy_(inv_sigmoid(v).expand_as(raw))
+
+
+def set_positive_asinh(raw: torch.Tensor, value: torch.Tensor | float) -> None:
+    v = torch.as_tensor(value, device=raw.device, dtype=raw.dtype)
+    raw.copy_(encode_positive_asinh(v).expand_as(raw))
+
+
 def dense_groom_ranges() -> GroomRanges:
     return GroomRanges(
-        length=(0.010, 0.220),
-        root_width=(0.000035, 0.00075),
-        tip_width_ratio=(0.012, 0.30),
-        width_taper=(0.55, 3.20),
-        lift=(0.000, 0.080),
-        sag=(0.0, 0.75),
-        stiffness=(0.05, 0.98),
         curl_radius=(0.0, 0.026),
         curl_frequency=(0.0, 5.5),
         frizz=(0.0, 0.010),
-        child_radius=(0.0, 0.012),
         clump_strength=(0.0, 1.0),
-        opacity=(0.05, 0.98),
-        tip_opacity_ratio=(0.08, 0.90),
     )
 
 
@@ -436,111 +593,6 @@ def save_clip_overlay(
     canvas.save(path)
 
 
-@torch.no_grad()
-def save_capacity_overlay(
-    path: Path,
-    base_image: torch.Tensor,
-    gaussians,
-    model: "WhiteTigerStage1Model",
-    viewmat: torch.Tensor,
-    k: torch.Tensor,
-    width: int,
-    height: int,
-    *,
-    dark_only: bool,
-) -> dict[str, float | int]:
-    """Render diagnostic overlay for high-capacity roots.
-
-    This is eval-only evidence for the long-streak failure mode. It does not
-    change training and must stay separate from the formal loss path.
-    """
-
-    groom = model.groom.decode()
-    length = groom.length.reshape(-1).float()
-    root_width = groom.root_width.reshape(-1).float()
-    opacity = groom.opacity.reshape(-1).float()
-    root_luma = (0.2126 * groom.root_color[:, 0] + 0.7152 * groom.root_color[:, 1] + 0.0722 * groom.root_color[:, 2]).reshape(-1)
-
-    if length.numel() == 0:
-        save_image(path, base_image)
-        return {"selected_root_count": 0, "selected_gaussian_count": 0}
-
-    length_q90 = torch.quantile(length, 0.90)
-    width_q90 = torch.quantile(root_width, 0.90)
-    opacity_q90 = torch.quantile(opacity, 0.90)
-    high_capacity = (length >= length_q90) & (root_width >= width_q90) & (opacity >= opacity_q90)
-    dark = root_luma <= 0.38
-    root_mask = high_capacity & dark if dark_only else high_capacity
-
-    root_ids = gaussians.root_indices.long().reshape(-1)
-    gaussian_mask = root_mask[root_ids]
-    selected_count = int(gaussian_mask.sum().detach().cpu())
-    selected_root_count = int(root_mask.sum().detach().cpu())
-    if selected_count == 0:
-        save_image(path, base_image)
-        return {
-            "selected_root_count": selected_root_count,
-            "selected_gaussian_count": 0,
-            "length_q90": float(length_q90.detach().cpu()),
-            "width_q90": float(width_q90.detach().cpu()),
-            "opacity_q90": float(opacity_q90.detach().cpu()),
-        }
-
-    selected = replace(
-        gaussians,
-        means=gaussians.means[gaussian_mask],
-        directions=gaussians.directions[gaussian_mask],
-        quats=gaussians.quats[gaussian_mask],
-        scales=gaussians.scales[gaussian_mask],
-        colors=torch.ones((selected_count, 3), device=gaussians.means.device, dtype=gaussians.means.dtype)
-        * gaussians.means.new_tensor([1.0, 0.06 if dark_only else 0.75, 0.04 if dark_only else 0.0]).view(1, 3),
-        opacities=gaussians.opacities[gaussian_mask].reshape(-1).clamp(0.0, 0.75),
-        root_indices=gaussians.root_indices[gaussian_mask],
-        segment_indices=gaussians.segment_indices[gaussian_mask],
-    )
-    overlay_rgb, overlay_alpha, _ = rasterization(
-        selected.means,
-        selected.quats,
-        selected.scales,
-        selected.opacities.reshape(-1),
-        selected.colors,
-        viewmat.view(1, 4, 4),
-        k.view(1, 3, 3),
-        width,
-        height,
-        packed=False,
-        backgrounds=base_image.new_zeros((1, 3)),
-        rasterize_mode="antialiased",
-    )
-    alpha = overlay_alpha[0].clamp(0.0, 1.0)
-    color = selected.colors[:1].view(1, 1, 3)
-    overlay = base_image.detach().clamp(0.0, 1.0) * (1.0 - 0.82 * alpha) + color * (0.82 * alpha)
-    save_image(path, overlay)
-
-    with Image.open(path) as image:
-        canvas = image.convert("RGB")
-    draw = ImageDraw.Draw(canvas, "RGBA")
-    label = (
-        f"{'dark ' if dark_only else ''}high-capacity overlay: "
-        f"roots={selected_root_count}, gaussians={selected_count}"
-    )
-    draw.rectangle((10, 10, 760, 44), fill=(255, 255, 255, 225))
-    draw.text((18, 18), label, fill=(0, 0, 0, 255))
-    canvas.save(path)
-    selected_roots = torch.nonzero(root_mask, as_tuple=False).reshape(-1)
-    return {
-        "selected_root_count": selected_root_count,
-        "selected_gaussian_count": selected_count,
-        "selected_length_mean": float(length[selected_roots].mean().detach().cpu()),
-        "selected_width_mean": float(root_width[selected_roots].mean().detach().cpu()),
-        "selected_opacity_mean": float(opacity[selected_roots].mean().detach().cpu()),
-        "selected_luma_mean": float(root_luma[selected_roots].mean().detach().cpu()),
-        "length_q90": float(length_q90.detach().cpu()),
-        "width_q90": float(width_q90.detach().cpu()),
-        "opacity_q90": float(opacity_q90.detach().cpu()),
-    }
-
-
 def project_points(points: torch.Tensor, viewmat: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     rot = viewmat[:3, :3]
     trans = viewmat[:3, 3]
@@ -581,9 +633,38 @@ def mask_edge_confidence(mask: torch.Tensor, kernel_size: int) -> torch.Tensor:
     if int(kernel_size) <= 1:
         return mask
     pad = int(kernel_size) // 2
-    m = mask[..., 0] if mask.ndim == 3 else mask
-    eroded = -F.max_pool2d(-m[None, None], kernel_size=int(kernel_size), stride=1, padding=pad)[0, 0]
-    return eroded.clamp(0.0, 1.0)[..., None]
+    if mask.ndim == 4 and mask.shape[-1] == 1:
+        pooled_input = mask.permute(0, 3, 1, 2)
+        restore = "nhwc"
+    elif mask.ndim == 3 and mask.shape[-1] == 1:
+        pooled_input = mask[..., 0][None, None]
+        restore = "hwc"
+    elif mask.ndim == 3:
+        pooled_input = mask[:, None]
+        restore = "bhw"
+    elif mask.ndim == 2:
+        pooled_input = mask[None, None]
+        restore = "hw"
+    else:
+        raise ValueError(f"unsupported mask shape for edge confidence: {tuple(mask.shape)}")
+    eroded = -F.max_pool2d(-pooled_input, kernel_size=int(kernel_size), stride=1, padding=pad)
+    eroded = eroded.clamp(0.0, 1.0)
+    if restore == "nhwc":
+        return eroded.permute(0, 2, 3, 1)
+    if restore == "hwc":
+        return eroded[0, 0][..., None]
+    if restore == "bhw":
+        return eroded[:, 0]
+    return eroded[0, 0]
+
+
+def loss_mask_edge_weight(mask: torch.Tensor, kernel_size: int) -> torch.Tensor:
+    """Drop a silhouette band from image losses while keeping safe inside/outside pixels."""
+    if int(kernel_size) <= 1:
+        return torch.ones_like(mask)
+    inside = mask_edge_confidence(mask, kernel_size)
+    outside = mask_edge_confidence(1.0 - mask, kernel_size)
+    return torch.maximum(inside, outside).detach().clamp(0.0, 1.0)
 
 
 def view_angle_weight(normals: torch.Tensor, viewmat: torch.Tensor, power: float) -> torch.Tensor:
@@ -592,54 +673,6 @@ def view_angle_weight(normals: torch.Tensor, viewmat: torch.Tensor, power: float
     if float(power) != 1.0:
         weight = weight.pow(float(power))
     return weight
-
-
-def double_angle_orientation(orientation: torch.Tensor) -> torch.Tensor:
-    direction = F.normalize(orientation, dim=-1, eps=1.0e-8)
-    x, y = direction[..., 0:1], direction[..., 1:2]
-    return torch.cat([x.square() - y.square(), 2.0 * x * y], dim=-1)
-
-
-def gaussian_screen_orientation_colors(
-    means: torch.Tensor,
-    directions: torch.Tensor,
-    viewmat: torch.Tensor,
-    k: torch.Tensor,
-) -> torch.Tensor:
-    screen = project_directions(means, directions, viewmat, k)
-    screen_dir = F.normalize(screen, dim=-1, eps=1.0e-8)
-    cos2 = screen_dir[:, 0:1].square() - screen_dir[:, 1:2].square()
-    sin2 = 2.0 * screen_dir[:, 0:1] * screen_dir[:, 1:2]
-    return torch.cat([0.5 + 0.5 * cos2, 0.5 + 0.5 * sin2, torch.zeros_like(cos2)], dim=-1)
-
-
-def render_orientation_map(
-    gaussians,
-    viewmat: torch.Tensor,
-    k: torch.Tensor,
-    width: int,
-    height: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    background = torch.zeros((1, 3), device=gaussians.means.device, dtype=gaussians.means.dtype)
-    orient_colors = gaussian_screen_orientation_colors(gaussians.means, gaussians.directions, viewmat, k)
-    orient_image, orient_alpha, _ = rasterization(
-        gaussians.means,
-        gaussians.quats,
-        gaussians.scales,
-        gaussians.opacities.reshape(-1),
-        orient_colors,
-        viewmat.view(1, 4, 4),
-        k.view(1, 3, 3),
-        width,
-        height,
-        packed=False,
-        backgrounds=background,
-        rasterize_mode="antialiased",
-    )
-    alpha = orient_alpha[0].clamp(0.0, 1.0)
-    avg = orient_image[0][..., :2] / alpha.clamp_min(1.0e-4)
-    orientation = F.normalize(2.0 * avg - 1.0, dim=-1, eps=1.0e-8)
-    return orientation, alpha
 
 
 def image_structure_flow(
@@ -727,37 +760,6 @@ def image_structure_flow_losses(
     }
 
 
-def orientation_map_losses(
-    pred_orientation: torch.Tensor,
-    pred_confidence: torch.Tensor,
-    target_orientation: torch.Tensor,
-    target_confidence: torch.Tensor,
-    min_confidence: float,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, float | int]]:
-    target_double = double_angle_orientation(target_orientation).detach()
-    target_conf = target_confidence.detach().clamp(0.0, 1.0)
-    pred_visible = (pred_confidence.detach() > 0.02).to(dtype=target_conf.dtype)
-    valid_target = (target_conf >= float(min_confidence)).to(dtype=target_conf.dtype)
-    weight = target_conf * pred_visible * valid_target
-    dot = (pred_orientation * target_double).sum(dim=-1, keepdim=True).clamp(-1.0, 1.0)
-    orient_loss = ((1.0 - dot) * weight).sum() / weight.sum().clamp_min(1.0)
-
-    dx_weight = torch.minimum(weight[:, 1:], weight[:, :-1])
-    dy_weight = torch.minimum(weight[1:, :], weight[:-1, :])
-    dx = (pred_orientation[:, 1:] - pred_orientation[:, :-1]) - (target_double[:, 1:] - target_double[:, :-1])
-    dy = (pred_orientation[1:, :] - pred_orientation[:-1, :]) - (target_double[1:, :] - target_double[:-1, :])
-    dx_loss = (dx.abs() * dx_weight).sum() / dx_weight.sum().clamp_min(1.0)
-    dy_loss = (dy.abs() * dy_weight).sum() / dy_weight.sum().clamp_min(1.0)
-    detail_loss = 0.5 * (dx_loss + dy_loss)
-    return orient_loss, detail_loss, {
-        "orientation_loss": float(orient_loss.detach().cpu()),
-        "orientation_detail_loss": float(detail_loss.detach().cpu()),
-        "orientation_weight_sum": float(weight.detach().sum().cpu()),
-        "orientation_valid_pixels": int((weight.detach() > 0.0).sum().cpu()),
-        "orientation_pred_visible_pixels": int((pred_visible.detach() > 0.0).sum().cpu()),
-    }
-
-
 def build_knn_edges(points: torch.Tensor, k: int, chunk_size: int = 2048) -> torch.Tensor:
     if k <= 0 or points.shape[0] < 2:
         return torch.empty((0, 2), dtype=torch.long, device=points.device)
@@ -839,10 +841,178 @@ def interpolate_unobserved_root_values(
     return filled, interpolated
 
 
+def observed_quantile_bounds(
+    values: torch.Tensor,
+    observed: torch.Tensor,
+    *,
+    label: str,
+) -> tuple[float, float, int]:
+    flat_values = values.reshape(-1)
+    observed_flat = observed.reshape(-1).to(device=flat_values.device)
+    valid = observed_flat & torch.isfinite(flat_values)
+    count = int(valid.sum().detach().cpu())
+    if count < 4:
+        raise RuntimeError(f"{label} needs at least 4 observed values for 5%-95% clamp; got {count}")
+    selected = flat_values[valid]
+    lo = torch.quantile(selected, CLEAN_FLOW_INIT_QUANTILE_LOW)
+    hi = torch.quantile(selected, CLEAN_FLOW_INIT_QUANTILE_HIGH)
+    if bool((hi < lo).detach().cpu()):
+        lo, hi = hi, lo
+    return float(lo.detach().cpu()), float(hi.detach().cpu()), count
+
+
+def data_clamped_clean_flow_length(
+    roots: torch.Tensor,
+    surface_edges: torch.Tensor,
+    sample: dict[str, torch.Tensor],
+    config: Stage1Config,
+    *,
+    label: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float, float, int, int]:
+    confidence = sample["confidence"].reshape(-1).clamp(0.0, 1.0)
+    observed = (
+        sample["valid"].reshape(-1)
+        & (sample["shell_height"].reshape(-1) > 0.0)
+        & (confidence >= float(config.clean_flow_length_init_min_confidence))
+    )
+    length = (sample["shell_height"].reshape(-1, 1) * float(config.clean_flow_length_init_scale))
+    clamp_lo, clamp_hi, observed_count = observed_quantile_bounds(
+        length,
+        observed,
+        label=label,
+    )
+    reliable = (
+        observed
+        & (length.reshape(-1) >= float(clamp_lo))
+        & (length.reshape(-1) <= float(clamp_hi))
+    )
+    reliable_count = int(reliable.sum().detach().cpu())
+    if reliable_count < 4:
+        raise RuntimeError(
+            f"{label} has only {reliable_count} topology anchors after the 5%-95% "
+            f"data filter (observed={observed_count})"
+        )
+    filled_length = harmonic_inpaint_physical(
+        length,
+        roots,
+        reliable,
+        surface_edges,
+    )
+    if not bool(torch.isfinite(filled_length).all()):
+        raise RuntimeError(f"{label} produced non-finite inpainted lengths")
+    if not bool((filled_length > 0.0).all()):
+        raise RuntimeError(f"{label} produced non-positive inpainted lengths")
+    filled = torch.ones_like(reliable)
+    return (
+        filled_length,
+        reliable,
+        filled,
+        clamp_lo,
+        clamp_hi,
+        observed_count,
+        reliable_count,
+    )
+
+
+def reconstruct_clean_flow_directions(
+    points: torch.Tensor,
+    directions: torch.Tensor,
+    normals: torch.Tensor,
+    observed: torch.Tensor,
+    confidence: torch.Tensor,
+    surface_edges: torch.Tensor,
+    *,
+    label: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build one surface-consistent 3D direction field without scalar proxies."""
+
+    directions = F.normalize(directions, dim=-1, eps=1.0e-8)
+    normals = F.normalize(normals, dim=-1, eps=1.0e-8)
+    confidence = torch.where(
+        observed.reshape(-1),
+        confidence.reshape(-1).clamp(0.0, 1.0),
+        torch.zeros_like(confidence.reshape(-1)),
+    )
+    anchor_count = int((confidence > 0.0).sum().detach().cpu())
+    if anchor_count < 4:
+        raise RuntimeError(f"{label} has only {anchor_count} reliable 3D direction anchors")
+    reconstructed, reliability, supported = reconstruct_surface_directions(
+        directions,
+        normals,
+        points,
+        confidence,
+        surface_edges,
+    )
+    return reconstructed, reliability, supported
+
+
+SMOOTH_FIELD_METRICS = (
+    "ambient",
+    "transport_direction",
+    "relative_length",
+    "surface_covariant",
+    "surface_covariant_full",
+)
+GUIDE_LENGTH_SMOOTH_MODES = (
+    "edge_relative",
+    "intrinsic_density_invariant",
+)
+
+
+def smooth_metric_uses_transport(metric: str) -> bool:
+    if metric not in SMOOTH_FIELD_METRICS:
+        raise ValueError(f"unknown smooth field metric: {metric}")
+    return metric in ("transport_direction", "surface_covariant", "surface_covariant_full")
+
+
+def smooth_metric_uses_relative_length(metric: str) -> bool:
+    if metric not in SMOOTH_FIELD_METRICS:
+        raise ValueError(f"unknown smooth field metric: {metric}")
+    return metric in ("relative_length", "surface_covariant", "surface_covariant_full")
+
+
+def smooth_metric_uses_full_relative_length_field(metric: str) -> bool:
+    if metric not in SMOOTH_FIELD_METRICS:
+        raise ValueError(f"unknown smooth field metric: {metric}")
+    return metric == "surface_covariant_full"
+
+
+def surface_direction_edge_difference(
+    direction: torch.Tensor,
+    normals: torch.Tensor,
+    src: torch.Tensor,
+    dst: torch.Tensor,
+) -> torch.Tensor:
+    transported_dst = parallel_transport_vectors(
+        direction[dst],
+        normals[dst],
+        normals[src],
+    )
+    return F.normalize(direction[src], dim=-1, eps=EPS) - transported_dst
+
+
+def symmetric_relative_edge_difference(
+    value: torch.Tensor,
+    src: torch.Tensor,
+    dst: torch.Tensor,
+) -> torch.Tensor:
+    """Bounded, scale-invariant local difference for positive attributes."""
+
+    lhs = value[src]
+    rhs = value[dst]
+    return (lhs - rhs) / (lhs + rhs).clamp_min(EPS)
+
+
 def root_graph_smoothness(
     field: GroomParameterField,
     edges: torch.Tensor,
     observation_confidence: torch.Tensor | None = None,
+    *,
+    normals: torch.Tensor | None = None,
+    tangents: torch.Tensor | None = None,
+    bitangents: torch.Tensor | None = None,
+    smooth_field_metric: str = "ambient",
+    include_geometry: bool = True,
 ) -> torch.Tensor:
     if edges.numel() == 0:
         return next(field.parameters()).new_tensor(0.0)
@@ -859,77 +1029,247 @@ def root_graph_smoothness(
             value = value.mean(dim=tuple(range(1, value.ndim)))
         return (value * edge_weight).sum() / edge_weight.sum().clamp_min(1.0)
 
+    def uniform_mean(value: torch.Tensor) -> torch.Tensor:
+        if value.ndim > 1:
+            value = value.mean(dim=tuple(range(1, value.ndim)))
+        return value.mean()
+
     terms = [
-        4.0 * weighted_mean((groom.length[src] - groom.length[dst]).square()),
         2.0 * weighted_mean((torch.log(groom.root_width[src].clamp_min(1.0e-6)) - torch.log(groom.root_width[dst].clamp_min(1.0e-6))).square()),
         0.8 * weighted_mean((torch.log(groom.tip_width[src].clamp_min(1.0e-6)) - torch.log(groom.tip_width[dst].clamp_min(1.0e-6))).square()),
-        0.4 * weighted_mean((groom.width_taper[src] - groom.width_taper[dst]).square()),
-        1.0 * weighted_mean((F.normalize(groom.flow_xy[src], dim=-1) - F.normalize(groom.flow_xy[dst], dim=-1)).square()),
-        1.2 * weighted_mean((groom.flow_strength[src] - groom.flow_strength[dst]).square()),
-        1.0 * weighted_mean((groom.lift[src] - groom.lift[dst]).square()),
-        1.0 * weighted_mean((groom.bend[src] - groom.bend[dst]).square()),
-        0.8 * weighted_mean((groom.stiffness[src] - groom.stiffness[dst]).square()),
-        0.6 * weighted_mean((groom.curl_radius[src] - groom.curl_radius[dst]).square()),
-        0.35 * weighted_mean((groom.curl_frequency[src] - groom.curl_frequency[dst]).square()),
-        0.25
+        0.4
         * weighted_mean(
-            (torch.cos(groom.curl_phase[src]) - torch.cos(groom.curl_phase[dst])).square()
-            + (torch.sin(groom.curl_phase[src]) - torch.sin(groom.curl_phase[dst])).square()
+            (
+                torch.log(groom.width_taper[src].clamp_min(EPS))
+                - torch.log(groom.width_taper[dst].clamp_min(EPS))
+            ).square()
         ),
-        0.4 * weighted_mean((groom.frizz[src] - groom.frizz[dst]).square()),
-        0.8 * weighted_mean((groom.child_radius[src] - groom.child_radius[dst]).square()),
-        0.8 * weighted_mean((groom.clump_strength[src] - groom.clump_strength[dst]).square()),
+        0.8
+        * weighted_mean(
+            (
+                torch.log(groom.child_radius[src].clamp_min(EPS))
+                - torch.log(groom.child_radius[dst].clamp_min(EPS))
+            ).square()
+        ),
         0.25 * weighted_mean((groom.root_color[src] - groom.root_color[dst]).square()),
         0.15 * weighted_mean((groom.tip_color[src] - groom.tip_color[dst]).square()),
         0.5 * weighted_mean((groom.opacity[src] - groom.opacity[dst]).square()),
         0.25 * weighted_mean((groom.tip_opacity[src] - groom.tip_opacity[dst]).square()),
     ]
+    if include_geometry:
+        if smooth_metric_uses_transport(smooth_field_metric):
+            if normals is None or tangents is None or bitangents is None:
+                raise ValueError("surface-aware root smoothing requires normals and tangent frames")
+            direction = groom_direction_3d(groom, normals, tangents, bitangents)
+            direction_difference = surface_direction_edge_difference(
+                direction,
+                normals,
+                src,
+                dst,
+            )
+        else:
+            direction_difference = (
+                groom.direction_local[src] - groom.direction_local[dst]
+            )
+        if smooth_metric_uses_full_relative_length_field(smooth_field_metric):
+            length_difference = symmetric_relative_edge_difference(groom.length, src, dst)
+            length_term = uniform_mean(length_difference.square())
+        else:
+            length_term = 4.0 * weighted_mean((groom.length[src] - groom.length[dst]).square())
+        terms.extend(
+            [
+                length_term,
+                1.0 * weighted_mean(direction_difference.square()),
+                1.0 * weighted_mean((groom.bend[src] - groom.bend[dst]).square()),
+                0.6 * weighted_mean((groom.curl_radius[src] - groom.curl_radius[dst]).square()),
+                0.35 * weighted_mean((groom.curl_frequency[src] - groom.curl_frequency[dst]).square()),
+                0.25
+                * weighted_mean(
+                    (torch.cos(groom.curl_phase[src]) - torch.cos(groom.curl_phase[dst])).square()
+                    + (torch.sin(groom.curl_phase[src]) - torch.sin(groom.curl_phase[dst])).square()
+                ),
+                0.4 * weighted_mean((groom.frizz[src] - groom.frizz[dst]).square()),
+                0.8 * weighted_mean((groom.clump_strength[src] - groom.clump_strength[dst]).square()),
+            ]
+        )
     return torch.stack(terms).sum()
 
 
-def guide_root_graph_smoothness(model: WhiteTigerStage1Model, edges: torch.Tensor) -> torch.Tensor:
+def render_geometry_residual_graph_smoothness(
+    model: WhiteTigerStage1Model,
+    edges: torch.Tensor,
+    normals: torch.Tensor,
+    tangents: torch.Tensor,
+    bitangents: torch.Tensor,
+    observation_confidence: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Smooth only the active zero-centered render geometry residual field."""
+
+    field = model.render_geometry_residual
+    if field is None or edges.numel() == 0:
+        return model.groom.length_raw.sum() * 0.0
+    decoded = field.decode()
+    src, dst = edges[:, 0], edges[:, 1]
+    if observation_confidence is None:
+        edge_weight = decoded.length.new_ones((edges.shape[0],))
+    else:
+        confidence = observation_confidence.detach().reshape(-1).clamp(0.0, 1.0)
+        edge_weight = 0.25 + (1.0 - torch.minimum(confidence[src], confidence[dst]))
+
+    def weighted_mean(value: torch.Tensor) -> torch.Tensor:
+        if value.ndim > 1:
+            value = value.mean(dim=tuple(range(1, value.ndim)))
+        return (value * edge_weight).sum() / edge_weight.sum().clamp_min(1.0)
+
+    residual_world = local_components_to_world(
+        decoded.direction_local,
+        normals,
+        tangents,
+        bitangents,
+        normalize=False,
+    )
+    dst_magnitude = torch.linalg.norm(residual_world[dst], dim=-1, keepdim=True)
+    transported_dst = parallel_transport_vectors(
+        residual_world[dst],
+        normals[dst],
+        normals[src],
+    ) * dst_magnitude
+    direction_difference = residual_world[src] - transported_dst
+    terms = [
+        weighted_mean(
+            (
+                decoded.root_width_log_ratio[src]
+                - decoded.root_width_log_ratio[dst]
+            ).square()
+        ),
+        weighted_mean(
+            (
+                decoded.tip_width_logit_delta[src]
+                - decoded.tip_width_logit_delta[dst]
+            ).square()
+        ),
+        weighted_mean(
+            (
+                decoded.width_taper_log_ratio[src]
+                - decoded.width_taper_log_ratio[dst]
+            ).square()
+        ),
+        weighted_mean((decoded.bend[src] - decoded.bend[dst]).square()),
+        weighted_mean((decoded.curl_radius[src] - decoded.curl_radius[dst]).square()),
+        weighted_mean((decoded.frizz[src] - decoded.frizz[dst]).square()),
+        weighted_mean(
+            (
+                decoded.child_radius_log_ratio[src]
+                - decoded.child_radius_log_ratio[dst]
+            ).square()
+        ),
+        weighted_mean((decoded.clump_strength[src] - decoded.clump_strength[dst]).square()),
+        2.0 * weighted_mean(direction_difference.square().sum(dim=-1)),
+    ]
+    length_coordinate = (
+        field.length_raw
+        if model.render_geometry_parameterization
+        in {
+            "zero_centered_unbounded_log_length_residual",
+            "zero_centered_asinh_log_length_residual",
+        }
+        else decoded.length
+    )
+    terms.insert(
+        0,
+        weighted_mean(
+            (length_coordinate[src] - length_coordinate[dst]).square()
+        ),
+    )
+    return torch.stack(terms).sum()
+
+
+def guide_root_graph_smoothness(
+    model: WhiteTigerStage1Model,
+    edges: torch.Tensor,
+    *,
+    smooth_field_metric: str = "ambient",
+    guide_length_smooth_mode: str = "edge_relative",
+    smooth_graph_k: int = 8,
+) -> torch.Tensor:
     if not model.guide_enabled() or edges.numel() == 0:
         return model.groom.length_raw.sum() * 0.0
     ranges = model.groom.ranges
     src, dst = edges[:, 0], edges[:, 1]
-    guide_length = GroomParameterField._decode_range(model.guide_length_raw, ranges.length)
-    guide_width = GroomParameterField._decode_range(model.guide_root_width_raw, ranges.root_width)
-    guide_flow_strength = GroomParameterField._decode_range(model.guide_flow_strength_raw, ranges.flow_strength)
-    guide_lift = GroomParameterField._decode_range(model.guide_lift_raw, ranges.lift)
+    guide_length = decode_positive_asinh_ratio(
+        model.guide_length_raw,
+        model.guide_length_reference,
+    )
+    guide_width = decode_positive_asinh_ratio(
+        model.guide_root_width_raw,
+        model.guide_root_width_reference,
+    )
+    guide_tip_ratio_coordinate = torch.asinh(model.guide_tip_width_ratio_raw)
+    guide_taper_coordinate = torch.asinh(model.guide_width_taper_raw)
     guide_bend = torch.tanh(model.guide_bend_raw)
-    guide_stiffness = GroomParameterField._decode_range(model.guide_stiffness_raw, ranges.stiffness)
-    guide_curl = GroomParameterField._decode_range(model.guide_curl_radius_raw, ranges.curl_radius)
-    guide_frizz = GroomParameterField._decode_range(model.guide_frizz_raw, ranges.frizz)
-    guide_child_radius = GroomParameterField._decode_range(model.guide_child_radius_raw, ranges.child_radius)
+    guide_child_radius = decode_positive_asinh_ratio(
+        model.guide_child_radius_raw,
+        model.guide_child_radius_reference,
+    )
     guide_clump = GroomParameterField._decode_range(model.guide_clump_strength_raw, ranges.clump_strength)
 
     def mean_edge(value: torch.Tensor) -> torch.Tensor:
         diff = value[src] - value[dst]
         return diff.square().mean()
 
+    if guide_length_smooth_mode not in GUIDE_LENGTH_SMOOTH_MODES:
+        raise ValueError(f"unknown guide length smooth mode: {guide_length_smooth_mode}")
+    if guide_length_smooth_mode == "intrinsic_density_invariant":
+        metric_graph = model.guide_surface_smoothing_graph(smooth_graph_k)
+        if (
+            metric_graph.edges.shape != edges.shape
+            or metric_graph.edges.data_ptr() != edges.data_ptr()
+        ):
+            raise RuntimeError(
+                "intrinsic density-invariant guide smoothing requires the surface guide graph"
+            )
+        guide_length_term = density_invariant_log_scalar_smoothness(
+            guide_length,
+            metric_graph,
+            metric_graph.reference_spacing,
+        )
+    elif smooth_metric_uses_full_relative_length_field(smooth_field_metric):
+        guide_length_term = symmetric_relative_edge_difference(
+            guide_length,
+            src,
+            dst,
+        ).square().mean()
+    else:
+        guide_length_term = 4.0 * mean_edge(guide_length)
+
     terms = [
-        4.0 * mean_edge(guide_length),
+        guide_length_term,
         1.6 * mean_edge(torch.log(guide_width.clamp_min(1.0e-6))),
-        1.2 * mean_edge(guide_flow_strength),
-        1.0 * mean_edge(guide_lift),
+        0.8 * mean_edge(guide_tip_ratio_coordinate),
+        0.4 * mean_edge(guide_taper_coordinate),
         1.2 * mean_edge(guide_bend),
-        0.8 * mean_edge(guide_stiffness),
-        0.7 * mean_edge(guide_curl),
-        0.5 * mean_edge(guide_frizz),
-        0.8 * mean_edge(guide_child_radius),
+        0.8 * mean_edge(torch.log(guide_child_radius.clamp_min(EPS))),
         0.8 * mean_edge(guide_clump),
     ]
-    if model.guide_flow_xy is not None:
+    if float(model.shape_curl_scale) > 0.0:
+        guide_curl = GroomParameterField._decode_range(model.guide_curl_radius_raw, ranges.curl_radius)
+        terms.append(0.7 * mean_edge(guide_curl))
+    if float(model.shape_frizz_scale) > 0.0:
+        guide_frizz = GroomParameterField._decode_range(model.guide_frizz_raw, ranges.frizz)
+        terms.append(0.5 * mean_edge(guide_frizz))
+    guide_direction = model.guide_direction_world()
+    if guide_direction is not None:
         guide_normals, guide_tangents, guide_bitangents = model.guide_normals_and_tangent_frames()
-        guide_direction = controls_direction_3d(
-            model.guide_flow_xy,
-            guide_flow_strength,
-            guide_lift,
-            guide_normals,
-            guide_tangents,
-            guide_bitangents,
-        )
-        terms.append(1.2 * mean_edge(guide_direction))
+        if smooth_metric_uses_transport(smooth_field_metric):
+            direction_difference = surface_direction_edge_difference(
+                guide_direction,
+                guide_normals,
+                src,
+                dst,
+            )
+            terms.append(1.2 * direction_difference.square().mean())
+        else:
+            terms.append(1.2 * mean_edge(guide_direction))
     return torch.stack(terms).sum()
 
 
@@ -941,6 +1281,8 @@ def effective_groom_graph_smoothness(
     bitangents: torch.Tensor,
     ranges: GroomRanges,
     observation_confidence: torch.Tensor | None = None,
+    *,
+    smooth_field_metric: str = "ambient",
 ) -> torch.Tensor:
     """Smooth the final groom field after guide interpolation and residuals.
 
@@ -968,6 +1310,15 @@ def effective_groom_graph_smoothness(
         return (value[src] - value[dst]) / scale
 
     direction = groom_direction_3d(groom, normals, tangents, bitangents)
+    tip_ratio = groom.tip_width / groom.root_width.clamp_min(EPS)
+    tip_ratio_eps = torch.as_tensor(
+        torch.finfo(tip_ratio.dtype).eps,
+        device=tip_ratio.device,
+        dtype=tip_ratio.dtype,
+    )
+    tip_ratio_logit = torch.logit(
+        tip_ratio.clamp(tip_ratio_eps, 1.0 - tip_ratio_eps)
+    )
     curl_radius_n = (groom.curl_radius - float(ranges.curl_radius[0])) / max(
         float(ranges.curl_radius[1] - ranges.curl_radius[0]), EPS
     )
@@ -976,8 +1327,21 @@ def effective_groom_graph_smoothness(
     )
     curl_energy = (curl_radius_n * curl_frequency_n).clamp(0.0, 1.0)
 
+    length_difference = symmetric_relative_edge_difference(groom.length, src, dst)
+    if smooth_metric_uses_full_relative_length_field(smooth_field_metric):
+        # Flow confidence describes orientation evidence, not length evidence.
+        # Length therefore uses the complete surface graph uniformly.
+        length_term = length_difference.square().mean()
+    else:
+        length_term = weighted_mean(length_difference.square())
+
+    if smooth_metric_uses_transport(smooth_field_metric):
+        direction_difference = surface_direction_edge_difference(direction, normals, src, dst)
+    else:
+        direction_difference = direction[src] - direction[dst]
+
     terms = [
-        5.0 * weighted_mean(normalized_diff(groom.length, ranges.length).square()),
+        length_term,
         1.4
         * weighted_mean(
             (
@@ -985,429 +1349,30 @@ def effective_groom_graph_smoothness(
                 - torch.log(groom.root_width[dst].clamp_min(1.0e-6))
             ).square()
         ),
-        1.6 * weighted_mean(normalized_diff(groom.flow_strength, ranges.flow_strength).square()),
-        1.6 * weighted_mean(normalized_diff(groom.lift, ranges.lift).square()),
+        0.8 * weighted_mean((tip_ratio_logit[src] - tip_ratio_logit[dst]).square()),
+        0.4
+        * weighted_mean(
+            (
+                torch.log(groom.width_taper[src].clamp_min(EPS))
+                - torch.log(groom.width_taper[dst].clamp_min(EPS))
+            ).square()
+        ),
         0.8 * weighted_mean((groom.bend[src] - groom.bend[dst]).square()),
-        0.8 * weighted_mean(normalized_diff(groom.stiffness, ranges.stiffness).square()),
         1.8 * weighted_mean(normalized_diff(groom.curl_radius, ranges.curl_radius).square()),
         1.2 * weighted_mean(normalized_diff(groom.curl_frequency, ranges.curl_frequency).square()),
         1.6 * weighted_mean((curl_energy[src] - curl_energy[dst]).square()),
-        1.4 * weighted_mean(normalized_diff(groom.child_radius, ranges.child_radius).square()),
+        1.4
+        * weighted_mean(
+            (
+                torch.log(groom.child_radius[src].clamp_min(EPS))
+                - torch.log(groom.child_radius[dst].clamp_min(EPS))
+            ).square()
+        ),
         1.0 * weighted_mean((groom.clump_strength[src] - groom.clump_strength[dst]).square()),
         0.8 * weighted_mean(normalized_diff(groom.frizz, ranges.frizz).square()),
-        2.0 * weighted_mean((direction[src] - direction[dst]).square().sum(dim=-1)),
+        2.0 * weighted_mean(direction_difference.square().sum(dim=-1)),
     ]
     return torch.stack(terms).sum()
-
-
-def clean_flow_length_anchor_loss(
-    model: WhiteTigerStage1Model,
-    effective_groom,
-    config,
-) -> torch.Tensor:
-    """Keep final fur length near the shell-derived clean-flow length target.
-
-    Clean-flow length is already used to initialize roots.  This term keeps the
-    final guide-composited groom from drifting into long paint strokes after
-    shape/residual controls are unlocked.
-    """
-    if float(config.clean_flow_length_anchor_weight) <= 0.0:
-        return effective_groom.length.sum() * 0.0
-    target = model.clean_flow_length_target.detach().reshape(-1)
-    conf = model.clean_flow_length_confidence.detach().reshape(-1).clamp(0.0, 1.0)
-    valid = (target > 0.0) & (conf >= float(config.clean_flow_length_anchor_min_confidence))
-    if not bool(valid.any()):
-        return effective_groom.length.sum() * 0.0
-    multiplier = max(float(config.clean_flow_length_anchor_multiplier), 1.0)
-    target_valid = target[valid].clamp_min(1.0e-5)
-    allowed = target_valid * multiplier
-    length = effective_groom.length.reshape(-1)[valid]
-    excess = torch.relu((length - allowed) / target_valid)
-    weight = conf[valid]
-    weight = weight / weight.mean().clamp_min(EPS)
-    return (excess.square() * weight).mean()
-
-
-def groom_shape_prior(field: GroomParameterField) -> torch.Tensor:
-    """Keep short-fur geometry from using long/noisy strands as paint strokes."""
-    groom = field.decode()
-    ranges = field.ranges
-
-    def norm(value: torch.Tensor, bounds: tuple[float, float]) -> torch.Tensor:
-        lo, hi = bounds
-        return (value - float(lo)) / max(float(hi) - float(lo), EPS)
-
-    length_excess = torch.relu((groom.length - 0.075) / max(float(ranges.length[1] - ranges.length[0]), EPS))
-    curl_n = norm(groom.curl_radius, ranges.curl_radius)
-    curl_frequency_n = norm(groom.curl_frequency, ranges.curl_frequency)
-    curl_energy_n = (curl_n * curl_frequency_n).clamp(0.0, 1.0)
-    frizz_n = norm(groom.frizz, ranges.frizz)
-    child_n = norm(groom.child_radius, ranges.child_radius)
-    bend_n = groom.bend
-    lift_excess = torch.relu((groom.lift - 0.040) / max(float(ranges.lift[1] - ranges.lift[0]), EPS))
-
-    return (
-        2.0 * length_excess.square().mean()
-        + 0.8 * curl_n.square().mean()
-        + 0.7 * curl_energy_n.square().mean()
-        + 1.2 * frizz_n.square().mean()
-        + 0.8 * child_n.square().mean()
-        + 0.20 * bend_n.square().mean()
-        + 0.25 * lift_excess.square().mean()
-    )
-
-
-def effective_geometry_budget_loss(model: WhiteTigerStage1Model, config) -> torch.Tensor:
-    """Keep rendered fur geometry from substituting long strokes for density.
-
-    This is applied after guide/render interpolation, so it constrains the actual
-    strand parameters passed to the renderer rather than only the raw render-root
-    or guide-root fields.
-    """
-    if float(config.effective_geometry_budget_weight) <= 0.0:
-        return model.groom.length_raw.sum() * 0.0
-    _, _, roots_local = model.roots_and_normals()
-    groom = model.apply_guide_controls(model.groom.decode(), roots_local)
-    terms: list[torch.Tensor] = []
-    weights: list[float] = []
-    if float(config.effective_length_target) > 0.0:
-        target = float(config.effective_length_target)
-        excess = torch.relu((groom.length.reshape(-1) - target) / max(target, EPS))
-        terms.append(excess.square().mean())
-        weights.append(1.0)
-    if float(config.effective_width_target) > 0.0:
-        target = float(config.effective_width_target)
-        excess = torch.relu(torch.log(groom.root_width.reshape(-1).clamp_min(1.0e-8) / max(target, EPS)))
-        terms.append(excess.square().mean())
-        weights.append(0.45)
-    if float(config.effective_child_radius_target) > 0.0:
-        target = float(config.effective_child_radius_target)
-        excess = torch.relu((groom.child_radius.reshape(-1) - target) / max(target, EPS))
-        terms.append(excess.square().mean())
-        weights.append(0.25)
-    if not terms:
-        return model.groom.length_raw.sum() * 0.0
-    total = terms[0] * weights[0]
-    for term, weight in zip(terms[1:], weights[1:]):
-        total = total + term * weight
-    return total / max(sum(weights), EPS)
-
-
-def overpaint_capacity_loss(
-    field: GroomParameterField,
-    residual_per_root: torch.Tensor | None,
-    *,
-    residual_threshold: float,
-    length_target: float,
-    width_target: float,
-    opacity_target: float,
-) -> torch.Tensor:
-    """Penalize stroke-like capacity only where residual evidence remains high."""
-
-    first_param = next(field.parameters())
-    if residual_per_root is None:
-        return first_param.new_tensor(0.0)
-    residual = residual_per_root.detach().reshape(-1)
-    if residual.numel() != int(field.root_count):
-        raise RuntimeError(f"overpaint residual/root mismatch: {residual.numel()} != {int(field.root_count)}")
-    weights = torch.relu(residual - float(residual_threshold))
-    if not bool((weights > 0.0).any()):
-        return first_param.new_tensor(0.0)
-    weights = weights / weights.mean().clamp_min(1.0e-6)
-    groom = field.decode()
-    length_excess = torch.relu((groom.length.reshape(-1) - float(length_target)) / 0.025)
-    width_excess = torch.relu(torch.log(groom.root_width.reshape(-1).clamp_min(1.0e-7) / float(width_target)))
-    opacity_excess = torch.relu((groom.opacity.reshape(-1) - float(opacity_target)) / max(1.0 - float(opacity_target), 1.0e-6))
-    penalty = 0.5 * length_excess.square() + width_excess.square() + 0.8 * opacity_excess.square()
-    return (weights * penalty).sum() / weights.sum().clamp_min(1.0)
-
-
-def dark_stroke_capacity_loss(
-    field: GroomParameterField,
-    *,
-    luma_threshold: float,
-    length_target: float,
-    width_target: float,
-    child_radius_target: float,
-    clump_target: float,
-    opacity_target: float,
-) -> torch.Tensor:
-    """Discourage dark roots from becoming broad paint strokes.
-
-    White-tiger stripes should be explained by enough local strands, not by a
-    small number of long dark strands dragging color across neighboring fur.
-    The loss is color-aware but geometry-only in effect: bright roots are not
-    penalized, and dark roots can still be dark if they stay local and tight.
-    """
-
-    groom = field.decode()
-    luma = (
-        0.2126 * groom.root_color[:, 0]
-        + 0.7152 * groom.root_color[:, 1]
-        + 0.0722 * groom.root_color[:, 2]
-    ).reshape(-1)
-    darkness = torch.relu((float(luma_threshold) - luma) / max(float(luma_threshold), EPS))
-    if not bool((darkness > 0.0).any()):
-        return next(field.parameters()).new_tensor(0.0)
-    length_excess = torch.relu((groom.length.reshape(-1) - float(length_target)) / 0.025)
-    width_excess = torch.relu(torch.log(groom.root_width.reshape(-1).clamp_min(1.0e-7) / float(width_target)))
-    child_excess = torch.relu((groom.child_radius.reshape(-1) - float(child_radius_target)) / max(float(child_radius_target), 1.0e-6))
-    clump_deficit = torch.relu((float(clump_target) - groom.clump_strength.reshape(-1)) / max(float(clump_target), 1.0e-6))
-    opacity_excess = torch.relu((groom.opacity.reshape(-1) - float(opacity_target)) / max(1.0 - float(opacity_target), 1.0e-6))
-    penalty = (
-        1.2 * length_excess.square()
-        + 0.8 * width_excess.square()
-        + 0.7 * child_excess.square()
-        + 0.4 * clump_deficit.square()
-        + 0.5 * opacity_excess.square()
-    )
-    weights = darkness / darkness.mean().clamp_min(1.0e-6)
-    return (weights * penalty).sum() / weights.sum().clamp_min(1.0)
-
-
-@torch.no_grad()
-def root_screen_footprint(
-    gaussians,
-    viewmat: torch.Tensor,
-    k: torch.Tensor,
-    width: int,
-    height: int,
-    root_count: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    root_ids = gaussians.root_indices.long().reshape(-1)
-    xy, depth = project_points(gaussians.means.detach(), viewmat, k)
-    in_frame = (
-        (depth > 1.0e-6)
-        & (xy[:, 0] >= 0.0)
-        & (xy[:, 0] <= width - 1)
-        & (xy[:, 1] >= 0.0)
-        & (xy[:, 1] <= height - 1)
-    )
-    root_count = int(root_count)
-    visible_ids = root_ids[in_frame]
-    visible_xy = xy[in_frame]
-    if int(visible_ids.numel()) == 0:
-        empty = xy.new_zeros((root_count,))
-        return empty, empty
-
-    inf = torch.full((root_count,), float("inf"), device=xy.device, dtype=xy.dtype)
-    neg_inf = torch.full((root_count,), float("-inf"), device=xy.device, dtype=xy.dtype)
-    min_x = inf.clone().scatter_reduce_(0, visible_ids, visible_xy[:, 0], reduce="amin", include_self=True)
-    max_x = neg_inf.clone().scatter_reduce_(0, visible_ids, visible_xy[:, 0], reduce="amax", include_self=True)
-    min_y = inf.clone().scatter_reduce_(0, visible_ids, visible_xy[:, 1], reduce="amin", include_self=True)
-    max_y = neg_inf.clone().scatter_reduce_(0, visible_ids, visible_xy[:, 1], reduce="amax", include_self=True)
-    diag = torch.sqrt((max_x - min_x).clamp_min(0.0).square() + (max_y - min_y).clamp_min(0.0).square())
-    diag = torch.where(torch.isfinite(diag), diag, torch.zeros_like(diag))
-    visible_count = torch.bincount(visible_ids, minlength=root_count).to(dtype=xy.dtype)
-    return diag, visible_count
-
-
-def screen_stroke_capacity_loss(
-    field: GroomParameterField,
-    gaussians,
-    viewmat: torch.Tensor,
-    k: torch.Tensor,
-    width: int,
-    height: int,
-    *,
-    luma_threshold: float,
-    screen_diag_threshold: float,
-    length_target: float,
-    width_target: float,
-    opacity_target: float,
-) -> torch.Tensor:
-    """Penalize only visible dark roots that become long screen-space strokes."""
-
-    groom = field.decode()
-    luma = (
-        0.2126 * groom.root_color[:, 0]
-        + 0.7152 * groom.root_color[:, 1]
-        + 0.0722 * groom.root_color[:, 2]
-    ).reshape(-1)
-    screen_diag, visible_count = root_screen_footprint(
-        gaussians,
-        viewmat,
-        k,
-        width,
-        height,
-        int(field.root_count),
-    )
-    darkness = torch.relu((float(luma_threshold) - luma.detach()) / max(float(luma_threshold), EPS))
-    screen_excess = torch.relu((screen_diag - float(screen_diag_threshold)) / max(float(screen_diag_threshold), EPS))
-    visible_weight = (visible_count > 0).to(dtype=screen_excess.dtype)
-    weights = darkness * screen_excess.detach() * visible_weight
-    if not bool((weights > 0.0).any()):
-        return luma.sum() * 0.0
-
-    length_excess = torch.relu((groom.length.reshape(-1) - float(length_target)) / 0.025)
-    width_excess = torch.relu(torch.log(groom.root_width.reshape(-1).clamp_min(1.0e-7) / float(width_target)))
-    opacity_excess = torch.relu((groom.opacity.reshape(-1) - float(opacity_target)) / max(1.0 - float(opacity_target), 1.0e-6))
-    penalty = 0.8 * length_excess.square() + width_excess.square() + 0.8 * opacity_excess.square()
-    weights = weights / weights.mean().clamp_min(1.0e-6)
-    return (weights * penalty).sum() / weights.sum().clamp_min(1.0)
-
-
-def neutral_screen_capacity_loss(
-    field: GroomParameterField,
-    gaussians,
-    viewmat: torch.Tensor,
-    k: torch.Tensor,
-    width: int,
-    height: int,
-    *,
-    luma_threshold: float,
-    screen_diag_threshold: float,
-    length_target: float,
-    width_target: float,
-    opacity_target: float,
-) -> torch.Tensor:
-    """Limit bright/gray visible screen-space brush strokes without suppressing dark stripes."""
-
-    groom = field.decode()
-    luma = (
-        0.2126 * groom.root_color[:, 0]
-        + 0.7152 * groom.root_color[:, 1]
-        + 0.0722 * groom.root_color[:, 2]
-    ).reshape(-1)
-    screen_diag, visible_count = root_screen_footprint(
-        gaussians,
-        viewmat,
-        k,
-        width,
-        height,
-        int(field.root_count),
-    )
-    neutral = torch.relu((luma.detach() - float(luma_threshold)) / max(1.0 - float(luma_threshold), EPS))
-    screen_excess = torch.relu((screen_diag - float(screen_diag_threshold)) / max(float(screen_diag_threshold), EPS))
-    visible_weight = (visible_count > 0).to(dtype=screen_excess.dtype)
-    weights = neutral * screen_excess.detach() * visible_weight
-    if not bool((weights > 0.0).any()):
-        return luma.sum() * 0.0
-
-    length_excess = torch.relu((groom.length.reshape(-1) - float(length_target)) / 0.025)
-    width_excess = torch.relu(torch.log(groom.root_width.reshape(-1).clamp_min(1.0e-7) / float(width_target)))
-    opacity_excess = torch.relu((groom.opacity.reshape(-1) - float(opacity_target)) / max(1.0 - float(opacity_target), 1.0e-6))
-    penalty = 0.5 * length_excess.square() + width_excess.square() + 0.8 * opacity_excess.square()
-    weights = weights / weights.mean().clamp_min(1.0e-6)
-    return (weights * penalty).sum() / weights.sum().clamp_min(1.0)
-
-
-def color_contrast_capacity_loss(
-    field: GroomParameterField,
-    edges: torch.Tensor,
-    *,
-    contrast_threshold: float,
-    length_target: float,
-    width_target: float,
-    opacity_target: float,
-) -> torch.Tensor:
-    """Keep high-color-contrast roots local instead of letting them drag color.
-
-    A tiger stripe should be represented by enough local strands. If a root has
-    strong luma contrast against neighboring roots, allowing it to become long,
-    wide, and opaque turns the strand into a brush stroke across adjacent fur.
-    """
-
-    if edges.numel() == 0:
-        return next(field.parameters()).new_tensor(0.0)
-    groom = field.decode()
-    luma = (
-        0.2126 * groom.root_color[:, 0]
-        + 0.7152 * groom.root_color[:, 1]
-        + 0.0722 * groom.root_color[:, 2]
-    ).reshape(-1)
-    src, dst = edges[:, 0], edges[:, 1]
-    edge_contrast = torch.abs(luma[src] - luma[dst])
-    contrast_sum = torch.zeros_like(luma)
-    contrast_count = torch.zeros_like(luma)
-    contrast_sum.index_add_(0, src, edge_contrast)
-    contrast_sum.index_add_(0, dst, edge_contrast)
-    contrast_count.index_add_(0, src, torch.ones_like(edge_contrast))
-    contrast_count.index_add_(0, dst, torch.ones_like(edge_contrast))
-    root_contrast = contrast_sum / contrast_count.clamp_min(1.0)
-    pressure = torch.relu((root_contrast - float(contrast_threshold)) / max(1.0 - float(contrast_threshold), 1.0e-6))
-    if not bool((pressure > 0.0).any()):
-        return luma.sum() * 0.0
-
-    length_excess = torch.relu((groom.length.reshape(-1) - float(length_target)) / 0.025)
-    width_excess = torch.relu(torch.log(groom.root_width.reshape(-1).clamp_min(1.0e-7) / float(width_target)))
-    opacity_excess = torch.relu((groom.opacity.reshape(-1) - float(opacity_target)) / max(1.0 - float(opacity_target), 1.0e-6))
-    penalty = 0.9 * length_excess.square() + width_excess.square() + 0.6 * opacity_excess.square()
-    weights = pressure / pressure.mean().clamp_min(1.0e-6)
-    return (weights * penalty).sum() / weights.sum().clamp_min(1.0)
-
-
-def early_capacity_staging_loss(
-    field: GroomParameterField,
-    *,
-    length_target: float,
-    width_target: float,
-    opacity_target: float,
-) -> torch.Tensor:
-    """Keep width/opacity from solving coverage before new roots can be inserted."""
-
-    groom = field.decode()
-    length_excess = torch.relu((groom.length.reshape(-1) - float(length_target)) / 0.025)
-    width_excess = torch.relu(torch.log(groom.root_width.reshape(-1).clamp_min(1.0e-7) / float(width_target)))
-    opacity_excess = torch.relu((groom.opacity.reshape(-1) - float(opacity_target)) / max(1.0 - float(opacity_target), 1.0e-6))
-    return 0.35 * length_excess.square().mean() + width_excess.square().mean() + 0.8 * opacity_excess.square().mean()
-
-
-def guide_control_prior_loss(model: WhiteTigerStage1Model) -> torch.Tensor:
-    if not model.guide_enabled():
-        return model.groom.length_raw.sum() * 0.0
-    ranges = model.groom.ranges
-    guide_length = GroomParameterField._decode_range(model.guide_length_raw, ranges.length)
-    guide_width = GroomParameterField._decode_range(model.guide_root_width_raw, ranges.root_width)
-    guide_flow_strength = GroomParameterField._decode_range(model.guide_flow_strength_raw, ranges.flow_strength)
-    guide_lift = GroomParameterField._decode_range(model.guide_lift_raw, ranges.lift)
-    guide_bend = torch.tanh(model.guide_bend_raw)
-    guide_stiffness = GroomParameterField._decode_range(model.guide_stiffness_raw, ranges.stiffness)
-    guide_curl = GroomParameterField._decode_range(model.guide_curl_radius_raw, ranges.curl_radius)
-    guide_frizz = GroomParameterField._decode_range(model.guide_frizz_raw, ranges.frizz)
-    guide_child_radius = GroomParameterField._decode_range(model.guide_child_radius_raw, ranges.child_radius)
-    guide_clump = GroomParameterField._decode_range(model.guide_clump_strength_raw, ranges.clump_strength)
-    length_n = ((guide_length - ranges.length[0]) / max(ranges.length[1] - ranges.length[0], EPS)).clamp(0.0, 1.0)
-    width_n = ((guide_width - ranges.root_width[0]) / max(ranges.root_width[1] - ranges.root_width[0], EPS)).clamp(0.0, 1.0)
-    flow_strength_n = ((guide_flow_strength - ranges.flow_strength[0]) / max(ranges.flow_strength[1] - ranges.flow_strength[0], EPS)).clamp(0.0, 1.0)
-    lift_n = ((guide_lift - ranges.lift[0]) / max(ranges.lift[1] - ranges.lift[0], EPS)).clamp(0.0, 1.0)
-    stiffness_high = torch.relu(guide_stiffness - 0.82)
-    curl_n = ((guide_curl - ranges.curl_radius[0]) / max(ranges.curl_radius[1] - ranges.curl_radius[0], EPS)).clamp(0.0, 1.0)
-    frizz_n = ((guide_frizz - ranges.frizz[0]) / max(ranges.frizz[1] - ranges.frizz[0], EPS)).clamp(0.0, 1.0)
-    child_n = ((guide_child_radius - ranges.child_radius[0]) / max(ranges.child_radius[1] - ranges.child_radius[0], EPS)).clamp(0.0, 1.0)
-    clump_low = torch.relu(0.18 - guide_clump)
-    prior = (
-        0.8 * length_n.square().mean()
-        + 0.45 * width_n.square().mean()
-        + 0.15 * flow_strength_n.square().mean()
-        + 0.25 * lift_n.square().mean()
-        + 0.35 * guide_bend.square().mean()
-        + 0.15 * stiffness_high.square().mean()
-        + 0.6 * curl_n.square().mean()
-        + 0.9 * frizz_n.square().mean()
-        + 0.7 * child_n.square().mean()
-        + 0.2 * clump_low.square().mean()
-    )
-    if model.guide_flow_xy is not None:
-        flow_norm = torch.linalg.norm(model.guide_flow_xy, dim=-1).clamp_min(EPS)
-        prior = prior + 0.02 * (flow_norm - 1.0).square().mean()
-    return prior
-
-
-def guide_capacity_staging_loss(
-    model: WhiteTigerStage1Model,
-    *,
-    length_target: float,
-    width_target: float,
-) -> torch.Tensor:
-    if not model.guide_enabled():
-        return model.groom.length_raw.sum() * 0.0
-    ranges = model.groom.ranges
-    guide_length = GroomParameterField._decode_range(model.guide_length_raw, ranges.length)
-    guide_width = GroomParameterField._decode_range(model.guide_root_width_raw, ranges.root_width)
-    length_excess = torch.relu((guide_length.reshape(-1) - float(length_target)) / 0.025)
-    width_excess = torch.relu(torch.log(guide_width.reshape(-1).clamp_min(1.0e-7) / float(width_target)))
-    return 0.35 * length_excess.square().mean() + width_excess.square().mean()
 
 
 def strand_shape_consistency_loss(
@@ -1457,11 +1422,9 @@ def groom_parameter_stats(field: GroomParameterField) -> dict[str, dict[str, flo
         "root_width": summarize(groom.root_width),
         "tip_width": summarize(groom.tip_width),
         "width_taper": summarize(groom.width_taper),
-        "flow_strength": summarize(groom.flow_strength),
-        "lift": summarize(groom.lift),
+        "direction_local": summarize(groom.direction_local),
         "bend": summarize(groom.bend),
         "bend_abs": summarize(torch.abs(groom.bend)),
-        "stiffness": summarize(groom.stiffness),
         "curl_radius": summarize(groom.curl_radius),
         "curl_frequency": summarize(groom.curl_frequency),
         "curl_energy_radius_x_frequency": summarize(groom.curl_radius * groom.curl_frequency),
@@ -1498,18 +1461,75 @@ def effective_groom_stats(model: WhiteTigerStage1Model) -> dict[str, dict[str, f
     return {
         "length": summarize(groom.length),
         "root_width": summarize(groom.root_width),
-        "flow_strength": summarize(groom.flow_strength),
-        "lift": summarize(groom.lift),
+        "direction_local": summarize(groom.direction_local),
         "bend": summarize(groom.bend),
         "bend_abs": summarize(torch.abs(groom.bend)),
-        "stiffness": summarize(groom.stiffness),
         "curl_radius": summarize(groom.curl_radius),
         "curl_frequency": summarize(groom.curl_frequency),
         "curl_energy_radius_x_frequency": summarize(groom.curl_radius * groom.curl_frequency),
         "frizz": summarize(groom.frizz),
         "child_radius": summarize(groom.child_radius),
         "clump_strength": summarize(groom.clump_strength),
-        "flow_xy": summarize(groom.flow_xy),
+    }
+
+
+@torch.no_grad()
+def render_geometry_residual_stats(
+    model: WhiteTigerStage1Model,
+) -> dict[str, dict[str, float]] | None:
+    """Report the active normalized residual field without legacy endpoints."""
+
+    field = model.render_geometry_residual
+    if field is None:
+        return None
+    residual = field.decode()
+    length_coordinate = (
+        field.length_raw
+        if model.render_geometry_parameterization
+        in {
+            "zero_centered_unbounded_log_length_residual",
+            "zero_centered_asinh_log_length_residual",
+        }
+        else residual.length
+    )
+
+    def summarize(value: torch.Tensor) -> dict[str, float]:
+        flat = value.detach().float().reshape(-1)
+        if flat.numel() == 0:
+            return {
+                "mean": 0.0,
+                "std": 0.0,
+                "min": 0.0,
+                "p05": 0.0,
+                "p50": 0.0,
+                "p95": 0.0,
+                "max": 0.0,
+            }
+        q = torch.quantile(
+            flat,
+            torch.tensor([0.05, 0.50, 0.95], device=flat.device),
+        )
+        return {
+            "mean": float(flat.mean().cpu()),
+            "std": float(flat.std(unbiased=False).cpu()),
+            "min": float(flat.min().cpu()),
+            "p05": float(q[0].cpu()),
+            "p50": float(q[1].cpu()),
+            "p95": float(q[2].cpu()),
+            "max": float(flat.max().cpu()),
+        }
+
+    return {
+        "length": summarize(length_coordinate),
+        "bend": summarize(residual.bend),
+        "curl_radius": summarize(residual.curl_radius),
+        "frizz": summarize(residual.frizz),
+        "child_radius_log_ratio": summarize(residual.child_radius_log_ratio),
+        "clump_strength": summarize(residual.clump_strength),
+        "direction_component": summarize(residual.direction_local),
+        "direction_magnitude": summarize(
+            torch.linalg.norm(residual.direction_local, dim=-1)
+        ),
     }
 
 
@@ -1529,6 +1549,24 @@ def summarize_values(value: torch.Tensor) -> dict[str, float]:
 
 
 @torch.no_grad()
+def lifecycle_effective_groom(model: WhiteTigerStage1Model):
+    """Decode the controls that actually generate strands at this iteration."""
+
+    base_groom = model.groom.decode()
+    if not model.guide_enabled():
+        return base_groom
+    _, normals, roots_local = model.roots_and_normals()
+    tangents, bitangents = model.tangent_frames(normals)
+    return model.apply_guide_controls(
+        base_groom,
+        roots_local,
+        normals,
+        tangents,
+        bitangents,
+    )
+
+
+@torch.no_grad()
 def lifecycle_subset_report(
     model: WhiteTigerStage1Model,
     stats,
@@ -1538,7 +1576,8 @@ def lifecycle_subset_report(
     if indices.numel() == 0:
         return {}
     ids = indices.detach().long().to(device=model.bary_logits.device)
-    groom = model.groom.decode()
+    base_groom = model.groom.decode()
+    groom = lifecycle_effective_groom(model)
     contribution = stats.gaussian_contrib_sum.reshape(-1).to(device=ids.device)
     visible = stats.visible_count.reshape(-1).to(device=ids.device)
     sample_count = (
@@ -1557,16 +1596,18 @@ def lifecycle_subset_report(
         "visible_per_sample": summarize_values((visible / sample_count.clamp_min(1.0))[ids]),
         "contribution_per_sample": summarize_values((contribution / sample_count.clamp_min(1.0))[ids]),
         "length": summarize_values(groom.length[ids]),
+        "base_length": summarize_values(base_groom.length[ids]),
         "root_width": summarize_values(groom.root_width[ids]),
         "tip_width": summarize_values(groom.tip_width[ids]),
         "opacity": summarize_values(groom.opacity[ids]),
-        "flow_strength": summarize_values(groom.flow_strength[ids]),
+        "direction_local": summarize_values(groom.direction_local[ids]),
     }
 
 
 @torch.no_grad()
 def lifecycle_global_report(model: WhiteTigerStage1Model, stats, scores: dict[str, torch.Tensor]) -> dict[str, dict[str, float] | float]:
-    groom = model.groom.decode()
+    base_groom = model.groom.decode()
+    groom = lifecycle_effective_groom(model)
     visible = stats.visible_count.reshape(-1)
     contribution = stats.gaussian_contrib_sum.reshape(-1)
     sample_count = (
@@ -1583,115 +1624,75 @@ def lifecycle_global_report(model: WhiteTigerStage1Model, stats, scores: dict[st
         "visible_per_sample": summarize_values(visible / sample_count.clamp_min(1.0)),
         "contribution_per_sample": summarize_values(contribution / sample_count.clamp_min(1.0)),
         "length": summarize_values(groom.length),
+        "base_length": summarize_values(base_groom.length),
         "root_width": summarize_values(groom.root_width),
         "opacity": summarize_values(groom.opacity),
-        "long_root_fraction_010": float((groom.length.reshape(-1) > 0.10).float().mean().cpu()),
-        "long_root_fraction_015": float((groom.length.reshape(-1) > 0.15).float().mean().cpu()),
-        "wide_root_fraction_00065": float((groom.root_width.reshape(-1) > 0.00065).float().mean().cpu()),
     }
 
 
 @torch.no_grad()
-def stroke_drag_report(model: WhiteTigerStage1Model, stats, scores: dict[str, torch.Tensor]) -> dict[str, dict[str, float] | float]:
-    """Quantify roots that can explain pixels by long, wide, opaque strokes.
+def lifecycle_selection_report(scores: dict[str, torch.Tensor]) -> dict[str, float]:
+    report: dict[str, float] = {}
+    for key in [
+        "threshold_candidate_count",
+        "local_max_candidate_count",
+        "parent_budget",
+        "budget_saturated",
+    ]:
+        value = scores.get(key)
+        if value is None:
+            continue
+        report[key] = float(value.detach().reshape(-1)[0].cpu())
+    return report
 
-    This diagnostic is logging-only.  It is meant to test whether high residual
-    and high contribution are concentrated on high-capacity strands, which would
-    explain the observed color dragging without changing training behavior.
-    """
 
-    groom = model.groom.decode()
-    length = groom.length.reshape(-1).float()
-    width = groom.root_width.reshape(-1).float()
-    opacity = groom.opacity.reshape(-1).float()
-    contribution = stats.gaussian_contrib_sum.reshape(-1).float()
-    sample_count = (
-        stats.gaussian_sample_count.reshape(-1).float()
-        if getattr(stats, "gaussian_sample_count", None) is not None
-        else torch.ones_like(contribution)
-    ).clamp_min(1.0)
-    contribution_per_sample = contribution / sample_count
-    residual = scores["residual"].reshape(-1).float()
-    need = scores["need"].reshape(-1).float()
+@torch.no_grad()
+def lifecycle_spatial_report(
+    state,
+    indices: torch.Tensor,
+    *,
+    bin_count: int = 10,
+) -> dict[str, object]:
+    if indices.numel() == 0:
+        return {}
+    points = state.points.detach().float()
+    ids = indices.detach().long().to(device=points.device)
+    selected = points[ids]
+    mins = points.amin(dim=0)
+    spans = (points.amax(dim=0) - mins).clamp_min(1.0e-8)
+    all_norm = ((points - mins) / spans).clamp(0.0, 1.0)
+    selected_norm = ((selected - mins) / spans).clamp(0.0, 1.0)
 
-    def q(value: torch.Tensor, quantile: float) -> torch.Tensor:
-        if value.numel() == 0:
-            return value.new_tensor(0.0)
-        return torch.quantile(value, float(quantile))
+    def hist_fraction(values: torch.Tensor) -> torch.Tensor:
+        bucket = torch.clamp((values * float(bin_count)).long(), min=0, max=bin_count - 1)
+        hist = torch.bincount(bucket, minlength=bin_count).float()
+        return hist / hist.sum().clamp_min(1.0)
 
-    length_q90 = q(length, 0.90)
-    width_q90 = q(width, 0.90)
-    opacity_q90 = q(opacity, 0.90)
-    contrib_q90 = q(contribution_per_sample, 0.90)
-    residual_q90 = q(residual, 0.90)
-    high_capacity = (length >= length_q90) & (width >= width_q90) & (opacity >= opacity_q90)
-    high_contrib = contribution_per_sample >= contrib_q90
-    high_residual = residual >= residual_q90
-    drag = high_capacity & high_contrib
-    residual_drag = drag & high_residual
-
-    def masked_summary(mask: torch.Tensor) -> dict[str, float]:
-        mask = mask.reshape(-1).bool()
-        count = int(mask.sum().detach().cpu())
-        total_count = max(1, int(mask.numel()))
-        contribution_total = contribution.sum().clamp_min(1.0e-8)
-        residual_total = residual.sum().clamp_min(1.0e-8)
-        need_total = need.sum().clamp_min(1.0e-8)
-        if count == 0:
-            return {
-                "count": 0.0,
-                "fraction": 0.0,
-                "contribution_share": 0.0,
-                "residual_share": 0.0,
-                "need_share": 0.0,
-                "length_mean": 0.0,
-                "width_mean": 0.0,
-                "opacity_mean": 0.0,
-                "contribution_per_sample_mean": 0.0,
-                "residual_mean": 0.0,
-            }
-        return {
-            "count": float(count),
-            "fraction": float(count / total_count),
-            "contribution_share": float((contribution[mask].sum() / contribution_total).detach().cpu()),
-            "residual_share": float((residual[mask].sum() / residual_total).detach().cpu()) if float(residual_total.detach().cpu()) > 1.0e-8 else 0.0,
-            "need_share": float((need[mask].sum() / need_total).detach().cpu()),
-            "length_mean": float(length[mask].mean().detach().cpu()),
-            "width_mean": float(width[mask].mean().detach().cpu()),
-            "opacity_mean": float(opacity[mask].mean().detach().cpu()),
-            "contribution_per_sample_mean": float(contribution_per_sample[mask].mean().detach().cpu()),
-            "residual_mean": float(residual[mask].mean().detach().cpu()),
+    axes: dict[str, dict[str, object]] = {}
+    for axis, name in enumerate(("x", "y", "z")):
+        all_hist = hist_fraction(all_norm[:, axis])
+        selected_hist = hist_fraction(selected_norm[:, axis])
+        selected_safe = selected_hist.clamp_min(1.0e-12)
+        entropy = -(selected_safe * selected_safe.log()).sum() / torch.log(
+            torch.tensor(float(bin_count), device=selected_safe.device)
+        )
+        axes[name] = {
+            "selected_fraction": [float(v) for v in selected_hist.cpu().tolist()],
+            "all_fraction": [float(v) for v in all_hist.cpu().tolist()],
+            "l1_from_all": float(torch.abs(selected_hist - all_hist).sum().cpu()),
+            "selected_max_bin_fraction": float(selected_hist.max().cpu()),
+            "selected_entropy": float(entropy.cpu()),
+            "selected_mean": float(selected_norm[:, axis].mean().cpu()),
+            "selected_p50": float(torch.quantile(selected_norm[:, axis], 0.50).cpu()),
         }
 
-    def corr(a: torch.Tensor, b: torch.Tensor) -> float:
-        a = a.reshape(-1).float()
-        b = b.reshape(-1).float()
-        if a.numel() < 2 or float(a.std().detach().cpu()) < 1.0e-12 or float(b.std().detach().cpu()) < 1.0e-12:
-            return 0.0
-        value = torch.corrcoef(torch.stack([a, b], dim=0))[0, 1]
-        return float(torch.nan_to_num(value, nan=0.0).detach().cpu())
-
+    face_ids = state.face_ids.detach().long().to(device=points.device)
+    selected_faces = face_ids[ids]
     return {
-        "thresholds": {
-            "length_q90": float(length_q90.detach().cpu()),
-            "width_q90": float(width_q90.detach().cpu()),
-            "opacity_q90": float(opacity_q90.detach().cpu()),
-            "contribution_per_sample_q90": float(contrib_q90.detach().cpu()),
-            "residual_q90": float(residual_q90.detach().cpu()),
-        },
-        "high_capacity": masked_summary(high_capacity),
-        "high_contribution": masked_summary(high_contrib),
-        "high_residual": masked_summary(high_residual),
-        "drag_candidates": masked_summary(drag),
-        "residual_drag_candidates": masked_summary(residual_drag),
-        "correlation": {
-            "length_vs_contribution_per_sample": corr(length, contribution_per_sample),
-            "width_vs_contribution_per_sample": corr(width, contribution_per_sample),
-            "opacity_vs_contribution_per_sample": corr(opacity, contribution_per_sample),
-            "length_vs_residual": corr(length, residual),
-            "width_vs_residual": corr(width, residual),
-            "opacity_vs_residual": corr(opacity, residual),
-        },
+        "selected_root_count": int(ids.numel()),
+        "selected_unique_face_count": int(torch.unique(selected_faces).numel()),
+        "all_unique_face_count": int(torch.unique(face_ids).numel()),
+        "axes": axes,
     }
 
 
@@ -1717,10 +1718,11 @@ class Stage1Config:
     init_mesh_scale: float = 1.28
     init_mesh_translation: tuple[float, float, float] = (0.0, 0.32, 0.02)
     init_groom_length: float = 0.060
-    init_guide_length: float = 0.060
-    samples: int = 48
-    min_segments: int = 6
-    max_segments: int = 22
+    samples: int = 64
+    min_segments: int = 10
+    segment_length_origin: float = 0.010
+    segments_per_unit_length: float = 84.19047619047619
+    segments_per_unit_complexity: float = 23.771428571428572
     child_count: int = 8
     gaussian_length_overlap: float = 1.45
     projected_init_views: int = 24
@@ -1733,57 +1735,39 @@ class Stage1Config:
     projected_init_view_angle_power: float = 1.0
     clean_flow_target: str = ""
     clean_flow_init: bool = False
-    clean_flow_init_lift: bool = True
     clean_flow_init_k: int = 8
     clean_flow_init_min_confidence: float = 0.03
     clean_flow_anchor_min_confidence: float = 0.35
-    clean_flow_lift_min: float = 0.008
-    clean_flow_lift_max: float = 0.040
     clean_flow_length_init: bool = False
     clean_flow_length_init_scale: float = 0.30
     clean_flow_length_init_min_confidence: float = 0.50
-    clean_flow_length_init_min: float = 0.010
-    clean_flow_length_init_max: float = 0.040
-    clean_flow_length_anchor_weight: float = 0.0
-    clean_flow_length_anchor_multiplier: float = 2.0
-    clean_flow_length_anchor_min_confidence: float = 0.50
-    clean_flow_anchor_weight: float = 0.0
     clean_flow_guide_anchor_weight: float = 0.0
     clean_flow_3d_smooth_weight: float = 0.0
     guide_root_count: int = 0
     guide_candidate_multiplier: float = 8.0
     guide_roots_from_clean_flow: bool = False
     guide_interpolation_k: int = 8
-    guide_controls_flow: bool = False
-    guide_direction_primary: bool = False
+    render_geometry_parameterization: str = "absolute_endpoint"
     guide_length_residual_scale: float = 0.0
     guide_bend_residual_scale: float = 0.0
-    guide_flow_residual_scale: float = 1.0
+    guide_direction_residual_scale: float = 1.0
     guide_width_residual_scale: float = 1.0
-    guide_flow_strength_residual_scale: float = 1.0
-    guide_lift_residual_scale: float = 1.0
-    guide_stiffness_residual_scale: float = 1.0
     guide_child_radius_residual_scale: float = 1.0
     guide_clump_residual_scale: float = 1.0
     guide_curl_residual_scale: float = 1.0
     guide_frizz_residual_scale: float = 1.0
-    guide_region_body_residual_multiplier: float = 1.0
-    guide_region_head_residual_multiplier: float = 1.0
-    guide_region_body_shape_multiplier: float = 1.0
-    guide_region_head_shape_multiplier: float = 1.0
-    guide_region_body_coverage_multiplier: float = 1.0
-    guide_region_head_coverage_multiplier: float = 1.0
     guide_prior_weight: float = 0.0
-    guide_prior_flow_weight: float = 1.0
+    guide_prior_direction_weight: float = 1.0
     guide_prior_bend_weight: float = 0.20
-    guide_prior_lift_weight: float = 0.15
-    guide_prior_stiffness_weight: float = 0.10
     guide_prior_curl_weight: float = 0.08
     guide_prior_length_weight: float = 0.0
     guide_prior_width_weight: float = 0.0
     guide_prior_child_radius_weight: float = 0.0
     guide_prior_clump_weight: float = 0.0
+    render_length_prior_coordinate: str = "decoded"
+    render_length_prior_reduction: str = "mean_l1"
     guide_smooth_weight: float = 0.0
+    guide_length_smooth_mode: str = "edge_relative"
     guide_residual_unlock_start: int = 0
     guide_residual_unlock_end: int = 0
     guide_residual_initial_multiplier: float = 1.0
@@ -1792,7 +1776,6 @@ class Stage1Config:
     guide_coverage_residual_initial_multiplier: float = 1.0
     guide_freeze_until: int = 0
     shape_detail_freeze_until: int = 0
-    shape_bend_scale: float = 1.0
     shape_curl_scale: float = 1.0
     shape_frizz_scale: float = 1.0
     guide_densify_start: int = 0
@@ -1800,6 +1783,7 @@ class Stage1Config:
     guide_densify_until: int = 0
     guide_densify_score_threshold: float = 0.0
     guide_densify_max_splits_per_event: int = 0
+    guide_densify_policy: str = "global_score_budget"
     guide_densify_children_per_parent: int = 1
     guide_densify_neighbor_count: int = 12
     guide_densify_candidate_rings: int = 3
@@ -1815,66 +1799,17 @@ class Stage1Config:
     rgb_weight: float = 1.0
     random_backing_loss_weight: float = 0.25
     mask_weight: float = 0.15
-    orientation_weight: float = 0.08
-    orientation_detail_weight: float = 0.02
     rgb_flow_weight: float = 0.0
     rgb_flow_detail_weight: float = 0.0
     rgb_flow_min_confidence: float = 0.08
+    loss_mask_edge_kernel: int = 1
+    smooth_graph_mode: str = "euclidean_knn"
+    smooth_graph_k: int = 8
+    smooth_field_metric: str = "ambient"
     smooth_weight: float = 0.04
     strand_shape_smooth_weight: float = 0.0
     effective_smooth_weight: float = 0.0
-    shape_prior_weight: float = 0.0
-    effective_geometry_budget_weight: float = 0.0
-    effective_length_target: float = 0.0
-    effective_width_target: float = 0.0
-    effective_child_radius_target: float = 0.0
-    overpaint_capacity_weight: float = 0.0
-    overpaint_residual_threshold: float = 0.08
-    overpaint_length_target: float = 0.075
-    overpaint_width_target: float = 0.00024
-    overpaint_opacity_target: float = 0.82
-    dark_stroke_capacity_weight: float = 0.0
-    dark_stroke_luma_threshold: float = 0.38
-    dark_stroke_length_target: float = 0.070
-    dark_stroke_width_target: float = 0.00030
-    dark_stroke_child_radius_target: float = 0.0020
-    dark_stroke_clump_target: float = 0.18
-    dark_stroke_opacity_target: float = 0.82
-    screen_stroke_capacity_weight: float = 0.0
-    screen_stroke_luma_threshold: float = 0.38
-    screen_stroke_diag_threshold: float = 50.0
-    screen_stroke_length_target: float = 0.075
-    screen_stroke_width_target: float = 0.00042
-    screen_stroke_opacity_target: float = 0.88
-    neutral_screen_capacity_weight: float = 0.0
-    neutral_screen_luma_threshold: float = 0.50
-    neutral_screen_diag_threshold: float = 45.0
-    neutral_screen_length_target: float = 0.070
-    neutral_screen_width_target: float = 0.00042
-    neutral_screen_opacity_target: float = 0.88
-    screen_footprint_split_diag_threshold: float = 0.0
-    screen_footprint_split_luma_threshold: float = 0.38
-    screen_footprint_split_score_weight: float = 1.0
-    screen_footprint_split_extra_parents_per_event: int = 0
-    screen_footprint_split_neutral_extra_parents_per_event: int = 0
-    screen_footprint_split_replace_parent: bool = True
-    screen_footprint_split_child_length_scale: float = -1.0
-    screen_footprint_split_child_width_scale: float = -1.0
-    screen_footprint_split_child_opacity_scale: float = -1.0
-    screen_footprint_split_child_spread_scale: float = -1.0
-    screen_footprint_split_child_clump_min: float = -1.0
-    color_contrast_capacity_weight: float = 0.0
-    color_contrast_threshold: float = 0.18
-    color_contrast_length_target: float = 0.075
-    color_contrast_width_target: float = 0.00042
-    color_contrast_opacity_target: float = 0.90
-    early_capacity_weight: float = 0.0
-    early_capacity_until: int = 0
-    early_capacity_length_target: float = 0.075
-    early_capacity_width_target: float = 0.00024
-    early_capacity_opacity_target: float = 0.82
     root_move_reg_weight: float = 0.003
-    orientation_min_confidence: float = 0.08
     compute_lpips: bool = False
     white_background: bool = True
     random_backing_color: bool = True
@@ -1889,7 +1824,6 @@ class Stage1Config:
     mesh_depth_local_kernel: int = 1
     mesh_backing_compositing: bool = True
     strand_shape_normal_mode: str = "full"
-    use_gravity_sag: bool = False
     gpu_memory_limit_gb: float = 0.0
     gpu_memory_check_interval: int = 20
     densify_warmup: int = 500
@@ -1906,36 +1840,15 @@ class Stage1Config:
     densify_pixel_evidence_root_k: int = 4
     densify_pixel_evidence_min: float = 0.02
     densify_pixel_evidence_chunk: int = 512
-    densify_parent_selection: str = "score"
-    densify_target_placement_weight: float = 0.0
     lifecycle_score_mode: str = "raw"
-    stroke_drag_diagnostics: bool = False
     local_child_color_support: bool = False
-    local_child_opacity_support: bool = False
     local_child_color_scale: float = 0.20
-    local_child_opacity_scale: float = 0.12
     max_splits_per_event: int = 256
     split_children_per_parent: int = 2
     split_neighbor_count: int = 12
     split_candidate_rings: int = 3
     split_candidate_face_count: int = 32
     split_min_child_distance: float = 0.0
-    overlong_split_length_threshold: float = 0.0
-    overlong_split_width_threshold: float = 0.0
-    overlong_split_opacity_threshold: float = 0.0
-    overlong_split_min_contribution: float = 0.0
-    overlong_split_max_parents_per_event: int = 0
-    overlong_split_children_per_parent: int = 2
-    overlong_split_target_distance: float = 0.006
-    overlong_split_target_weight: float = 2.0
-    overlong_split_residual_target_weight: float = 0.0
-    overlong_split_until: int = -1
-    overlong_split_replace_parent: bool = True
-    overlong_split_child_length_scale: float = 0.58
-    overlong_split_child_width_scale: float = 1.0
-    overlong_split_child_opacity_scale: float = 1.0
-    overlong_split_child_spread_scale: float = 1.0
-    overlong_split_child_clump_min: float = 0.0
     prune_start: int = 999999
     prune_interval: int = 100
     prune_min_contribution: float = 0.08
@@ -1943,6 +1856,19 @@ class Stage1Config:
     prune_max_fraction: float = 0.05
     resume_checkpoint: str = ""
     resume_optimizer: bool = True
+
+
+def stage1_config_from_checkpoint_mapping(raw: dict) -> Stage1Config:
+    """Load only checkpoints whose config exactly matches the current schema."""
+
+    data = dict(raw)
+    if isinstance(data.get("init_mesh_translation"), list):
+        data["init_mesh_translation"] = tuple(float(v) for v in data["init_mesh_translation"])
+    known = {field.name for field in fields(Stage1Config)}
+    unknown = sorted(set(data) - known)
+    if unknown:
+        raise TypeError(f"unsupported Stage1 checkpoint config fields: {unknown}")
+    return Stage1Config(**data)
 
 
 class WhiteTigerStage1Model(torch.nn.Module):
@@ -1958,38 +1884,22 @@ class WhiteTigerStage1Model(torch.nn.Module):
         init_scale: float = 1.25,
         init_translation: tuple[float, float, float] = (0.0, 0.32, 0.0),
         init_groom_length: float = 0.060,
-        init_guide_length: float = 0.060,
         max_child_count: int = 8,
         local_child_color_support: bool = False,
-        local_child_opacity_support: bool = False,
         local_child_color_scale: float = 0.20,
-        local_child_opacity_scale: float = 0.12,
         guide_face_ids: np.ndarray | None = None,
         guide_barycentric: np.ndarray | None = None,
         guide_region_ids: np.ndarray | None = None,
         guide_interpolation_k: int = 8,
-        guide_controls_flow: bool = False,
-        guide_direction_primary: bool = False,
-        direction_lift_min: float | None = None,
-        direction_lift_max: float | None = None,
+        render_geometry_parameterization: str = "absolute_endpoint",
         guide_length_residual_scale: float = 0.0,
         guide_bend_residual_scale: float = 0.0,
-        guide_flow_residual_scale: float = 1.0,
+        guide_direction_residual_scale: float = 1.0,
         guide_width_residual_scale: float = 1.0,
-        guide_flow_strength_residual_scale: float = 1.0,
-        guide_lift_residual_scale: float = 1.0,
-        guide_stiffness_residual_scale: float = 1.0,
         guide_child_radius_residual_scale: float = 1.0,
         guide_clump_residual_scale: float = 1.0,
         guide_curl_residual_scale: float = 1.0,
         guide_frizz_residual_scale: float = 1.0,
-        guide_region_body_residual_multiplier: float = 1.0,
-        guide_region_head_residual_multiplier: float = 1.0,
-        guide_region_body_shape_multiplier: float = 1.0,
-        guide_region_head_shape_multiplier: float = 1.0,
-        guide_region_body_coverage_multiplier: float = 1.0,
-        guide_region_head_coverage_multiplier: float = 1.0,
-        shape_bend_scale: float = 1.0,
         shape_curl_scale: float = 1.0,
         shape_frizz_scale: float = 1.0,
         strand_shape_normal_mode: str = "full",
@@ -2000,43 +1910,38 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.strand_shape_normal_mode = strand_shape_normal_mode
         self.max_child_count = max(1, int(max_child_count))
         self.local_child_color_scale = float(local_child_color_scale)
-        self.local_child_opacity_scale = float(local_child_opacity_scale)
         self.guide_interpolation_k = max(1, int(guide_interpolation_k))
-        self.guide_controls_flow = bool(guide_controls_flow)
-        self.guide_direction_primary = bool(guide_direction_primary)
-        lift_lo, lift_hi = ranges.lift
-        self.direction_lift_min = float(lift_lo if direction_lift_min is None else direction_lift_min)
-        self.direction_lift_max = float(lift_hi if direction_lift_max is None else direction_lift_max)
-        if not (float(lift_lo) <= self.direction_lift_min <= self.direction_lift_max <= float(lift_hi)):
+        self.render_geometry_parameterization = str(render_geometry_parameterization)
+        if self.render_geometry_parameterization not in {
+            "absolute_endpoint",
+            "zero_centered_residual",
+            "zero_centered_log_length_residual",
+            "zero_centered_unbounded_log_length_residual",
+            "zero_centered_asinh_log_length_residual",
+        }:
             raise ValueError(
-                "direction lift bounds must stay inside GroomRanges.lift: "
-                f"{self.direction_lift_min}, {self.direction_lift_max} vs {ranges.lift}"
+                "render_geometry_parameterization must be absolute_endpoint, "
+                "zero_centered_residual, zero_centered_log_length_residual, "
+                "zero_centered_unbounded_log_length_residual, or "
+                "zero_centered_asinh_log_length_residual"
             )
         self.guide_length_residual_scale = max(0.0, min(1.0, float(guide_length_residual_scale)))
         self.guide_bend_residual_scale = max(0.0, min(1.0, float(guide_bend_residual_scale)))
-        self.guide_flow_residual_scale = max(0.0, min(1.0, float(guide_flow_residual_scale)))
+        self.guide_direction_residual_scale = max(
+            0.0,
+            min(1.0, float(guide_direction_residual_scale)),
+        )
         self.guide_width_residual_scale = max(0.0, min(1.0, float(guide_width_residual_scale)))
-        self.guide_flow_strength_residual_scale = max(0.0, min(1.0, float(guide_flow_strength_residual_scale)))
-        self.guide_lift_residual_scale = max(0.0, min(1.0, float(guide_lift_residual_scale)))
-        self.guide_stiffness_residual_scale = max(0.0, min(1.0, float(guide_stiffness_residual_scale)))
         self.guide_child_radius_residual_scale = max(0.0, min(1.0, float(guide_child_radius_residual_scale)))
         self.guide_clump_residual_scale = max(0.0, min(1.0, float(guide_clump_residual_scale)))
         self.guide_curl_residual_scale = max(0.0, min(1.0, float(guide_curl_residual_scale)))
         self.guide_frizz_residual_scale = max(0.0, min(1.0, float(guide_frizz_residual_scale)))
-        self.guide_region_body_residual_multiplier = max(0.0, float(guide_region_body_residual_multiplier))
-        self.guide_region_head_residual_multiplier = max(0.0, float(guide_region_head_residual_multiplier))
-        self.guide_region_body_shape_multiplier = max(0.0, float(guide_region_body_shape_multiplier))
-        self.guide_region_head_shape_multiplier = max(0.0, float(guide_region_head_shape_multiplier))
-        self.guide_region_body_coverage_multiplier = max(0.0, float(guide_region_body_coverage_multiplier))
-        self.guide_region_head_coverage_multiplier = max(0.0, float(guide_region_head_coverage_multiplier))
         self.guide_residual_multiplier = 1.0
         self.guide_coverage_residual_multiplier = 1.0
         self.shape_detail_multiplier = 1.0
-        self.shape_bend_scale = max(0.0, float(shape_bend_scale))
         self.shape_curl_scale = max(0.0, float(shape_curl_scale))
         self.shape_frizz_scale = max(0.0, float(shape_frizz_scale))
         self.init_groom_length = float(init_groom_length)
-        self.init_guide_length = float(init_guide_length)
         self.register_buffer("vertices", torch.from_numpy(mesh.vertices).to(device=device))
         self.register_buffer("faces", torch.from_numpy(mesh.faces).to(device=device, dtype=torch.long))
         self.register_buffer("face_ids", torch.from_numpy(face_ids).to(device=device, dtype=torch.long))
@@ -2054,17 +1959,25 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.register_buffer("clean_flow_length_target", torch.zeros((int(face_ids.shape[0]),), device=device))
         self.register_buffer("clean_flow_length_confidence", torch.zeros((int(face_ids.shape[0]),), device=device))
         self.bary_logits = torch.nn.Parameter(torch.log(self.bary_initial.clamp_min(1.0e-5)))
-        self.groom = GroomParameterField(int(face_ids.shape[0]), ranges=ranges, device=device)
+        self.groom = GroomParameterField(
+            int(face_ids.shape[0]),
+            ranges=ranges,
+            init_length=self.init_groom_length,
+            device=device,
+        )
+        if self.render_geometry_parameterization != "absolute_endpoint":
+            self.render_geometry_residual = RenderGeometryResidualField(
+                int(face_ids.shape[0]),
+                device=device,
+            )
+        else:
+            self.render_geometry_residual = None
         self.log_scale = torch.nn.Parameter(torch.tensor([math.log(float(init_scale))], device=device))
         self.translation = torch.nn.Parameter(torch.tensor(init_translation, device=device, dtype=torch.float32))
         if bool(local_child_color_support):
             self.child_color_delta_raw = torch.nn.Parameter(torch.zeros((int(face_ids.shape[0]), self.max_child_count, 3), device=device))
         else:
             self.register_parameter("child_color_delta_raw", None)
-        if bool(local_child_opacity_support):
-            self.child_opacity_delta_raw = torch.nn.Parameter(torch.zeros((int(face_ids.shape[0]), self.max_child_count, 1), device=device))
-        else:
-            self.register_parameter("child_opacity_delta_raw", None)
         if guide_face_ids is not None and guide_barycentric is not None:
             self.register_buffer("guide_face_ids", torch.from_numpy(guide_face_ids).to(device=device, dtype=torch.long))
             self.register_buffer("guide_barycentric", torch.from_numpy(guide_barycentric).to(device=device))
@@ -2085,20 +1998,46 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.register_buffer("guide_clean_flow_anchor_confidence", torch.zeros((guide_count,), device=device))
             self.register_buffer("guide_clean_flow_length_target", torch.zeros((guide_count,), device=device))
             self.register_buffer("guide_clean_flow_length_confidence", torch.zeros((guide_count,), device=device))
+            self.register_buffer(
+                "guide_length_reference",
+                torch.full(
+                    (guide_count, 1),
+                    self.init_groom_length,
+                    device=device,
+                ),
+            )
+            self.register_buffer(
+                "guide_root_width_reference",
+                torch.full(
+                    (guide_count, 1),
+                    0.00016,
+                    device=device,
+                ),
+            )
+            self.register_buffer(
+                "guide_tip_width_ratio_reference",
+                torch.full((guide_count, 1), 0.070, device=device),
+            )
+            self.register_buffer(
+                "guide_width_taper_reference",
+                torch.full((guide_count, 1), 1.80, device=device),
+            )
+            self.register_buffer(
+                "guide_child_radius_reference",
+                torch.full((guide_count, 1), 0.0028, device=device),
+            )
             self.guide_length_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_root_width_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
-            self.guide_flow_strength_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
-            self.guide_lift_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
+            self.guide_tip_width_ratio_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
+            self.guide_width_taper_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_bend_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
-            self.guide_stiffness_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_curl_radius_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_frizz_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_child_radius_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_clump_strength_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
-            if self.guide_controls_flow:
-                self.guide_flow_xy = torch.nn.Parameter(torch.zeros((guide_count, 2), device=device))
-            else:
-                self.register_parameter("guide_flow_xy", None)
+            self.guide_direction_local_raw = torch.nn.Parameter(
+                torch.zeros((guide_count, 3), device=device)
+            )
         else:
             self.register_buffer("guide_face_ids", torch.empty((0,), device=device, dtype=torch.long))
             self.register_buffer("guide_barycentric", torch.empty((0, 3), device=device))
@@ -2108,19 +2047,46 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.register_buffer("guide_clean_flow_anchor_confidence", torch.empty((0,), device=device))
             self.register_buffer("guide_clean_flow_length_target", torch.empty((0,), device=device))
             self.register_buffer("guide_clean_flow_length_confidence", torch.empty((0,), device=device))
+            self.register_buffer("guide_length_reference", torch.empty((0, 1), device=device))
+            self.register_buffer("guide_root_width_reference", torch.empty((0, 1), device=device))
+            self.register_buffer("guide_tip_width_ratio_reference", torch.empty((0, 1), device=device))
+            self.register_buffer("guide_width_taper_reference", torch.empty((0, 1), device=device))
+            self.register_buffer("guide_child_radius_reference", torch.empty((0, 1), device=device))
             self.register_parameter("guide_length_raw", None)
             self.register_parameter("guide_root_width_raw", None)
-            self.register_parameter("guide_flow_strength_raw", None)
-            self.register_parameter("guide_lift_raw", None)
+            self.register_parameter("guide_tip_width_ratio_raw", None)
+            self.register_parameter("guide_width_taper_raw", None)
             self.register_parameter("guide_bend_raw", None)
-            self.register_parameter("guide_stiffness_raw", None)
             self.register_parameter("guide_curl_radius_raw", None)
             self.register_parameter("guide_frizz_raw", None)
             self.register_parameter("guide_child_radius_raw", None)
             self.register_parameter("guide_clump_strength_raw", None)
-            self.register_parameter("guide_flow_xy", None)
+            self.register_parameter("guide_direction_local_raw", None)
+        if self.render_geometry_parameterization != "absolute_endpoint":
+            if not self.guide_enabled():
+                raise ValueError("zero-centered render geometry requires guide roots")
         self.register_buffer("guide_interp_ids_cache", torch.empty((0, 0), device=device, dtype=torch.long), persistent=False)
         self.register_buffer("guide_interp_vertex_paths_cache", torch.empty((0, 0, 3), device=device), persistent=False)
+        self.register_buffer(
+            "guide_smooth_reference_spacing_local",
+            torch.zeros((), device=device),
+        )
+        self.register_buffer(
+            "guide_smooth_edges_cache",
+            torch.empty((0, 2), device=device, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "guide_smooth_distances_cache",
+            torch.empty((0,), device=device),
+            persistent=False,
+        )
+        self.register_buffer(
+            "guide_smooth_area_cache",
+            torch.empty((0,), device=device),
+            persistent=False,
+        )
+        self._guide_smooth_graph_k = -1
         self._guide_surface_interpolator: SurfaceFieldInterpolator | None = None
         self.initialize_default_groom()
         self.rebuild_guide_surface_interpolation()
@@ -2128,41 +2094,62 @@ class WhiteTigerStage1Model(torch.nn.Module):
     def initialize_default_groom(self) -> None:
         ranges = self.groom.ranges
         with torch.no_grad():
-            set_range(self.groom.length_raw, self.init_groom_length, ranges.length)
-            set_range(self.groom.root_width_raw, 0.00016, ranges.root_width)
-            set_range(self.groom.tip_width_ratio_raw, 0.070, ranges.tip_width_ratio)
-            set_range(self.groom.width_taper_raw, 1.80, ranges.width_taper)
-            self.groom.flow_xy[:, 0:1].fill_(0.92)
-            self.groom.flow_xy[:, 1:2].fill_(-0.12)
-            set_range(self.groom.flow_strength_raw, 0.86, ranges.flow_strength)
-            set_range(self.groom.lift_raw, 0.018, ranges.lift)
-            set_range(self.groom.sag_raw, 0.0, ranges.sag)
-            set_range(self.groom.stiffness_raw, 0.72, ranges.stiffness)
+            self.groom.length_reference.fill_(self.init_groom_length)
+            self.groom.length_raw.zero_()
+            self.groom.root_width_reference.fill_(0.00016)
+            self.groom.root_width_raw.zero_()
+            set_unit_interval(self.groom.tip_width_ratio_raw, 0.070)
+            set_positive_asinh(self.groom.width_taper_raw, 1.80)
+            self.groom.direction_local_raw.copy_(
+                self.groom.direction_local_raw.new_tensor([0.92 * 0.86, -0.12 * 0.86, 0.018])
+            )
             set_range(self.groom.curl_radius_raw, 0.0030, ranges.curl_radius)
             set_range(self.groom.curl_frequency_raw, 1.20, ranges.curl_frequency)
             set_range(self.groom.frizz_raw, 0.0008, ranges.frizz)
-            set_range(self.groom.child_radius_raw, 0.0028, ranges.child_radius)
+            self.groom.child_radius_reference.fill_(0.0028)
+            self.groom.child_radius_raw.zero_()
             set_range(self.groom.clump_strength_raw, 0.25, ranges.clump_strength)
-            set_range(self.groom.opacity_raw, 0.74, ranges.opacity)
-            set_range(self.groom.tip_opacity_ratio_raw, 0.45, ranges.tip_opacity_ratio)
+            set_unit_interval(self.groom.opacity_raw, 0.74)
+            set_unit_interval(self.groom.tip_opacity_ratio_raw, 0.45)
             root_color = torch.tensor([0.88, 0.88, 0.82], device=self.bary_logits.device).view(1, 3)
             tip_color = torch.tensor([0.98, 0.96, 0.88], device=self.bary_logits.device).view(1, 3)
             set_color(self.groom.root_color_raw, root_color)
             set_color(self.groom.tip_color_raw, tip_color)
             if self.guide_length_raw is not None:
-                set_range(self.guide_length_raw, self.init_guide_length, ranges.length)
-                set_range(self.guide_root_width_raw, 0.00016, ranges.root_width)
-                set_range(self.guide_flow_strength_raw, 0.86, ranges.flow_strength)
-                set_range(self.guide_lift_raw, 0.018, ranges.lift)
+                self.guide_length_reference.fill_(self.init_groom_length)
+                self.guide_length_raw.zero_()
+                self.guide_root_width_reference.fill_(0.00016)
+                self.guide_root_width_raw.zero_()
+                self.guide_tip_width_ratio_reference.fill_(0.070)
+                self.guide_tip_width_ratio_raw.zero_()
+                self.guide_width_taper_reference.fill_(1.80)
+                self.guide_width_taper_raw.zero_()
+                self.guide_child_radius_reference.fill_(0.0028)
                 self.guide_bend_raw.fill_(-0.20)
-                set_range(self.guide_stiffness_raw, 0.72, ranges.stiffness)
                 set_range(self.guide_curl_radius_raw, 0.0030, ranges.curl_radius)
                 set_range(self.guide_frizz_raw, 0.0008, ranges.frizz)
-                set_range(self.guide_child_radius_raw, 0.0028, ranges.child_radius)
+                self.guide_child_radius_raw.zero_()
                 set_range(self.guide_clump_strength_raw, 0.25, ranges.clump_strength)
-                if self.guide_flow_xy is not None:
-                    self.guide_flow_xy[:, 0:1].fill_(0.92)
-                    self.guide_flow_xy[:, 1:2].fill_(-0.12)
+                self.guide_direction_local_raw.copy_(
+                    self.guide_direction_local_raw.new_tensor(
+                        [0.92 * 0.86, -0.12 * 0.86, 0.018]
+                    )
+                )
+
+    def uses_zero_centered_geometry(self) -> bool:
+        return self.render_geometry_residual is not None
+
+    def guide_direction_world(self) -> torch.Tensor | None:
+        if not self.guide_enabled():
+            return None
+        guide_normals, guide_tangents, guide_bitangents = self.guide_normals_and_tangent_frames()
+        return local_components_to_world(
+            F.normalize(self.guide_direction_local_raw, dim=-1, eps=EPS),
+            guide_normals,
+            guide_tangents,
+            guide_bitangents,
+            normalize=True,
+        )
 
     def guide_enabled(self) -> bool:
         return self.guide_length_raw is not None and self.guide_points_local.numel() > 0
@@ -2171,6 +2158,10 @@ class WhiteTigerStage1Model(torch.nn.Module):
         device = self.vertices.device
         self.guide_interp_ids_cache = torch.empty((0, 0), device=device, dtype=torch.long)
         self.guide_interp_vertex_paths_cache = torch.empty((0, 0, 3), device=device)
+        self.guide_smooth_edges_cache = torch.empty((0, 2), device=device, dtype=torch.long)
+        self.guide_smooth_distances_cache = torch.empty((0,), device=device)
+        self.guide_smooth_area_cache = torch.empty((0,), device=device)
+        self._guide_smooth_graph_k = -1
 
     @torch.no_grad()
     def rebuild_guide_surface_interpolation(self) -> None:
@@ -2207,6 +2198,74 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 "query_count": int(self.guide_interp_ids_cache.shape[0]),
                 "neighbor_count": int(self.guide_interp_ids_cache.shape[1]),
             },
+        )
+
+    @torch.no_grad()
+    def guide_interpolation_attribution(
+        self,
+        roots_local: torch.Tensor,
+    ) -> tuple[SurfaceSupport, torch.Tensor]:
+        """Return the exact guide support and weights used by render roots."""
+
+        support = self.guide_interpolation_support()
+        if self._guide_surface_interpolator is None:
+            raise RuntimeError("guide surface interpolator is unavailable")
+        weights = self._guide_surface_interpolator.weights(
+            roots_local.detach(),
+            self.face_ids.detach(),
+            support,
+        )
+        return support, weights.detach()
+
+    @torch.no_grad()
+    def guide_surface_smoothing_edges(self, neighbor_count: int) -> torch.Tensor:
+        """Use the interpolation source graph for guide-root smoothing."""
+
+        return self.guide_surface_smoothing_graph(neighbor_count).edges
+
+    @torch.no_grad()
+    def guide_surface_smoothing_graph(self, neighbor_count: int) -> SurfaceSourceGraph:
+        """Return cached intrinsic metric data for the current guide topology."""
+
+        if not self.guide_enabled():
+            empty_edges = torch.empty(
+                (0, 2), device=self.vertices.device, dtype=torch.long
+            )
+            empty_values = torch.empty((0,), device=self.vertices.device)
+            return SurfaceSourceGraph(
+                edges=empty_edges,
+                distances=empty_values,
+                source_area_weights=empty_values,
+                reference_spacing=self.guide_smooth_reference_spacing_local,
+            )
+        if self._guide_surface_interpolator is None:
+            self.rebuild_guide_surface_interpolation()
+        if self._guide_surface_interpolator is None:
+            raise RuntimeError("guide surface interpolator is unavailable")
+        expected_edges = int(self.guide_points_local.shape[0]) * min(
+            max(int(neighbor_count), 0),
+            max(int(self.guide_points_local.shape[0]) - 1, 0),
+        )
+        cache_valid = (
+            self._guide_smooth_graph_k == int(neighbor_count)
+            and tuple(self.guide_smooth_edges_cache.shape) == (expected_edges, 2)
+            and tuple(self.guide_smooth_distances_cache.shape) == (expected_edges,)
+            and tuple(self.guide_smooth_area_cache.shape)
+            == (int(self.guide_points_local.shape[0]),)
+        )
+        if not cache_valid:
+            graph = self._guide_surface_interpolator.source_neighbor_graph(neighbor_count)
+            self.guide_smooth_edges_cache = graph.edges.detach()
+            self.guide_smooth_distances_cache = graph.distances.detach()
+            self.guide_smooth_area_cache = graph.source_area_weights.detach()
+            self._guide_smooth_graph_k = int(neighbor_count)
+            if float(self.guide_smooth_reference_spacing_local.detach().cpu()) <= 0.0:
+                self.guide_smooth_reference_spacing_local.copy_(graph.reference_spacing)
+        return SurfaceSourceGraph(
+            edges=self.guide_smooth_edges_cache,
+            distances=self.guide_smooth_distances_cache,
+            source_area_weights=self.guide_smooth_area_cache,
+            reference_spacing=self.guide_smooth_reference_spacing_local,
         )
 
     def guide_lifecycle_state(self) -> RootLifecycleState:
@@ -2252,36 +2311,94 @@ class WhiteTigerStage1Model(torch.nn.Module):
             child_weights = old_state.points.new_empty((0, 0))
 
         ranges = self.groom.ranges
+        old_length_reference = self.guide_length_reference.detach()
+        old_root_width_reference = self.guide_root_width_reference.detach()
+        old_tip_width_ratio_reference = self.guide_tip_width_ratio_reference.detach()
+        old_width_taper_reference = self.guide_width_taper_reference.detach()
+        old_child_radius_reference = self.guide_child_radius_reference.detach()
+        child_length_reference = (
+            interpolate_physical(
+                old_length_reference,
+                child_ids,
+                child_weights,
+            )
+            if child_count
+            else old_length_reference.new_empty((0, 1))
+        )
+        child_root_width_reference = (
+            interpolate_physical(
+                old_root_width_reference,
+                child_ids,
+                child_weights,
+            )
+            if child_count
+            else old_root_width_reference.new_empty((0, 1))
+        )
+        child_tip_width_ratio_reference = (
+            interpolate_physical(
+                old_tip_width_ratio_reference,
+                child_ids,
+                child_weights,
+            )
+            if child_count
+            else old_tip_width_ratio_reference.new_empty((0, 1))
+        )
+        child_width_taper_reference = (
+            interpolate_physical(
+                old_width_taper_reference,
+                child_ids,
+                child_weights,
+            )
+            if child_count
+            else old_width_taper_reference.new_empty((0, 1))
+        )
+        child_child_radius_reference = (
+            interpolate_physical(
+                old_child_radius_reference,
+                child_ids,
+                child_weights,
+            )
+            if child_count
+            else old_child_radius_reference.new_empty((0, 1))
+        )
         physical_sources = {
-            "guide_length_raw": GroomParameterField._decode_range(self.guide_length_raw.detach(), ranges.length),
-            "guide_root_width_raw": GroomParameterField._decode_range(self.guide_root_width_raw.detach(), ranges.root_width),
-            "guide_flow_strength_raw": GroomParameterField._decode_range(self.guide_flow_strength_raw.detach(), ranges.flow_strength),
-            "guide_lift_raw": GroomParameterField._decode_range(self.guide_lift_raw.detach(), ranges.lift),
+            "guide_length_raw": decode_positive_asinh_ratio(
+                self.guide_length_raw.detach(),
+                old_length_reference,
+            ),
+            "guide_root_width_raw": decode_positive_asinh_ratio(
+                self.guide_root_width_raw.detach(),
+                old_root_width_reference,
+            ),
+            "guide_tip_width_ratio_raw": apply_asinh_logit_residual(
+                old_tip_width_ratio_reference,
+                self.guide_tip_width_ratio_raw.detach(),
+                1.0,
+            ),
+            "guide_width_taper_raw": decode_positive_asinh_ratio(
+                self.guide_width_taper_raw.detach(),
+                old_width_taper_reference,
+            ),
             "guide_bend_raw": torch.tanh(self.guide_bend_raw.detach()),
-            "guide_stiffness_raw": GroomParameterField._decode_range(self.guide_stiffness_raw.detach(), ranges.stiffness),
             "guide_curl_radius_raw": GroomParameterField._decode_range(self.guide_curl_radius_raw.detach(), ranges.curl_radius),
             "guide_frizz_raw": GroomParameterField._decode_range(self.guide_frizz_raw.detach(), ranges.frizz),
-            "guide_child_radius_raw": GroomParameterField._decode_range(self.guide_child_radius_raw.detach(), ranges.child_radius),
+            "guide_child_radius_raw": decode_positive_asinh_ratio(
+                self.guide_child_radius_raw.detach(),
+                old_child_radius_reference,
+            ),
             "guide_clump_strength_raw": GroomParameterField._decode_range(self.guide_clump_strength_raw.detach(), ranges.clump_strength),
         }
         raw_bounds = {
-            "guide_length_raw": ranges.length,
-            "guide_root_width_raw": ranges.root_width,
-            "guide_flow_strength_raw": ranges.flow_strength,
-            "guide_lift_raw": ranges.lift,
-            "guide_stiffness_raw": ranges.stiffness,
             "guide_curl_radius_raw": ranges.curl_radius,
             "guide_frizz_raw": ranges.frizz,
-            "guide_child_radius_raw": ranges.child_radius,
             "guide_clump_strength_raw": ranges.clump_strength,
         }
         old_raw = {
             "guide_length_raw": self.guide_length_raw.detach(),
             "guide_root_width_raw": self.guide_root_width_raw.detach(),
-            "guide_flow_strength_raw": self.guide_flow_strength_raw.detach(),
-            "guide_lift_raw": self.guide_lift_raw.detach(),
+            "guide_tip_width_ratio_raw": self.guide_tip_width_ratio_raw.detach(),
+            "guide_width_taper_raw": self.guide_width_taper_raw.detach(),
             "guide_bend_raw": self.guide_bend_raw.detach(),
-            "guide_stiffness_raw": self.guide_stiffness_raw.detach(),
             "guide_curl_radius_raw": self.guide_curl_radius_raw.detach(),
             "guide_frizz_raw": self.guide_frizz_raw.detach(),
             "guide_child_radius_raw": self.guide_child_radius_raw.detach(),
@@ -2296,61 +2413,92 @@ class WhiteTigerStage1Model(torch.nn.Module):
             )
             if name == "guide_bend_raw":
                 child_raw = torch.atanh(child_physical.clamp(-0.999, 0.999))
+            elif name == "guide_length_raw":
+                child_raw = encode_positive_asinh_ratio(
+                    child_physical,
+                    child_length_reference,
+                )
+            elif name == "guide_root_width_raw":
+                child_raw = encode_positive_asinh_ratio(
+                    child_physical,
+                    child_root_width_reference,
+                )
+            elif name == "guide_tip_width_ratio_raw":
+                child_raw = encode_asinh_logit_residual(
+                    child_physical,
+                    child_tip_width_ratio_reference,
+                )
+            elif name == "guide_width_taper_raw":
+                child_raw = encode_positive_asinh_ratio(
+                    child_physical,
+                    child_width_taper_reference,
+                )
+            elif name == "guide_child_radius_raw":
+                child_raw = encode_positive_asinh_ratio(
+                    child_physical,
+                    child_child_radius_reference,
+                )
             else:
                 child_raw = raw_from_range(child_physical, raw_bounds[name])
             new_params[name] = apply_attribute_update(old_raw[name], update, child_raw)
+        new_params["guide_length_reference"] = apply_attribute_update(
+            old_length_reference,
+            update,
+            child_length_reference,
+        )
+        new_params["guide_root_width_reference"] = apply_attribute_update(
+            old_root_width_reference,
+            update,
+            child_root_width_reference,
+        )
+        new_params["guide_tip_width_ratio_reference"] = apply_attribute_update(
+            old_tip_width_ratio_reference,
+            update,
+            child_tip_width_ratio_reference,
+        )
+        new_params["guide_width_taper_reference"] = apply_attribute_update(
+            old_width_taper_reference,
+            update,
+            child_width_taper_reference,
+        )
+        new_params["guide_child_radius_reference"] = apply_attribute_update(
+            old_child_radius_reference,
+            update,
+            child_child_radius_reference,
+        )
 
         guide_normals, guide_tangents, guide_bitangents = self.guide_normals_and_tangent_frames()
         child_normals, child_tangents, child_bitangents = self.tangent_frames_for_face_ids(update.new_face_ids)
-        if self.guide_flow_xy is not None:
-            source_direction = controls_direction_3d(
-                self.guide_flow_xy.detach(),
-                physical_sources["guide_flow_strength_raw"],
-                physical_sources["guide_lift_raw"],
+        source_direction = self.guide_direction_world()
+        if source_direction is None:
+            raise RuntimeError("guide direction state is unavailable during densification")
+        source_direction = source_direction.detach()
+        child_direction = (
+            interpolate_directions(
+                source_direction,
                 guide_normals,
-                guide_tangents,
-                guide_bitangents,
-            )
-            child_direction = (
-                interpolate_directions(
-                    source_direction,
-                    guide_normals,
-                    child_normals,
-                    child_ids,
-                    child_weights,
-                )
-                if child_count
-                else source_direction.new_empty((0, 3))
-            )
-            child_flow, child_lift, child_strength = direction_to_flow_lift_strength(
-                child_direction,
                 child_normals,
-                child_tangents,
-                child_bitangents,
-                lift_bounds=ranges.lift,
-                flow_strength_bounds=ranges.flow_strength,
+                child_ids,
+                child_weights,
             )
-            new_params["guide_flow_xy"] = apply_attribute_update(
-                self.guide_flow_xy.detach(),
-                update,
-                child_flow,
-            )
-            new_params["guide_lift_raw"] = apply_attribute_update(
-                self.guide_lift_raw.detach(),
-                update,
-                raw_from_range(child_lift, ranges.lift),
-            )
-            new_params["guide_flow_strength_raw"] = apply_attribute_update(
-                self.guide_flow_strength_raw.detach(),
-                update,
-                raw_from_range(child_strength, ranges.flow_strength),
-            )
+            if child_count
+            else source_direction.new_empty((0, 3))
+        )
+        child_local = direction_to_local_components(
+            child_direction,
+            child_normals,
+            child_tangents,
+            child_bitangents,
+        )
+        new_params["guide_direction_local_raw"] = apply_attribute_update(
+            self.guide_direction_local_raw.detach(),
+            update,
+            child_local,
+        )
 
         evidence_sources = {
             "guide_region_weight": self.guide_region_weight.detach(),
             "guide_clean_flow_anchor_confidence": self.guide_clean_flow_anchor_confidence.detach().reshape(-1, 1),
-            "guide_clean_flow_length_target": self.guide_clean_flow_length_target.detach().reshape(-1, 1),
-            "guide_clean_flow_length_confidence": self.guide_clean_flow_length_confidence.detach().reshape(-1, 1),
         }
         for name, source in evidence_sources.items():
             child = (
@@ -2359,6 +2507,37 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 else source.new_empty((0, *source.shape[1:]))
             )
             new_params[name] = apply_attribute_update(source, update, child)
+        length_target = self.guide_clean_flow_length_target.detach().reshape(-1, 1)
+        length_confidence = self.guide_clean_flow_length_confidence.detach().reshape(-1, 1)
+        if child_count:
+            child_length_confidence = interpolate_physical(
+                length_confidence,
+                child_ids,
+                child_weights,
+            )
+            child_weighted_length = interpolate_physical(
+                length_target * length_confidence,
+                child_ids,
+                child_weights,
+            )
+            child_length_target = torch.where(
+                child_length_confidence > EPS,
+                child_weighted_length / child_length_confidence.clamp_min(EPS),
+                torch.zeros_like(child_weighted_length),
+            )
+        else:
+            child_length_target = length_target.new_empty((0, 1))
+            child_length_confidence = length_confidence.new_empty((0, 1))
+        new_params["guide_clean_flow_length_target"] = apply_attribute_update(
+            length_target,
+            update,
+            child_length_target,
+        )
+        new_params["guide_clean_flow_length_confidence"] = apply_attribute_update(
+            length_confidence,
+            update,
+            child_length_confidence,
+        )
         child_clean_direction = (
             interpolate_directions(
                 self.guide_clean_flow_direction_target.detach(),
@@ -2381,12 +2560,16 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.guide_face_ids = new_state.face_ids.detach().long()
         self.guide_barycentric = new_state.barycentric.detach()
         self.guide_points_local = new_state.points.detach()
+        self.guide_length_reference = new_params["guide_length_reference"].to(device=device).detach()
+        self.guide_root_width_reference = new_params["guide_root_width_reference"].to(device=device).detach()
+        self.guide_tip_width_ratio_reference = new_params["guide_tip_width_ratio_reference"].to(device=device).detach()
+        self.guide_width_taper_reference = new_params["guide_width_taper_reference"].to(device=device).detach()
+        self.guide_child_radius_reference = new_params["guide_child_radius_reference"].to(device=device).detach()
         self.guide_length_raw = torch.nn.Parameter(new_params["guide_length_raw"].to(device=device))
         self.guide_root_width_raw = torch.nn.Parameter(new_params["guide_root_width_raw"].to(device=device))
-        self.guide_flow_strength_raw = torch.nn.Parameter(new_params["guide_flow_strength_raw"].to(device=device))
-        self.guide_lift_raw = torch.nn.Parameter(new_params["guide_lift_raw"].to(device=device))
+        self.guide_tip_width_ratio_raw = torch.nn.Parameter(new_params["guide_tip_width_ratio_raw"].to(device=device))
+        self.guide_width_taper_raw = torch.nn.Parameter(new_params["guide_width_taper_raw"].to(device=device))
         self.guide_bend_raw = torch.nn.Parameter(new_params["guide_bend_raw"].to(device=device))
-        self.guide_stiffness_raw = torch.nn.Parameter(new_params["guide_stiffness_raw"].to(device=device))
         self.guide_curl_radius_raw = torch.nn.Parameter(new_params["guide_curl_radius_raw"].to(device=device))
         self.guide_frizz_raw = torch.nn.Parameter(new_params["guide_frizz_raw"].to(device=device))
         self.guide_child_radius_raw = torch.nn.Parameter(new_params["guide_child_radius_raw"].to(device=device))
@@ -2398,8 +2581,9 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.guide_clean_flow_anchor_confidence = new_params["guide_clean_flow_anchor_confidence"].to(device=device).reshape(-1).detach().clamp(0.0, 1.0)
         self.guide_clean_flow_length_target = new_params["guide_clean_flow_length_target"].to(device=device).reshape(-1).detach().clamp_min(0.0)
         self.guide_clean_flow_length_confidence = new_params["guide_clean_flow_length_confidence"].to(device=device).reshape(-1).detach().clamp(0.0, 1.0)
-        if self.guide_flow_xy is not None:
-            self.guide_flow_xy = torch.nn.Parameter(new_params["guide_flow_xy"].to(device=device))
+        self.guide_direction_local_raw = torch.nn.Parameter(
+            new_params["guide_direction_local_raw"].to(device=device)
+        )
         self.rebuild_guide_surface_interpolation()
         return {"old_guide_root_count": old_count, "guide_root_count_after": new_count}
 
@@ -2431,33 +2615,40 @@ class WhiteTigerStage1Model(torch.nn.Module):
         ids = support.indices
         ranges = self.groom.ranges
         guide_values = {
-            "length": GroomParameterField._decode_range(self.guide_length_raw, ranges.length),
-            "root_width": GroomParameterField._decode_range(self.guide_root_width_raw, ranges.root_width),
-            "flow_strength": GroomParameterField._decode_range(self.guide_flow_strength_raw, ranges.flow_strength),
-            "lift": GroomParameterField._decode_range(self.guide_lift_raw, ranges.lift),
+            "length": decode_positive_asinh_ratio(
+                self.guide_length_raw,
+                self.guide_length_reference,
+            ),
+            "root_width": decode_positive_asinh_ratio(
+                self.guide_root_width_raw,
+                self.guide_root_width_reference,
+            ),
+            "tip_width_ratio": apply_asinh_logit_residual(
+                self.guide_tip_width_ratio_reference,
+                self.guide_tip_width_ratio_raw,
+                1.0,
+            ),
+            "width_taper": decode_positive_asinh_ratio(
+                self.guide_width_taper_raw,
+                self.guide_width_taper_reference,
+            ),
             "bend": torch.tanh(self.guide_bend_raw),
-            "stiffness": GroomParameterField._decode_range(self.guide_stiffness_raw, ranges.stiffness),
             "curl_radius": GroomParameterField._decode_range(self.guide_curl_radius_raw, ranges.curl_radius),
             "frizz": GroomParameterField._decode_range(self.guide_frizz_raw, ranges.frizz),
-            "child_radius": GroomParameterField._decode_range(self.guide_child_radius_raw, ranges.child_radius),
+            "child_radius": decode_positive_asinh_ratio(
+                self.guide_child_radius_raw,
+                self.guide_child_radius_reference,
+            ),
             "clump_strength": GroomParameterField._decode_range(self.guide_clump_strength_raw, ranges.clump_strength),
-            "region_head_weight": self.guide_region_weight.clamp(0.0, 1.0),
         }
-        if self.guide_flow_xy is not None:
-            guide_normals, guide_tangents, guide_bitangents = self.guide_normals_and_tangent_frames()
-            guide_direction = controls_direction_3d(
-                self.guide_flow_xy,
-                guide_values["flow_strength"],
-                guide_values["lift"],
-                guide_normals,
-                guide_tangents,
-                guide_bitangents,
-            )
+        guide_direction = self.guide_direction_world()
+        if guide_direction is not None:
+            guide_normals, _, _ = self.guide_normals_and_tangent_frames()
         guide_interp = {
             name: interpolate_physical(guide_value, ids, weights)
             for name, guide_value in guide_values.items()
         }
-        if self.guide_flow_xy is not None:
+        if guide_direction is not None:
             guide_direction_out = interpolate_directions(
                 guide_direction,
                 guide_normals,
@@ -2503,14 +2694,16 @@ class WhiteTigerStage1Model(torch.nn.Module):
             tangents, bitangents = self.tangent_frames(normals)
         ranges = self.groom.ranges
         guide_interp, guide_direction = self.interpolate_guide_controls(roots_local, normals, tangents, bitangents)
-        region_head_weight = guide_interp.get("region_head_weight")
-
-        def region_multiplier(body: float, head: float) -> torch.Tensor | float:
-            if region_head_weight is None:
-                return 1.0
-            body_value = max(0.0, float(body))
-            head_value = max(0.0, float(head))
-            return body_value + (head_value - body_value) * region_head_weight
+        residual_decoded = (
+            self.render_geometry_residual.decode()
+            if self.render_geometry_residual is not None
+            else None
+        )
+        residual_physical = (
+            self.render_geometry_residual.physical_scalar_deltas(ranges)
+            if self.render_geometry_residual is not None
+            else {}
+        )
 
         def mix_scalar(
             name: str,
@@ -2518,184 +2711,206 @@ class WhiteTigerStage1Model(torch.nn.Module):
             residual_scale: float,
             bounds: tuple[float, float] | None = None,
             residual_multiplier: float | None = None,
-            region_residual_multiplier: torch.Tensor | float = 1.0,
         ) -> torch.Tensor:
             guide_value = guide_interp[name]
             multiplier = self.guide_residual_multiplier if residual_multiplier is None else residual_multiplier
             effective_residual_scale = float(residual_scale) * float(multiplier)
-            if torch.is_tensor(region_residual_multiplier):
-                effective_residual_scale = region_residual_multiplier * effective_residual_scale
-                should_apply = bool(torch.any(effective_residual_scale > 0.0).detach().cpu())
-            else:
-                effective_residual_scale = float(region_residual_multiplier) * effective_residual_scale
-                should_apply = effective_residual_scale > 0.0
-            if should_apply:
+            should_apply = effective_residual_scale > 0.0
+            if (
+                self.render_geometry_parameterization
+                == "zero_centered_unbounded_log_length_residual"
+                and name == "length"
+            ):
+                guide_value = apply_log_ratio_residual(
+                    guide_value,
+                    self.render_geometry_residual.length_raw,
+                    effective_residual_scale,
+                )
+            elif (
+                self.render_geometry_parameterization
+                == "zero_centered_asinh_log_length_residual"
+                and name == "length"
+            ):
+                guide_value = apply_asinh_log_ratio_residual(
+                    guide_value,
+                    self.render_geometry_residual.length_raw,
+                    effective_residual_scale,
+                )
+            elif (
+                self.render_geometry_parameterization == "zero_centered_log_length_residual"
+                and name == "length"
+            ):
+                guide_value = apply_log_ratio_residual(
+                    guide_value,
+                    residual_decoded.length,
+                    effective_residual_scale,
+                )
+            elif (
+                self.render_geometry_parameterization == "zero_centered_residual"
+                and name == "length"
+            ):
+                tiny = torch.as_tensor(
+                    torch.finfo(guide_value.dtype).tiny,
+                    device=guide_value.device,
+                    dtype=guide_value.dtype,
+                )
+                guide_value = guide_value * (
+                    1.0 + effective_residual_scale * residual_decoded.length
+                ).clamp_min(tiny)
+            elif self.render_geometry_residual is not None and name in residual_physical:
+                guide_value = guide_value + effective_residual_scale * residual_physical[name]
+            elif should_apply:
                 guide_value = guide_value + effective_residual_scale * (render_value - guide_value)
-            if bounds is not None:
+            range_free_log_length = (
+                self.render_geometry_parameterization
+                in {
+                    "zero_centered_log_length_residual",
+                    "zero_centered_unbounded_log_length_residual",
+                    "zero_centered_asinh_log_length_residual",
+                }
+                and name == "length"
+            )
+            if bounds is not None and not range_free_log_length:
                 lo, hi = bounds
                 guide_value = guide_value.clamp(float(lo), float(hi))
             return guide_value
-
-        geometry_region_multiplier = region_multiplier(
-            self.guide_region_body_residual_multiplier,
-            self.guide_region_head_residual_multiplier,
-        )
-        coverage_region_multiplier = region_multiplier(
-            self.guide_region_body_coverage_multiplier,
-            self.guide_region_head_coverage_multiplier,
-        )
-        shape_region_multiplier = region_multiplier(
-            self.guide_region_body_shape_multiplier,
-            self.guide_region_head_shape_multiplier,
-        )
 
         length = mix_scalar(
             "length",
             groom.length,
             self.guide_length_residual_scale,
-            ranges.length,
-            region_residual_multiplier=geometry_region_multiplier,
+            None,
         )
         coverage_multiplier = float(getattr(self, "guide_coverage_residual_multiplier", self.guide_residual_multiplier))
-        root_width = mix_scalar(
-            "root_width",
-            groom.root_width,
-            self.guide_width_residual_scale,
-            ranges.root_width,
-            residual_multiplier=coverage_multiplier,
-            region_residual_multiplier=coverage_region_multiplier,
-        )
-        tip_ratio = (groom.tip_width / groom.root_width.clamp_min(EPS)).clamp(float(ranges.tip_width_ratio[0]), float(ranges.tip_width_ratio[1]))
-        flow_strength = mix_scalar(
-            "flow_strength",
-            groom.flow_strength,
-            self.guide_flow_strength_residual_scale,
-            ranges.flow_strength,
-            region_residual_multiplier=geometry_region_multiplier,
-        )
-        lift = mix_scalar(
-            "lift",
-            groom.lift,
-            self.guide_lift_residual_scale,
-            ranges.lift,
-            region_residual_multiplier=geometry_region_multiplier,
-        )
+        if self.render_geometry_residual is not None:
+            width_residual_scale = (
+                float(self.guide_width_residual_scale)
+                * float(self.guide_residual_multiplier)
+            )
+            root_width = apply_asinh_log_ratio_residual(
+                guide_interp["root_width"],
+                self.render_geometry_residual.root_width_raw,
+                width_residual_scale,
+            )
+            tip_ratio = apply_asinh_logit_residual(
+                guide_interp["tip_width_ratio"],
+                self.render_geometry_residual.tip_width_ratio_raw,
+                width_residual_scale,
+            )
+            width_taper = apply_asinh_log_ratio_residual(
+                guide_interp["width_taper"],
+                self.render_geometry_residual.width_taper_raw,
+                width_residual_scale,
+            )
+        else:
+            root_width = mix_scalar(
+                "root_width",
+                groom.root_width,
+                self.guide_width_residual_scale,
+                None,
+                residual_multiplier=coverage_multiplier,
+            )
+            tip_ratio = groom.tip_width / groom.root_width.clamp_min(EPS)
+            width_taper = groom.width_taper
         bend = mix_scalar(
             "bend",
             groom.bend,
             self.guide_bend_residual_scale,
             (-1.0, 1.0),
-            region_residual_multiplier=shape_region_multiplier,
-        )
-        stiffness = mix_scalar(
-            "stiffness",
-            groom.stiffness,
-            self.guide_stiffness_residual_scale,
-            ranges.stiffness,
-            region_residual_multiplier=geometry_region_multiplier,
         )
         curl_radius = mix_scalar(
             "curl_radius",
             groom.curl_radius,
             self.guide_curl_residual_scale,
             ranges.curl_radius,
-            region_residual_multiplier=shape_region_multiplier,
         )
         frizz = mix_scalar(
             "frizz",
             groom.frizz,
             self.guide_frizz_residual_scale,
             ranges.frizz,
-            region_residual_multiplier=shape_region_multiplier,
         )
-        child_radius = mix_scalar(
-            "child_radius",
-            groom.child_radius,
-            self.guide_child_radius_residual_scale,
-            ranges.child_radius,
-            residual_multiplier=coverage_multiplier,
-            region_residual_multiplier=coverage_region_multiplier,
-        )
+        if self.render_geometry_residual is not None:
+            child_radius = apply_asinh_log_ratio_residual(
+                guide_interp["child_radius"],
+                self.render_geometry_residual.child_radius_raw,
+                float(self.guide_child_radius_residual_scale)
+                * coverage_multiplier,
+            )
+        else:
+            child_radius = mix_scalar(
+                "child_radius",
+                groom.child_radius,
+                self.guide_child_radius_residual_scale,
+                None,
+                residual_multiplier=coverage_multiplier,
+            )
         clump_strength = mix_scalar(
             "clump_strength",
             groom.clump_strength,
             self.guide_clump_residual_scale,
             ranges.clump_strength,
-            region_residual_multiplier=coverage_region_multiplier,
         )
         kwargs = {
             "length": length,
             "root_width": root_width,
             "tip_width": root_width * tip_ratio,
-            "flow_strength": flow_strength,
-            "lift": lift,
+            "width_taper": width_taper,
             "bend": bend,
-            "stiffness": stiffness,
             "curl_radius": curl_radius,
             "frizz": frizz,
             "child_radius": child_radius,
             "clump_strength": clump_strength,
         }
         if guide_direction is not None:
-            effective_flow_residual_scale = float(self.guide_flow_residual_scale) * float(self.guide_residual_multiplier)
-            if torch.is_tensor(geometry_region_multiplier):
-                effective_flow_residual_scale = geometry_region_multiplier * effective_flow_residual_scale
-                should_apply_flow_residual = bool(torch.any(effective_flow_residual_scale > 0.0).detach().cpu())
-            else:
-                effective_flow_residual_scale = float(geometry_region_multiplier) * effective_flow_residual_scale
-                should_apply_flow_residual = effective_flow_residual_scale > 0.0
-            if should_apply_flow_residual:
-                render_direction = controls_direction_3d(
-                    groom.flow_xy,
-                    groom.flow_strength,
-                    groom.lift,
+            effective_direction_residual_scale = (
+                float(self.guide_direction_residual_scale)
+                * float(self.guide_residual_multiplier)
+            )
+            should_apply_direction_residual = effective_direction_residual_scale > 0.0
+            if self.render_geometry_residual is not None:
+                guide_direction = apply_direction_residual(
+                    guide_direction,
+                    residual_decoded.direction_local,
+                    normals,
+                    tangents,
+                    bitangents,
+                    effective_direction_residual_scale,
+                )
+            elif should_apply_direction_residual:
+                render_direction = local_components_to_world(
+                    groom.direction_local,
+                    normals,
+                    tangents,
+                    bitangents,
+                    normalize=True,
+                )
+                guide_direction = F.normalize(
+                    guide_direction
+                    + effective_direction_residual_scale
+                    * (render_direction - guide_direction),
+                    dim=-1,
+                    eps=1.0e-8,
+                )
+            kwargs["direction_local"] = direction_to_local_components(
+                    guide_direction,
                     normals,
                     tangents,
                     bitangents,
                 )
-                guide_direction = F.normalize(
-                    guide_direction + effective_flow_residual_scale * (render_direction - guide_direction),
-                    dim=-1,
-                    eps=1.0e-8,
-                )
-            flow_xy, direction_lift = direction_to_local_controls(
-                guide_direction,
-                normals,
-                tangents,
-                bitangents,
-                (guide_direction * normals).sum(dim=-1),
-                lift_min=float(self.direction_lift_min),
-                lift_max=float(self.direction_lift_max),
-                lambda_low=-0.10,
-                lambda_high=0.65,
-            )
-            kwargs["flow_xy"] = flow_xy
-            if self.guide_direction_primary:
-                normal_component = (guide_direction * normals).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
-                tangent_component = torch.sqrt((1.0 - normal_component.square()).clamp_min(EPS))
-                lift_lo, lift_hi = float(self.direction_lift_min), float(self.direction_lift_max)
-                flow_lo, flow_hi = float(ranges.flow_strength[0]), float(ranges.flow_strength[1])
-                scale_from_lift = lift_hi / normal_component.clamp_min(1.0e-4)
-                scale_from_flow = flow_hi / tangent_component.clamp_min(1.0e-4)
-                direction_scale = torch.minimum(scale_from_lift, scale_from_flow)
-                kwargs["lift"] = (direction_scale * normal_component).clamp(lift_lo, lift_hi)
-                kwargs["flow_strength"] = (direction_scale * tangent_component).clamp(flow_lo, flow_hi)
-            else:
-                kwargs["lift"] = direction_lift.clamp(float(self.direction_lift_min), float(self.direction_lift_max))
         return self.apply_shape_detail_gate(replace(groom, **kwargs))
 
     def apply_shape_detail_gate(self, groom):
         """Stage1-A should render neutral bend/curl/frizz, not frozen nonzero values."""
         multiplier = float(getattr(self, "shape_detail_multiplier", 1.0))
-        bend_scale = float(getattr(self, "shape_bend_scale", 1.0))
         curl_scale = float(getattr(self, "shape_curl_scale", 1.0))
         frizz_scale = float(getattr(self, "shape_frizz_scale", 1.0))
-        if multiplier >= 0.999 and bend_scale >= 0.999 and curl_scale >= 0.999 and frizz_scale >= 0.999:
+        if multiplier >= 0.999 and curl_scale >= 0.999 and frizz_scale >= 0.999:
             return groom
         m = max(0.0, multiplier)
         return replace(
             groom,
-            bend=groom.bend * m * max(0.0, bend_scale),
+            bend=groom.bend * m,
             curl_radius=groom.curl_radius * m * max(0.0, curl_scale),
             frizz=groom.frizz * m * max(0.0, frizz_scale),
         )
@@ -2742,7 +2957,16 @@ class WhiteTigerStage1Model(torch.nn.Module):
             bitangents = F.normalize(torch.cross(normals, tangents, dim=-1), dim=-1, eps=1.0e-8)
         return normals, tangents, bitangents
 
-    def render_parameters(self, samples: int, child_count: int, min_segments: int, max_segments: int, length_overlap: float):
+    def render_parameters(
+        self,
+        samples: int,
+        child_count: int,
+        min_segments: int,
+        segment_length_origin: float,
+        segments_per_unit_length: float,
+        segments_per_unit_complexity: float,
+        length_overlap: float,
+    ):
         roots, normals, roots_local = self.roots_and_normals()
         tangents, bitangents = self.tangent_frames(normals)
         groom = self.apply_guide_controls(self.groom.decode(), roots_local)
@@ -2753,7 +2977,6 @@ class WhiteTigerStage1Model(torch.nn.Module):
             bitangents,
             groom,
             samples=samples,
-            use_gravity_sag=False,
             shape_normal_mode=self.strand_shape_normal_mode,
         )
         strands, widths, colors, opacities, root_ids = expand_child_strands(
@@ -2767,13 +2990,13 @@ class WhiteTigerStage1Model(torch.nn.Module):
             child_count=child_count,
         )
         colors, opacities = self.apply_local_child_support(colors, opacities, root_ids, child_count)
-        child_lengths = groom.length[root_ids]
         counts, count_stats = strand_segment_budgets(
             strands.detach(),
-            child_lengths.detach(),
+            groom.length[root_ids].detach(),
             min_segments,
-            max_segments,
-            length_bounds=self.groom.ranges.length,
+            segment_length_origin,
+            segments_per_unit_length,
+            segments_per_unit_complexity,
         )
         resampled = resample_strands_to_segment_budgets(strands, widths, colors, opacities, counts)
         gaussians = strands_to_gaussians(
@@ -2819,7 +3042,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         root_ids: torch.Tensor,
         child_count: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.child_color_delta_raw is None and self.child_opacity_delta_raw is None:
+        if self.child_color_delta_raw is None:
             return colors, opacities
         child_count = int(child_count)
         if child_count < 1 or child_count > self.max_child_count:
@@ -2832,15 +3055,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
         if self.child_color_delta_raw is not None:
             delta = torch.tanh(self.child_color_delta_raw[root_ids, child_ids]) * float(self.local_child_color_scale)
             colors = (colors + delta[:, None, :]).clamp(0.0, 1.0)
-        if self.child_opacity_delta_raw is not None:
-            delta = torch.tanh(self.child_opacity_delta_raw[root_ids, child_ids]) * float(self.local_child_opacity_scale)
-            opacities = (opacities + delta[:, None, :]).clamp(0.0, 1.0)
         return colors, opacities
 
     def guide_strands_for_loss(self, samples: int) -> torch.Tensor:
-        roots, normals, _ = self.roots_and_normals()
+        roots, normals, roots_local = self.roots_and_normals()
         tangents, bitangents = self.tangent_frames(normals)
-        _, _, roots_local = self.roots_and_normals()
         groom = self.apply_guide_controls(self.groom.decode(), roots_local)
         strands, _, _, _ = build_strands(
             roots,
@@ -2849,7 +3068,6 @@ class WhiteTigerStage1Model(torch.nn.Module):
             bitangents,
             groom,
             samples=max(int(samples), 4),
-            use_gravity_sag=False,
             shape_normal_mode=self.strand_shape_normal_mode,
         )
         return strands
@@ -2871,8 +3089,12 @@ class WhiteTigerStage1Model(torch.nn.Module):
         ranges = self.groom.ranges
         device = self.vertices.device
         old_params = {name: param.detach() for name, param in self.groom.named_parameters()}
+        old_geometry_residual = (
+            {name: param.detach() for name, param in self.render_geometry_residual.named_parameters()}
+            if self.render_geometry_residual is not None
+            else None
+        )
         old_child_color_delta = self.child_color_delta_raw.detach() if self.child_color_delta_raw is not None else None
-        old_child_opacity_delta = self.child_opacity_delta_raw.detach() if self.child_opacity_delta_raw is not None else None
         child_count = int(update.new_barycentric.shape[0])
         child_points = (
             (
@@ -2911,46 +3133,21 @@ class WhiteTigerStage1Model(torch.nn.Module):
         def interpolate_source(source: torch.Tensor) -> torch.Tensor:
             return interpolate_physical(source, child_ids, child_weights) if child_count else empty_like_source(source)
 
-        def apply_overlong_override(name: str, child: torch.Tensor) -> torch.Tensor:
-            if child.numel() > 0:
-                override_key = f"overlong_child_{name}"
-                if override_key in update.scores:
-                    mask_key = f"{override_key}_mask"
-                    if mask_key in update.scores:
-                        override_mask = update.scores[mask_key].to(device=child.device, dtype=torch.bool).reshape(-1)
-                    elif "overlong_child_mask" in update.scores:
-                        override_mask = update.scores["overlong_child_mask"].to(device=child.device, dtype=torch.bool).reshape(-1)
-                    else:
-                        raise RuntimeError(f"{override_key} override requires a child mask")
-                    if override_mask.shape[0] != child.shape[0]:
-                        raise RuntimeError(f"{override_key} mask does not match inserted child count")
-                    if bool(override_mask.any()):
-                        child = child.clone()
-                        override = update.scores[override_key].to(device=child.device, dtype=child.dtype)
-                        if override.shape != child.shape:
-                            raise RuntimeError(f"{override_key} override shape mismatch")
-                        child[override_mask] = override[override_mask]
-            return child
-
         decoded = self.groom.decode()
-        tip_width_ratio = (decoded.tip_width / decoded.root_width.clamp_min(EPS)).clamp(
-            float(ranges.tip_width_ratio[0]),
-            float(ranges.tip_width_ratio[1]),
-        )
-        tip_opacity_ratio = (decoded.tip_opacity / decoded.root_opacity.clamp_min(EPS)).clamp(
-            float(ranges.tip_opacity_ratio[0]),
-            float(ranges.tip_opacity_ratio[1]),
-        )
+        old_length_reference = self.groom.length_reference.detach()
+        old_root_width_reference = self.groom.root_width_reference.detach()
+        old_child_radius_reference = self.groom.child_radius_reference.detach()
+        child_length_reference = interpolate_source(old_length_reference)
+        child_root_width_reference = interpolate_source(old_root_width_reference)
+        child_child_radius_reference = interpolate_source(old_child_radius_reference)
+        tip_width_ratio = decoded.tip_width / decoded.root_width.clamp_min(EPS)
+        tip_opacity_ratio = decoded.tip_opacity / decoded.root_opacity.clamp_min(EPS)
         physical_sources = {
             "length_raw": decoded.length.detach(),
             "root_width_raw": decoded.root_width.detach(),
             "tip_width_ratio_raw": tip_width_ratio.detach(),
             "width_taper_raw": decoded.width_taper.detach(),
-            "flow_strength_raw": decoded.flow_strength.detach(),
-            "lift_raw": decoded.lift.detach(),
             "bend_raw": decoded.bend.detach(),
-            "sag_raw": decoded.sag.detach(),
-            "stiffness_raw": decoded.stiffness.detach(),
             "curl_radius_raw": decoded.curl_radius.detach(),
             "curl_frequency_raw": decoded.curl_frequency.detach(),
             "frizz_raw": decoded.frizz.detach(),
@@ -2962,29 +3159,41 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "tip_opacity_ratio_raw": tip_opacity_ratio.detach(),
         }
         raw_bounds = {
-            "length_raw": ranges.length,
-            "root_width_raw": ranges.root_width,
-            "tip_width_ratio_raw": ranges.tip_width_ratio,
-            "width_taper_raw": ranges.width_taper,
-            "flow_strength_raw": ranges.flow_strength,
-            "lift_raw": ranges.lift,
-            "sag_raw": ranges.sag,
-            "stiffness_raw": ranges.stiffness,
             "curl_radius_raw": ranges.curl_radius,
             "curl_frequency_raw": ranges.curl_frequency,
             "frizz_raw": ranges.frizz,
-            "child_radius_raw": ranges.child_radius,
             "clump_strength_raw": ranges.clump_strength,
-            "opacity_raw": ranges.opacity,
-            "tip_opacity_ratio_raw": ranges.tip_opacity_ratio,
         }
         child_raw: dict[str, torch.Tensor] = {}
         for name, source in physical_sources.items():
             child_value = interpolate_source(source)
             if name == "bend_raw":
                 child_raw[name] = torch.atanh(child_value.clamp(-0.999, 0.999))
-            elif name in {"root_color_raw", "tip_color_raw"}:
-                child_raw[name] = inv_sigmoid(child_value.clamp(1.0e-5, 1.0 - 1.0e-5))
+            elif name == "length_raw":
+                child_raw[name] = encode_positive_asinh_ratio(
+                    child_value,
+                    child_length_reference,
+                )
+            elif name == "root_width_raw":
+                child_raw[name] = encode_positive_asinh_ratio(
+                    child_value,
+                    child_root_width_reference,
+                )
+            elif name == "width_taper_raw":
+                child_raw[name] = encode_positive_asinh(child_value)
+            elif name == "child_radius_raw":
+                child_raw[name] = encode_positive_asinh_ratio(
+                    child_value,
+                    child_child_radius_reference,
+                )
+            elif name in {
+                "tip_width_ratio_raw",
+                "root_color_raw",
+                "tip_color_raw",
+                "opacity_raw",
+                "tip_opacity_ratio_raw",
+            }:
+                child_raw[name] = inv_sigmoid(child_value)
             else:
                 child_raw[name] = raw_from_range(child_value, raw_bounds[name])
         child_raw["curl_phase"] = (
@@ -2993,10 +3202,8 @@ class WhiteTigerStage1Model(torch.nn.Module):
             else self.groom.curl_phase.new_empty((0, 1))
         )
         if child_count:
-            source_direction = controls_direction_3d(
-                decoded.flow_xy.detach(),
-                decoded.flow_strength.detach(),
-                decoded.lift.detach(),
+            source_direction = groom_direction_3d(
+                decoded,
                 old_normals,
                 old_tangents,
                 old_bitangents,
@@ -3008,29 +3215,134 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 child_ids,
                 child_weights,
             )
-            child_flow, child_lift, child_strength = direction_to_flow_lift_strength(
+            child_raw["direction_local_raw"] = direction_to_local_components(
                 child_direction,
                 child_normals,
                 child_tangents,
                 child_bitangents,
-                lift_bounds=ranges.lift,
-                flow_strength_bounds=ranges.flow_strength,
             )
-            child_raw["flow_xy"] = child_flow
-            child_raw["lift_raw"] = raw_from_range(child_lift, ranges.lift)
-            child_raw["flow_strength_raw"] = raw_from_range(child_strength, ranges.flow_strength)
         else:
-            child_raw["flow_xy"] = self.groom.flow_xy.new_empty((0, 2))
+            child_raw["direction_local_raw"] = self.groom.direction_local_raw.new_empty((0, 3))
 
         new_values = {
-            name: apply_attribute_update(values, update, apply_overlong_override(name, child_raw[name]))
+            name: apply_attribute_update(values, update, child_raw[name])
             for name, values in old_params.items()
         }
 
+        new_geometry_residual_values: dict[str, torch.Tensor] | None = None
+        if self.render_geometry_residual is not None:
+            residual_decoded = self.render_geometry_residual.decode()
+            new_geometry_residual_values = {}
+            asinh_coordinate_names = {
+                "root_width": "root_width_log_ratio",
+                "tip_width_ratio": "tip_width_logit_delta",
+                "width_taper": "width_taper_log_ratio",
+                "child_radius": "child_radius_log_ratio",
+            }
+            for name in RenderGeometryResidualField.SCALAR_NAMES:
+                raw_name = f"{name}_raw"
+                if (
+                    name == "length"
+                    and self.render_geometry_parameterization
+                    in {
+                        "zero_centered_unbounded_log_length_residual",
+                        "zero_centered_asinh_log_length_residual",
+                    }
+                ):
+                    child_raw_value = interpolate_source(
+                        old_geometry_residual[raw_name]
+                    )
+                elif name in asinh_coordinate_names:
+                    source = getattr(
+                        residual_decoded,
+                        asinh_coordinate_names[name],
+                    ).detach()
+                    child_coordinate = interpolate_source(source)
+                    child_raw_value = torch.sinh(child_coordinate)
+                else:
+                    source = getattr(residual_decoded, name).detach()
+                    child_value = interpolate_source(source)
+                    child_raw_value = torch.atanh(child_value.clamp(-0.999, 0.999))
+                new_geometry_residual_values[raw_name] = apply_attribute_update(
+                    old_geometry_residual[raw_name],
+                    update,
+                    child_raw_value,
+                )
+
+            source_local = residual_decoded.direction_local.detach()
+            if child_count:
+                source_world = local_components_to_world(
+                    source_local,
+                    old_normals,
+                    old_tangents,
+                    old_bitangents,
+                    normalize=False,
+                )
+                neighbor_world = source_world[child_ids]
+                neighbor_magnitude = torch.linalg.norm(neighbor_world, dim=-1, keepdim=True)
+                transported = parallel_transport_vectors(
+                    neighbor_world,
+                    old_normals[child_ids],
+                    child_normals[:, None, :].expand_as(neighbor_world),
+                ) * neighbor_magnitude
+                child_world = (transported * child_weights[..., None]).sum(dim=1)
+                child_local = vector_to_local_components(
+                    child_world,
+                    child_normals,
+                    child_tangents,
+                    child_bitangents,
+                )
+                child_direction_raw = torch.atanh(child_local.clamp(-0.999, 0.999))
+            else:
+                child_direction_raw = source_local.new_empty((0, 3))
+            new_geometry_residual_values["direction_local_raw"] = apply_attribute_update(
+                old_geometry_residual["direction_local_raw"],
+                update,
+                child_direction_raw,
+            )
+
         new_state = apply_structure_update(old_state, update, self.vertices, self.faces)
         new_count = int(new_state.points.shape[0])
-        new_groom = GroomParameterField(new_count, ranges=ranges, device=device)
+        new_length_reference = apply_attribute_update(
+            old_length_reference,
+            update,
+            child_length_reference,
+        )
+        new_root_width_reference = apply_attribute_update(
+            old_root_width_reference,
+            update,
+            child_root_width_reference,
+        )
+        new_child_radius_reference = apply_attribute_update(
+            old_child_radius_reference,
+            update,
+            child_child_radius_reference,
+        )
+        new_groom = GroomParameterField(
+            new_count,
+            ranges=ranges,
+            init_length=self.init_groom_length,
+            device=device,
+        )
         with torch.no_grad():
+            new_groom.length_reference.copy_(
+                new_length_reference.to(
+                    device=device,
+                    dtype=new_groom.length_reference.dtype,
+                )
+            )
+            new_groom.root_width_reference.copy_(
+                new_root_width_reference.to(
+                    device=device,
+                    dtype=new_groom.root_width_reference.dtype,
+                )
+            )
+            new_groom.child_radius_reference.copy_(
+                new_child_radius_reference.to(
+                    device=device,
+                    dtype=new_groom.child_radius_reference.dtype,
+                )
+            )
             new_params = dict(new_groom.named_parameters())
             for name, value in new_values.items():
                 if name not in new_params:
@@ -3044,12 +3356,21 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.anchor_local = new_state.points.detach()
         self.bary_logits = torch.nn.Parameter(torch.log(self.bary_initial.clamp_min(1.0e-5)))
         self.groom = new_groom
+        if new_geometry_residual_values is not None:
+            new_geometry_residual = RenderGeometryResidualField(new_count, device=device)
+            with torch.no_grad():
+                for name, param in new_geometry_residual.named_parameters():
+                    value = new_geometry_residual_values[name]
+                    if tuple(param.shape) != tuple(value.shape):
+                        raise RuntimeError(
+                            f"geometry residual shape mismatch for {name}: "
+                            f"{tuple(param.shape)} != {tuple(value.shape)}"
+                        )
+                    param.copy_(value.to(device=device, dtype=param.dtype))
+            self.render_geometry_residual = new_geometry_residual
         if old_child_color_delta is not None:
             child_delta = interpolate_source(old_child_color_delta)
             self.child_color_delta_raw = torch.nn.Parameter(apply_attribute_update(old_child_color_delta, update, child_delta))
-        if old_child_opacity_delta is not None:
-            child_delta = interpolate_source(old_child_opacity_delta)
-            self.child_opacity_delta_raw = torch.nn.Parameter(apply_attribute_update(old_child_opacity_delta, update, child_delta))
         old_conf = self.root_observation_confidence.detach()
         child_conf = (
             interpolate_source(old_conf[:, None]).reshape(-1)
@@ -3090,33 +3411,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
         return {"old_root_count": old_count, "root_count_after": new_count}
 
 
-def compatible_model_state_dict(model: WhiteTigerStage1Model, state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Patch only explicit backward-compatible buffers for strict checkpoint load."""
-
-    patched = dict(state)
-    model_state = model.state_dict()
-    if "guide_region_weight" in model_state and "guide_region_weight" not in patched:
-        patched["guide_region_weight"] = model_state["guide_region_weight"].detach().to(device="cpu")
-    for key in (
-        "clean_flow_length_target",
-        "clean_flow_length_confidence",
-        "guide_clean_flow_length_target",
-        "guide_clean_flow_length_confidence",
-        "child_color_delta_raw",
-        "child_opacity_delta_raw",
-    ):
-        if key in model_state and key not in patched:
-            patched[key] = model_state[key].detach().to(device="cpu")
-    return patched
-
-
 @torch.no_grad()
 def initialize_groom_from_projections(
     model: WhiteTigerStage1Model,
     image_paths: list[Path],
     mask_paths: list[Path],
-    angle_paths: list[Path],
-    conf_paths: list[Path],
     viewmats: torch.Tensor,
     ks: torch.Tensor,
     train_indices: list[int],
@@ -3128,10 +3427,8 @@ def initialize_groom_from_projections(
     if config.projected_init_views <= 0:
         return {"projected_init_view_count": 0}
     roots, normals, _ = model.roots_and_normals()
-    tangents, bitangents = model.tangent_frames(normals)
     root_count = int(roots.shape[0])
     color_sum = torch.zeros((root_count, 3), device=device)
-    flow_sum = torch.zeros((root_count, 2), device=device)
     weight_sum = torch.zeros((root_count, 1), device=device)
     chosen = train_indices[: max(1, min(int(config.projected_init_views), len(train_indices)))]
     mesh_for_visibility = TriangleMesh(
@@ -3142,7 +3439,6 @@ def initialize_groom_from_projections(
         faces=model.faces.detach().cpu().numpy().astype(np.int32),
     )
 
-    default_flow = F.normalize(model.groom.flow_xy.detach(), dim=-1)
     setup_progress(
         "projected_init_start",
         root_count=int(root_count),
@@ -3153,8 +3449,6 @@ def initialize_groom_from_projections(
         image = load_image(image_paths[idx], device)
         mask = load_mask(mask_paths[idx], device)
         mask_conf = mask_edge_confidence(mask, config.projected_init_mask_edge_kernel)
-        target_orientation, target_conf = load_orientation(angle_paths[idx], conf_paths[idx], (width, height), bins=180, device=device)
-        target_conf = target_conf * mask * mask_conf
         mesh_depth = render_mesh_depth(mesh_for_visibility, viewmats[idx], ks[idx], width, height, device=device)
         root_vis = sample_mesh_visible_points(
             roots,
@@ -3168,25 +3462,15 @@ def initialize_groom_from_projections(
             front_normal_z=config.projected_init_front_normal_z,
         )
         sampled_mask = bilinear_sample(mask, root_vis.xy)[:, 0]
-        sampled_conf = bilinear_sample(target_conf, root_vis.xy)[:, 0]
+        sampled_conf = bilinear_sample(mask_conf, root_vis.xy)[:, 0]
         angle_weight = view_angle_weight(normals, viewmats[idx], config.projected_init_view_angle_power)
         weight = (sampled_mask * sampled_conf * angle_weight * root_vis.visible.to(sampled_mask.dtype)).clamp(0.0, 1.0)
         good = weight >= float(config.projected_init_min_confidence)
         if not bool(good.any()):
             continue
         sampled_color = bilinear_sample(image, root_vis.xy).clamp(0.0, 1.0)
-        sampled_ori = F.normalize(bilinear_sample(target_orientation, root_vis.xy), dim=-1, eps=1.0e-8)
-        screen_t = project_directions(roots, tangents, viewmats[idx], ks[idx])
-        screen_b = project_directions(roots, bitangents, viewmats[idx], ks[idx])
-        screen_default = F.normalize(default_flow[:, [0]] * screen_t + default_flow[:, [1]] * screen_b, dim=-1, eps=1.0e-8)
-        signed_ori = torch.where((sampled_ori * screen_default).sum(dim=-1, keepdim=True) < 0.0, -sampled_ori, sampled_ori)
-        basis = torch.stack([screen_t, screen_b], dim=-1)
-        coeff = torch.linalg.pinv(basis) @ signed_ori[:, :, None]
-        coeff = coeff.squeeze(-1)
-        coeff = F.normalize(coeff, dim=-1, eps=1.0e-8)
         w = weight[:, None]
         color_sum[good] += sampled_color[good] * w[good]
-        flow_sum[good] += coeff[good] * w[good]
         weight_sum[good] += w[good]
         setup_progress(
             "projected_init_view_done",
@@ -3207,9 +3491,7 @@ def initialize_groom_from_projections(
         conf_norm = torch.quantile(root_conf[observed], 0.95).clamp_min(1.0e-6)
         root_conf = (root_conf / conf_norm).clamp(0.0, 1.0)
         colors = groom.root_color.detach().clone()
-        flows = F.normalize(groom.flow_xy.detach().clone(), dim=-1, eps=1.0e-8)
         colors[observed] = (color_sum[observed] / weight_sum[observed].clamp_min(EPS)).clamp(0.02, 0.98)
-        flows[observed] = F.normalize(flow_sum[observed] / weight_sum[observed].clamp_min(EPS), dim=-1, eps=1.0e-8)
         colors, filled_color = interpolate_unobserved_root_values(
             roots,
             colors,
@@ -3218,16 +3500,7 @@ def initialize_groom_from_projections(
             neighbor_count=8,
             normalize_vectors=False,
         )
-        flows, filled_flow = interpolate_unobserved_root_values(
-            roots,
-            flows,
-            observed,
-            root_conf,
-            neighbor_count=8,
-            normalize_vectors=True,
-        )
-        filled = filled_color & filled_flow
-        model.groom.flow_xy[filled] = flows[filled]
+        filled = filled_color
         model.groom.root_color_raw[filled] = inv_sigmoid(colors[filled].clamp(0.02, 0.98))
         model.groom.tip_color_raw[filled] = inv_sigmoid((0.88 * colors[filled] + 0.12).clamp(0.02, 0.98))
         model.root_observation_confidence = root_conf.detach()
@@ -3255,6 +3528,7 @@ def initialize_groom_from_clean_flow(
 ) -> dict[str, float | int | str]:
     roots, normals, _ = model.roots_and_normals()
     tangents, bitangents = model.tangent_frames(normals)
+    guide_driven_clean_flow = bool(model.guide_enabled()) and bool(config.guide_roots_from_clean_flow)
     init_sample = sample_clean_flow_targets(
         targets,
         roots,
@@ -3281,17 +3555,37 @@ def initialize_groom_from_clean_flow(
     )
     valid_init = init_sample["valid"] & (init_sample["confidence"] >= float(config.clean_flow_init_min_confidence))
     valid_anchor = anchor_sample["valid"] & (anchor_sample["confidence"] >= float(config.clean_flow_anchor_min_confidence))
-    valid_length = length_sample["valid"] & (length_sample["shell_height"] > 0.0)
-    length_min = max(float(config.clean_flow_length_init_min), float(model.groom.ranges.length[0]))
-    length_max = float(config.clean_flow_length_init_max) if float(config.clean_flow_length_init_max) > 0.0 else float(model.groom.ranges.length[1])
-    length_max = min(length_max, float(model.groom.ranges.length[1]))
-    if length_max <= length_min:
-        raise RuntimeError(
-            f"invalid clean-flow length init bounds: min={length_min}, max={length_max}"
+    render_valid_init = valid_init if not guide_driven_clean_flow else torch.zeros_like(valid_init)
+    render_valid_anchor = valid_anchor if not guide_driven_clean_flow else torch.zeros_like(valid_anchor)
+    if bool(config.clean_flow_length_init) and not guide_driven_clean_flow:
+        render_length_edges, _ = rebuild_graph_edges(
+            model,
+            mode="surface_hierarchical",
+            k=max(1, int(config.clean_flow_init_k)),
         )
-    root_length = (
-        length_sample["shell_height"] * float(config.clean_flow_length_init_scale)
-    ).clamp(length_min, length_max).reshape(-1, 1)
+        (
+            root_length,
+            valid_length,
+            filled_length,
+            length_min,
+            length_max,
+            length_source_count,
+            length_reliable_count,
+        ) = data_clamped_clean_flow_length(
+            roots,
+            render_length_edges,
+            length_sample,
+            config,
+            label="render-root clean-flow length init",
+        )
+    else:
+        root_length = torch.zeros((roots.shape[0], 1), device=roots.device, dtype=roots.dtype)
+        valid_length = torch.zeros((roots.shape[0],), device=roots.device, dtype=torch.bool)
+        filled_length = valid_length.clone()
+        length_min = 0.0
+        length_max = 0.0
+        length_source_count = 0
+        length_reliable_count = 0
     model.clean_flow_length_target = torch.where(
         valid_length,
         root_length.reshape(-1),
@@ -3302,40 +3596,56 @@ def initialize_groom_from_clean_flow(
         length_sample["confidence"],
         torch.zeros_like(length_sample["confidence"]),
     ).detach().clamp(0.0, 1.0)
-    root_flow, root_lift, root_flow_strength = direction_to_flow_lift_strength(
-        init_sample["direction"],
-        normals,
-        tangents,
-        bitangents,
-        lift_bounds=(float(config.clean_flow_lift_min), float(config.clean_flow_lift_max)),
-        flow_strength_bounds=model.groom.ranges.flow_strength,
-    )
-    if bool(config.clean_flow_init) and bool(valid_init.any()):
-        model.groom.flow_xy[valid_init] = root_flow[valid_init]
-        if bool(config.clean_flow_init_lift):
-            model.groom.lift_raw[valid_init] = raw_from_range(root_lift[valid_init], model.groom.ranges.lift)
-            model.groom.flow_strength_raw[valid_init] = raw_from_range(
-                root_flow_strength[valid_init],
-                model.groom.ranges.flow_strength,
+    if bool(config.clean_flow_init) and not guide_driven_clean_flow:
+        render_direction_edges, _ = rebuild_graph_edges(
+            model,
+            mode="surface_hierarchical",
+            k=max(1, int(config.clean_flow_init_k)),
+        )
+        render_direction, render_direction_reliability, render_direction_supported = (
+            reconstruct_clean_flow_directions(
+                roots,
+                init_sample["direction"],
+                normals,
+                valid_init,
+                init_sample["confidence"],
+                render_direction_edges,
+                label="render-root clean-flow direction init",
             )
-        if bool(config.clean_flow_length_init) and bool(valid_length.any()):
-            model.groom.length_raw[valid_length] = raw_from_range(
-                root_length[valid_length],
-                model.groom.ranges.length,
+        )
+        model.groom.direction_local_raw.copy_(
+            direction_to_local_components(
+                render_direction,
+                normals,
+                tangents,
+                bitangents,
             )
+        )
+        filled_init = render_direction_supported
+        if bool(config.clean_flow_length_init) and bool(filled_length.any()):
+            model.groom.length_reference[filled_length] = root_length[filled_length]
+            model.groom.length_raw[filled_length].zero_()
         model.root_observation_confidence = torch.maximum(
             model.root_observation_confidence.detach(),
             init_sample["confidence"].detach().clamp(0.0, 1.0),
         )
+    else:
+        filled_init = torch.zeros((roots.shape[0],), device=roots.device, dtype=torch.bool)
+        render_direction_reliability = torch.zeros_like(init_sample["confidence"])
+        render_direction_supported = filled_init
     model.clean_flow_direction_target = anchor_sample["direction"].detach()
     model.clean_flow_anchor_confidence = torch.where(
-        valid_anchor,
+        render_valid_anchor,
         anchor_sample["confidence"],
         torch.zeros_like(anchor_sample["confidence"]),
     ).detach().clamp(0.0, 1.0)
 
     guide_observed = 0
     guide_anchor = 0
+    guide_direction_reconstruction_count = 0
+    guide_direction_reconstruction_change_mean = 0.0
+    guide_direction_reconstruction_change_p95 = 0.0
+    guide_direction_reconstruction_reliability_mean = 0.0
     if model.guide_enabled():
         guide_points = model.guide_points_local * torch.exp(model.log_scale.detach()).view(1, 1) + model.translation.detach().view(1, 3)
         guide_normals, guide_tangents, guide_bitangents = model.guide_normals_and_tangent_frames()
@@ -3365,17 +3675,33 @@ def initialize_groom_from_clean_flow(
         )
         guide_valid_init = guide_init["valid"] & (guide_init["confidence"] >= float(config.clean_flow_init_min_confidence))
         guide_valid_anchor = guide_anchor_sample["valid"] & (guide_anchor_sample["confidence"] >= float(config.clean_flow_anchor_min_confidence))
-        guide_valid_length = guide_length_sample["valid"] & (guide_length_sample["shell_height"] > 0.0)
-        guide_length_min = max(float(config.clean_flow_length_init_min), float(model.groom.ranges.length[0]))
-        guide_length_max = float(config.clean_flow_length_init_max) if float(config.clean_flow_length_init_max) > 0.0 else float(model.groom.ranges.length[1])
-        guide_length_max = min(guide_length_max, float(model.groom.ranges.length[1]))
-        if guide_length_max <= guide_length_min:
-            raise RuntimeError(
-                f"invalid clean-flow guide length init bounds: min={guide_length_min}, max={guide_length_max}"
+        if bool(config.clean_flow_length_init):
+            guide_length_edges = model.guide_surface_smoothing_edges(
+                max(1, int(config.clean_flow_init_k))
             )
-        guide_length = (
-            guide_length_sample["shell_height"] * float(config.clean_flow_length_init_scale)
-        ).clamp(guide_length_min, guide_length_max).reshape(-1, 1)
+            (
+                guide_length,
+                guide_valid_length,
+                guide_filled_length,
+                guide_length_min,
+                guide_length_max,
+                guide_length_source_count,
+                guide_length_reliable_count,
+            ) = data_clamped_clean_flow_length(
+                guide_points,
+                guide_length_edges,
+                guide_length_sample,
+                config,
+                label="guide-root clean-flow length init",
+            )
+        else:
+            guide_length = torch.zeros((guide_points.shape[0], 1), device=guide_points.device, dtype=guide_points.dtype)
+            guide_valid_length = torch.zeros((guide_points.shape[0],), device=guide_points.device, dtype=torch.bool)
+            guide_filled_length = guide_valid_length.clone()
+            guide_length_min = 0.0
+            guide_length_max = 0.0
+            guide_length_source_count = 0
+            guide_length_reliable_count = 0
         model.guide_clean_flow_length_target = torch.where(
             guide_valid_length,
             guide_length.reshape(-1),
@@ -3386,167 +3712,122 @@ def initialize_groom_from_clean_flow(
             guide_length_sample["confidence"],
             torch.zeros_like(guide_length_sample["confidence"]),
         ).detach().clamp(0.0, 1.0)
-        guide_flow, guide_lift, guide_flow_strength = direction_to_flow_lift_strength(
-            guide_init["direction"],
-            guide_normals,
-            guide_tangents,
-            guide_bitangents,
-            lift_bounds=(float(config.clean_flow_lift_min), float(config.clean_flow_lift_max)),
-            flow_strength_bounds=model.groom.ranges.flow_strength,
-        )
-        if bool(config.clean_flow_init) and model.guide_flow_xy is not None and bool(guide_valid_init.any()):
-            model.guide_flow_xy[guide_valid_init] = guide_flow[guide_valid_init]
-            if bool(config.clean_flow_init_lift):
-                model.guide_lift_raw[guide_valid_init] = raw_from_range(guide_lift[guide_valid_init], model.groom.ranges.lift)
-                model.guide_flow_strength_raw[guide_valid_init] = raw_from_range(
-                    guide_flow_strength[guide_valid_init],
-                    model.groom.ranges.flow_strength,
-                )
-            if bool(config.clean_flow_length_init) and bool(guide_valid_length.any()):
-                model.guide_length_raw[guide_valid_length] = raw_from_range(
-                    guide_length[guide_valid_length],
-                    model.groom.ranges.length,
-                )
-        model.guide_clean_flow_direction_target = guide_anchor_sample["direction"].detach()
-        model.guide_clean_flow_anchor_confidence = torch.where(
+        guide_anchor_confidence = torch.where(
             guide_valid_anchor,
             guide_anchor_sample["confidence"],
             torch.zeros_like(guide_anchor_sample["confidence"]),
         ).detach().clamp(0.0, 1.0)
+        if bool(config.clean_flow_init):
+            guide_direction_edges = model.guide_surface_smoothing_edges(
+                max(1, int(config.clean_flow_init_k))
+            )
+            guide_direction_before = torch.where(
+                guide_valid_anchor[:, None],
+                guide_anchor_sample["direction"],
+                guide_init["direction"],
+            )
+            (
+                guide_direction_reconstructed,
+                guide_direction_reliability,
+                guide_direction_supported,
+            ) = reconstruct_clean_flow_directions(
+                guide_points,
+                guide_direction_before,
+                guide_normals,
+                guide_valid_anchor,
+                guide_anchor_confidence,
+                guide_direction_edges,
+                label="guide-root clean-flow direction init",
+            )
+            model.guide_direction_local_raw.copy_(
+                direction_to_local_components(
+                    guide_direction_reconstructed,
+                    guide_normals,
+                    guide_tangents,
+                    guide_bitangents,
+                )
+            )
+            guide_filled_init = guide_direction_supported
+            if bool(config.clean_flow_length_init) and bool(guide_filled_length.any()):
+                model.guide_length_reference[guide_filled_length] = guide_length[
+                    guide_filled_length
+                ]
+                model.guide_length_raw[guide_filled_length].zero_()
+            direction_cosine = (
+                guide_direction_before * guide_direction_reconstructed
+            ).sum(dim=-1).clamp(-1.0, 1.0)
+            direction_change = torch.rad2deg(torch.acos(direction_cosine))
+            guide_direction_reconstruction_count = int(
+                guide_direction_supported.sum().detach().cpu()
+            )
+            guide_direction_reconstruction_change_mean = float(
+                direction_change.mean().detach().cpu()
+            )
+            guide_direction_reconstruction_change_p95 = float(
+                torch.quantile(direction_change, 0.95).detach().cpu()
+            )
+            guide_direction_reconstruction_reliability_mean = float(
+                guide_direction_reliability.mean().detach().cpu()
+            )
+            model.guide_clean_flow_direction_target = guide_direction_reconstructed.detach()
+            model.guide_clean_flow_anchor_confidence = guide_direction_reliability.detach()
+        else:
+            guide_filled_init = torch.zeros_like(guide_valid_init)
+            model.guide_clean_flow_direction_target = guide_anchor_sample["direction"].detach()
+            model.guide_clean_flow_anchor_confidence = guide_anchor_confidence
         guide_observed = int(guide_valid_init.sum().detach().cpu())
         guide_anchor = int(guide_valid_anchor.sum().detach().cpu())
+    else:
+        guide_length_source_count = 0
+        guide_length_reliable_count = 0
+        guide_filled_length = torch.zeros((0,), dtype=torch.bool, device=roots.device)
+        guide_filled_init = torch.zeros((0,), dtype=torch.bool, device=roots.device)
+        guide_length_min = 0.0
+        guide_length_max = 0.0
 
-    observed = int(valid_init.sum().detach().cpu())
-    anchor = int(valid_anchor.sum().detach().cpu())
+    observed = int(render_valid_init.sum().detach().cpu())
+    anchor = int(render_valid_anchor.sum().detach().cpu())
     length_count = int(valid_length.sum().detach().cpu())
-    length_values = (
-        length_sample["shell_height"][valid_length] * float(config.clean_flow_length_init_scale)
-    ) if length_count else torch.empty((0,), device=roots.device)
-    length_values = length_values.clamp(
-        max(float(config.clean_flow_length_init_min), float(model.groom.ranges.length[0])),
-        min(
-            float(config.clean_flow_length_init_max) if float(config.clean_flow_length_init_max) > 0.0 else float(model.groom.ranges.length[1]),
-            float(model.groom.ranges.length[1]),
-        ),
-    ) if length_count else length_values
+    length_filled_count = int(filled_length.sum().detach().cpu())
+    length_values = root_length[valid_length].reshape(-1) if length_count else torch.empty((0,), device=roots.device)
     return {
         "clean_flow_enabled": 1,
         "clean_flow_source": targets.source_path,
         "clean_flow_init": int(bool(config.clean_flow_init)),
-        "clean_flow_init_lift": int(bool(config.clean_flow_init_lift)),
+        "clean_flow_guide_driven": int(guide_driven_clean_flow),
+        "clean_flow_render_root_init_skipped": int(guide_driven_clean_flow),
         "clean_flow_length_init": int(bool(config.clean_flow_length_init)),
         "clean_flow_length_init_scale": float(config.clean_flow_length_init_scale),
         "clean_flow_length_init_min_confidence": float(config.clean_flow_length_init_min_confidence),
         "clean_flow_length_init_count": length_count,
+        "clean_flow_length_init_source_count": int(length_source_count),
+        "clean_flow_length_init_reliable_count": int(length_reliable_count),
+        "clean_flow_length_init_filled_count": length_filled_count,
+        "clean_flow_length_init_q05": float(length_min),
+        "clean_flow_length_init_q95": float(length_max),
         "clean_flow_length_init_mean": float(length_values.mean().detach().cpu()) if length_count else 0.0,
         "clean_flow_length_init_p50": float(torch.quantile(length_values, 0.50).detach().cpu()) if length_count else 0.0,
         "clean_flow_length_init_p95": float(torch.quantile(length_values, 0.95).detach().cpu()) if length_count else 0.0,
         "clean_flow_root_init_count": observed,
+        "clean_flow_root_init_filled_count": int(filled_init.sum().detach().cpu()),
         "clean_flow_root_anchor_count": anchor,
-        "clean_flow_root_init_fraction": float(valid_init.float().mean().detach().cpu()),
-        "clean_flow_root_anchor_fraction": float(valid_anchor.float().mean().detach().cpu()),
+        "clean_flow_root_init_fraction": float(render_valid_init.float().mean().detach().cpu()),
+        "clean_flow_root_anchor_fraction": float(render_valid_anchor.float().mean().detach().cpu()),
         "clean_flow_root_nearest_mean": float(init_sample["nearest_distance"].mean().detach().cpu()),
         "clean_flow_root_nearest_max": float(init_sample["nearest_distance"].max().detach().cpu()),
         "clean_flow_init_confidence_mean": float(init_sample["confidence"][valid_init].mean().detach().cpu()) if observed else 0.0,
         "clean_flow_anchor_confidence_mean": float(anchor_sample["confidence"][valid_anchor].mean().detach().cpu()) if anchor else 0.0,
         "clean_flow_guide_init_count": guide_observed,
+        "clean_flow_guide_init_filled_count": int(guide_filled_init.sum().detach().cpu()),
         "clean_flow_guide_anchor_count": guide_anchor,
-        "clean_flow_lift_min": float(config.clean_flow_lift_min),
-        "clean_flow_lift_max": float(config.clean_flow_lift_max),
-    }
-
-
-@torch.no_grad()
-def initialize_guide_controls_from_roots(
-    model: WhiteTigerStage1Model,
-    *,
-    preserve_direction_controls: bool = False,
-) -> dict[str, float | int]:
-    if not model.guide_enabled():
-        return {"guide_init_enabled": 0}
-    _, _, roots_local = model.roots_and_normals()
-    guide_count = int(model.guide_points_local.shape[0])
-    root_count = int(roots_local.shape[0])
-    if guide_count == 0 or root_count == 0:
-        return {"guide_init_enabled": 0}
-
-    k = min(max(1, int(model.guide_interpolation_k)), root_count)
-    groom = model.groom.decode()
-    _, normals, _ = model.roots_and_normals()
-    tangents, bitangents = model.tangent_frames(normals)
-    root_direction = groom_direction_3d(groom, normals, tangents, bitangents)
-    guide_normals, guide_tangents, guide_bitangents = model.guide_normals_and_tangent_frames()
-    root_conf = model.root_observation_confidence.detach().reshape(-1).clamp(0.0, 1.0)
-    support = build_local_surface_support(
-        faces=model.faces,
-        source_points=roots_local.detach(),
-        source_face_ids=model.face_ids.detach(),
-        query_points=model.guide_points_local.detach(),
-        query_face_ids=model.guide_face_ids.detach(),
-        neighbor_count=k,
-    )
-    ids = support.indices
-    weights = local_surface_weights(model.guide_points_local, roots_local.detach(), support)
-    confidence_weight = (0.15 + root_conf[ids]).clamp_min(0.15)
-    weights = weights * confidence_weight
-    weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(EPS)
-    guide_targets = {
-        "length": groom.length,
-        "root_width": groom.root_width,
-        "flow_strength": groom.flow_strength,
-        "lift": groom.lift,
-        "bend": groom.bend,
-        "stiffness": groom.stiffness,
-        "curl_radius": groom.curl_radius,
-        "frizz": groom.frizz,
-        "child_radius": groom.child_radius,
-        "clump_strength": groom.clump_strength,
-    }
-    guide_values = {
-        name: interpolate_physical(target, ids, weights)
-        for name, target in guide_targets.items()
-    }
-    direction = interpolate_directions(
-        root_direction,
-        normals,
-        guide_normals,
-        ids,
-        weights,
-    )
-    tangent_part = direction - (direction * guide_normals).sum(dim=-1, keepdim=True) * guide_normals
-    guide_flow = F.normalize(
-        torch.stack(
-            [
-                (tangent_part * guide_tangents).sum(dim=-1),
-                (tangent_part * guide_bitangents).sum(dim=-1),
-            ],
-            dim=-1,
-        ),
-        dim=-1,
-        eps=1.0e-8,
-    )
-    guide_confidence = interpolate_physical(root_conf, ids, weights)
-    model.guide_length_raw.copy_(raw_from_range(guide_values["length"], model.groom.ranges.length))
-    model.guide_root_width_raw.copy_(raw_from_range(guide_values["root_width"], model.groom.ranges.root_width))
-    if not preserve_direction_controls:
-        model.guide_flow_strength_raw.copy_(raw_from_range(guide_values["flow_strength"], model.groom.ranges.flow_strength))
-        model.guide_lift_raw.copy_(raw_from_range(guide_values["lift"], model.groom.ranges.lift))
-    model.guide_bend_raw.copy_(torch.atanh(guide_values["bend"].clamp(-0.999, 0.999)))
-    model.guide_stiffness_raw.copy_(raw_from_range(guide_values["stiffness"], model.groom.ranges.stiffness))
-    model.guide_curl_radius_raw.copy_(raw_from_range(guide_values["curl_radius"], model.groom.ranges.curl_radius))
-    model.guide_frizz_raw.copy_(raw_from_range(guide_values["frizz"], model.groom.ranges.frizz))
-    model.guide_child_radius_raw.copy_(raw_from_range(guide_values["child_radius"], model.groom.ranges.child_radius))
-    model.guide_clump_strength_raw.copy_(raw_from_range(guide_values["clump_strength"], model.groom.ranges.clump_strength))
-    if model.guide_flow_xy is not None and not preserve_direction_controls:
-        model.guide_flow_xy.copy_(guide_flow)
-    return {
-        "guide_init_enabled": 1,
-        "guide_init_count": guide_count,
-        "guide_init_k": k,
-        "guide_init_mean_confidence": float(guide_confidence.mean().detach().cpu()),
-        "guide_init_surface_support_max_rings": int(support.report.get("max_rings_used", 0)),
-        "guide_init_flow_enabled": int(model.guide_flow_xy is not None),
-        "guide_init_direction_preserved": int(bool(preserve_direction_controls)),
+        "clean_flow_guide_direction_reconstruction_supported_count": int(guide_direction_reconstruction_count),
+        "clean_flow_guide_direction_reconstruction_change_mean_deg": float(guide_direction_reconstruction_change_mean),
+        "clean_flow_guide_direction_reconstruction_change_p95_deg": float(guide_direction_reconstruction_change_p95),
+        "clean_flow_guide_direction_reconstruction_reliability_mean": float(guide_direction_reconstruction_reliability_mean),
+        "clean_flow_guide_length_init_source_count": int(guide_length_source_count),
+        "clean_flow_guide_length_init_reliable_count": int(guide_length_reliable_count),
+        "clean_flow_guide_length_init_filled_count": int(guide_filled_length.sum().detach().cpu()),
+        "clean_flow_direction_representation": "direct_local_3d",
     }
 
 
@@ -3795,148 +4076,6 @@ def pixel_to_root_residual(
 
 
 @torch.no_grad()
-def barycentric_from_points(points: torch.Tensor, tri: torch.Tensor) -> torch.Tensor:
-    a = tri[:, 0]
-    b = tri[:, 1]
-    c = tri[:, 2]
-    v0 = b - a
-    v1 = c - a
-    v2 = points - a
-    d00 = (v0 * v0).sum(dim=-1)
-    d01 = (v0 * v1).sum(dim=-1)
-    d11 = (v1 * v1).sum(dim=-1)
-    d20 = (v2 * v0).sum(dim=-1)
-    d21 = (v2 * v1).sum(dim=-1)
-    denom = (d00 * d11 - d01 * d01).clamp_min(1.0e-12)
-    v = (d11 * d20 - d01 * d21) / denom
-    w = (d00 * d21 - d01 * d20) / denom
-    u = 1.0 - v - w
-    bary = torch.stack([u, v, w], dim=-1)
-    bary = bary.clamp_min(0.0)
-    return bary / bary.sum(dim=-1, keepdim=True).clamp_min(1.0e-8)
-
-
-@torch.no_grad()
-def pixel_to_surface_child_roots(
-    model: WhiteTigerStage1Model,
-    roots_local: torch.Tensor,
-    residual_image: torch.Tensor,
-    viewmat: torch.Tensor,
-    k: torch.Tensor,
-    mesh_depth: MeshDepthResult,
-    config: Stage1Config,
-    max_children: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float | int]]:
-    residual = residual_image[..., 0].detach().reshape(-1)
-    topk = min(max(1, int(config.densify_pixel_evidence_topk)), int(residual.numel()))
-    values, flat_ids = torch.topk(residual, k=topk, largest=True, sorted=True)
-    keep = values >= float(config.densify_pixel_evidence_min)
-    if not bool(keep.any()) or max_children <= 0:
-        empty_ids = roots_local.new_empty((0,), dtype=torch.long)
-        empty_bary = roots_local.new_empty((0, 3))
-        return empty_ids, empty_ids, empty_bary, {"direct_target_candidate_count": 0, "direct_target_insert_count": 0}
-    values = values[keep]
-    flat_ids = flat_ids[keep]
-    face_ids = mesh_depth.face_id.reshape(-1)[flat_ids].long()
-    depth = mesh_depth.depth.reshape(-1)[flat_ids].to(dtype=roots_local.dtype)
-    valid = (face_ids >= 0) & torch.isfinite(depth) & (depth > 1.0e-6)
-    if not bool(valid.any()):
-        empty_ids = roots_local.new_empty((0,), dtype=torch.long)
-        empty_bary = roots_local.new_empty((0, 3))
-        return empty_ids, empty_ids, empty_bary, {"direct_target_candidate_count": 0, "direct_target_insert_count": 0}
-    values = values[valid]
-    flat_ids = flat_ids[valid]
-    face_ids = face_ids[valid]
-    depth = depth[valid]
-    min_distance = max(0.0, float(config.split_min_child_distance))
-    if min_distance <= 0.0 and int(values.numel()) > int(max_children):
-        order = torch.argsort(values, descending=True)[: int(max_children)]
-        flat_ids = flat_ids[order]
-        face_ids = face_ids[order]
-        depth = depth[order]
-        values = values[order]
-    height, width = int(mesh_depth.depth.shape[0]), int(mesh_depth.depth.shape[1])
-    xy = torch.stack(
-        [(flat_ids % width).to(dtype=roots_local.dtype), (flat_ids // width).to(dtype=roots_local.dtype)],
-        dim=-1,
-    )
-    cam_x = (xy[:, 0] - k[0, 2].to(dtype=roots_local.dtype)) * depth / k[0, 0].to(dtype=roots_local.dtype)
-    cam_y = (xy[:, 1] - k[1, 2].to(dtype=roots_local.dtype)) * depth / k[1, 1].to(dtype=roots_local.dtype)
-    cam = torch.stack([cam_x, cam_y, depth], dim=-1)
-    rot = viewmat[:3, :3].to(dtype=roots_local.dtype)
-    trans = viewmat[:3, 3].to(dtype=roots_local.dtype)
-    world = (cam - trans.view(1, 3)) @ rot
-    scale = torch.exp(model.log_scale.detach()).to(dtype=roots_local.dtype)
-    target_local = (world - model.translation.detach().to(dtype=roots_local.dtype).view(1, 3)) / scale
-
-    tri = model.vertices[model.faces[face_ids]]
-    bary = barycentric_from_points(target_local, tri)
-    child_points = (tri * bary[:, :, None]).sum(dim=1)
-
-    root_points_np = np.ascontiguousarray(roots_local.detach().to(device="cpu", dtype=torch.float32).numpy())
-    child_points_np = np.ascontiguousarray(child_points.detach().to(device="cpu", dtype=torch.float32).numpy())
-    root_tree = cKDTree(root_points_np)
-    nearest_dist_np, nearest_parent_np = root_tree.query(child_points_np, k=1, workers=-1)
-    nearest_existing = torch.as_tensor(nearest_dist_np, device=child_points.device, dtype=child_points.dtype)
-    nearest_parent = torch.as_tensor(nearest_parent_np, device=child_points.device, dtype=torch.long)
-
-    accepted: list[int] = []
-    close_existing_reject = 0
-    close_new_reject = 0
-    for idx in range(int(child_points.shape[0])):
-        if len(accepted) >= int(max_children):
-            break
-        if min_distance > 0.0 and float(nearest_existing[idx].detach().cpu()) < min_distance:
-            close_existing_reject += 1
-            continue
-        if min_distance > 0.0 and accepted:
-            accepted_points = child_points[torch.tensor(accepted, device=child_points.device, dtype=torch.long)]
-            dist_new = torch.linalg.norm(accepted_points - child_points[idx : idx + 1], dim=-1)
-            if bool((dist_new < min_distance).any()):
-                close_new_reject += 1
-                continue
-        accepted.append(idx)
-
-    if not accepted:
-        empty_ids = roots_local.new_empty((0,), dtype=torch.long)
-        empty_bary = roots_local.new_empty((0, 3))
-        return (
-            empty_ids,
-            empty_ids,
-            empty_bary,
-            {
-                "direct_target_candidate_count": int(topk),
-                "direct_target_valid_count": int(child_points.shape[0]),
-                "direct_target_insert_count": 0,
-                "direct_target_close_existing_reject_count": int(close_existing_reject),
-                "direct_target_close_new_reject_count": int(close_new_reject),
-                "direct_target_min_child_distance": float(min_distance),
-            },
-        )
-
-    accepted_ids = torch.tensor(accepted, device=child_points.device, dtype=torch.long)
-    parent_ids = nearest_parent[accepted_ids].long()
-    parent_distance = nearest_existing[accepted_ids]
-    return (
-        parent_ids,
-        face_ids[accepted_ids],
-        bary[accepted_ids],
-        {
-            "direct_target_candidate_count": int(topk),
-            "direct_target_valid_count": int(child_points.shape[0]),
-            "direct_target_insert_count": int(accepted_ids.shape[0]),
-            "direct_target_weight_mean": float(values[accepted_ids].mean().detach().cpu()),
-            "direct_target_parent_distance_mean": float(parent_distance.mean().detach().cpu()),
-            "direct_target_parent_distance_min": float(parent_distance.min().detach().cpu()),
-            "direct_target_parent_distance_max": float(parent_distance.max().detach().cpu()),
-            "direct_target_close_existing_reject_count": int(close_existing_reject),
-            "direct_target_close_new_reject_count": int(close_new_reject),
-            "direct_target_min_child_distance": float(min_distance),
-        },
-    )
-
-
-@torch.no_grad()
 def densification_residual_image(
     pred_fixed: torch.Tensor,
     target_fixed: torch.Tensor,
@@ -4084,13 +4223,24 @@ def render_view(
     backing_image: torch.Tensor | None = None,
     retain_lifecycle_grad: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, object, torch.Tensor, dict[str, float | int], dict]:
-    gaussians, roots, roots_local, stats = model.render_parameters(
+    render_args = (
         config.samples,
         config.child_count,
         config.min_segments,
-        config.max_segments,
+        config.segment_length_origin,
+        config.segments_per_unit_length,
+        config.segments_per_unit_complexity,
         config.gaussian_length_overlap,
     )
+    if memory_constrained_activation_checkpointing(model.groom.length_raw.device):
+        gaussians, roots, roots_local, stats = activation_checkpoint(
+            lambda _anchor: model.render_parameters(*render_args),
+            model.groom.length_raw,
+            use_reentrant=False,
+            preserve_rng_state=False,
+        )
+    else:
+        gaussians, roots, roots_local, stats = model.render_parameters(*render_args)
     preclip_gaussians = gaussians
     if config.mesh_depth_clipping:
         if mesh_depth is None:
@@ -4253,34 +4403,46 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
         model.groom.opacity_raw,
         model.groom.tip_opacity_ratio_raw,
     ]
-    if model.child_opacity_delta_raw is not None:
-        groom_params.append(model.child_opacity_delta_raw)
     if model.guide_enabled():
         groom_params.extend(
             [
                 model.guide_length_raw,
                 model.guide_root_width_raw,
-                model.guide_flow_strength_raw,
-                model.guide_lift_raw,
-                model.guide_stiffness_raw,
+                model.guide_tip_width_ratio_raw,
+                model.guide_width_taper_raw,
                 model.guide_child_radius_raw,
                 model.guide_clump_strength_raw,
+                model.guide_direction_local_raw,
             ]
         )
-        if model.guide_flow_xy is not None:
-            groom_params.append(model.guide_flow_xy)
-        if float(config.guide_length_residual_scale) > 0.0:
-            groom_params.append(model.groom.length_raw)
+        if model.uses_zero_centered_geometry():
+            residual = model.render_geometry_residual
+            if float(config.guide_length_residual_scale) > 0.0:
+                groom_params.append(residual.length_raw)
+            if float(config.guide_direction_residual_scale) > 0.0:
+                groom_params.append(residual.direction_local_raw)
+        else:
+            if float(config.guide_length_residual_scale) > 0.0:
+                groom_params.append(model.groom.length_raw)
+            if float(config.guide_direction_residual_scale) > 0.0:
+                groom_params.append(model.groom.direction_local_raw)
         if float(config.guide_width_residual_scale) > 0.0:
-            groom_params.extend([model.groom.root_width_raw, model.groom.tip_width_ratio_raw, model.groom.width_taper_raw])
-        if float(config.guide_flow_strength_residual_scale) > 0.0:
-            groom_params.append(model.groom.flow_strength_raw)
-        if float(config.guide_lift_residual_scale) > 0.0:
-            groom_params.append(model.groom.lift_raw)
-        if float(config.guide_stiffness_residual_scale) > 0.0:
-            groom_params.append(model.groom.stiffness_raw)
-        if model.guide_flow_xy is None or float(config.guide_flow_residual_scale) > 0.0:
-            groom_params.append(model.groom.flow_xy)
+            if model.uses_zero_centered_geometry():
+                groom_params.extend(
+                    [
+                        model.render_geometry_residual.root_width_raw,
+                        model.render_geometry_residual.tip_width_ratio_raw,
+                        model.render_geometry_residual.width_taper_raw,
+                    ]
+                )
+            else:
+                groom_params.extend(
+                    [
+                        model.groom.root_width_raw,
+                        model.groom.tip_width_ratio_raw,
+                        model.groom.width_taper_raw,
+                    ]
+                )
     else:
         groom_params.extend(
             [
@@ -4288,10 +4450,7 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
                 model.groom.root_width_raw,
                 model.groom.tip_width_ratio_raw,
                 model.groom.width_taper_raw,
-                model.groom.flow_strength_raw,
-                model.groom.lift_raw,
-                model.groom.stiffness_raw,
-                model.groom.flow_xy,
+                model.groom.direction_local_raw,
             ]
         )
     color_params = [model.groom.root_color_raw, model.groom.tip_color_raw]
@@ -4299,17 +4458,32 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
         color_params.append(model.child_color_delta_raw)
     high_frequency_params = []
     if model.guide_enabled():
-        high_frequency_params.extend([model.guide_bend_raw, model.guide_curl_radius_raw, model.guide_frizz_raw])
-        if float(config.guide_bend_residual_scale) > 0.0:
-            high_frequency_params.append(model.groom.bend_raw)
-        if float(config.guide_curl_residual_scale) > 0.0:
-            high_frequency_params.extend([model.groom.curl_radius_raw, model.groom.curl_frequency_raw, model.groom.curl_phase])
-        if float(config.guide_frizz_residual_scale) > 0.0:
-            high_frequency_params.append(model.groom.frizz_raw)
-        if float(config.guide_child_radius_residual_scale) > 0.0:
-            high_frequency_params.append(model.groom.child_radius_raw)
-        if float(config.guide_clump_residual_scale) > 0.0:
-            high_frequency_params.append(model.groom.clump_strength_raw)
+        high_frequency_params.append(model.guide_bend_raw)
+        if float(config.shape_curl_scale) > 0.0:
+            high_frequency_params.append(model.guide_curl_radius_raw)
+        if float(config.shape_frizz_scale) > 0.0:
+            high_frequency_params.append(model.guide_frizz_raw)
+        if model.uses_zero_centered_geometry():
+            residual = model.render_geometry_residual
+            if float(config.guide_bend_residual_scale) > 0.0:
+                high_frequency_params.append(residual.bend_raw)
+            if float(config.guide_curl_residual_scale) > 0.0:
+                high_frequency_params.append(residual.curl_radius_raw)
+            if float(config.guide_frizz_residual_scale) > 0.0:
+                high_frequency_params.append(residual.frizz_raw)
+            if float(config.guide_child_radius_residual_scale) > 0.0:
+                high_frequency_params.append(residual.child_radius_raw)
+            if float(config.guide_clump_residual_scale) > 0.0:
+                high_frequency_params.append(residual.clump_strength_raw)
+        else:
+            if float(config.guide_bend_residual_scale) > 0.0:
+                high_frequency_params.append(model.groom.bend_raw)
+            if float(config.guide_curl_residual_scale) > 0.0:
+                high_frequency_params.extend([model.groom.curl_radius_raw, model.groom.curl_frequency_raw, model.groom.curl_phase])
+            if float(config.guide_frizz_residual_scale) > 0.0:
+                high_frequency_params.append(model.groom.frizz_raw)
+            if float(config.guide_clump_residual_scale) > 0.0:
+                high_frequency_params.append(model.groom.clump_strength_raw)
     else:
         high_frequency_params.extend(
             [
@@ -4341,34 +4515,45 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
         "groom.opacity_raw",
         "groom.tip_opacity_ratio_raw",
     ]
-    if model.child_opacity_delta_raw is not None:
-        groom_names.append("child_opacity_delta_raw")
     if model.guide_enabled():
         groom_names.extend(
             [
                 "guide_length_raw",
                 "guide_root_width_raw",
-                "guide_flow_strength_raw",
-                "guide_lift_raw",
-                "guide_stiffness_raw",
+                "guide_tip_width_ratio_raw",
+                "guide_width_taper_raw",
                 "guide_child_radius_raw",
                 "guide_clump_strength_raw",
+                "guide_direction_local_raw",
             ]
         )
-        if model.guide_flow_xy is not None:
-            groom_names.append("guide_flow_xy")
-        if float(config.guide_length_residual_scale) > 0.0:
-            groom_names.append("groom.length_raw")
+        if model.uses_zero_centered_geometry():
+            if float(config.guide_length_residual_scale) > 0.0:
+                groom_names.append("render_geometry_residual.length_raw")
+            if float(config.guide_direction_residual_scale) > 0.0:
+                groom_names.append("render_geometry_residual.direction_local_raw")
+        else:
+            if float(config.guide_length_residual_scale) > 0.0:
+                groom_names.append("groom.length_raw")
+            if float(config.guide_direction_residual_scale) > 0.0:
+                groom_names.append("groom.direction_local_raw")
         if float(config.guide_width_residual_scale) > 0.0:
-            groom_names.extend(["groom.root_width_raw", "groom.tip_width_ratio_raw", "groom.width_taper_raw"])
-        if float(config.guide_flow_strength_residual_scale) > 0.0:
-            groom_names.append("groom.flow_strength_raw")
-        if float(config.guide_lift_residual_scale) > 0.0:
-            groom_names.append("groom.lift_raw")
-        if float(config.guide_stiffness_residual_scale) > 0.0:
-            groom_names.append("groom.stiffness_raw")
-        if model.guide_flow_xy is None or float(config.guide_flow_residual_scale) > 0.0:
-            groom_names.append("groom.flow_xy")
+            if model.uses_zero_centered_geometry():
+                groom_names.extend(
+                    [
+                        "render_geometry_residual.root_width_raw",
+                        "render_geometry_residual.tip_width_ratio_raw",
+                        "render_geometry_residual.width_taper_raw",
+                    ]
+                )
+            else:
+                groom_names.extend(
+                    [
+                        "groom.root_width_raw",
+                        "groom.tip_width_ratio_raw",
+                        "groom.width_taper_raw",
+                    ]
+                )
     else:
         groom_names.extend(
             [
@@ -4376,10 +4561,7 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
                 "groom.root_width_raw",
                 "groom.tip_width_ratio_raw",
                 "groom.width_taper_raw",
-                "groom.flow_strength_raw",
-                "groom.lift_raw",
-                "groom.stiffness_raw",
-                "groom.flow_xy",
+                "groom.direction_local_raw",
             ]
         )
     color_names = ["groom.root_color_raw", "groom.tip_color_raw"]
@@ -4387,17 +4569,31 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
         color_names.append("child_color_delta_raw")
     high_frequency_names = []
     if model.guide_enabled():
-        high_frequency_names.extend(["guide_bend_raw", "guide_curl_radius_raw", "guide_frizz_raw"])
-        if float(config.guide_bend_residual_scale) > 0.0:
-            high_frequency_names.append("groom.bend_raw")
-        if float(config.guide_curl_residual_scale) > 0.0:
-            high_frequency_names.extend(["groom.curl_radius_raw", "groom.curl_frequency_raw", "groom.curl_phase"])
-        if float(config.guide_frizz_residual_scale) > 0.0:
-            high_frequency_names.append("groom.frizz_raw")
-        if float(config.guide_child_radius_residual_scale) > 0.0:
-            high_frequency_names.append("groom.child_radius_raw")
-        if float(config.guide_clump_residual_scale) > 0.0:
-            high_frequency_names.append("groom.clump_strength_raw")
+        high_frequency_names.append("guide_bend_raw")
+        if float(config.shape_curl_scale) > 0.0:
+            high_frequency_names.append("guide_curl_radius_raw")
+        if float(config.shape_frizz_scale) > 0.0:
+            high_frequency_names.append("guide_frizz_raw")
+        if model.uses_zero_centered_geometry():
+            if float(config.guide_bend_residual_scale) > 0.0:
+                high_frequency_names.append("render_geometry_residual.bend_raw")
+            if float(config.guide_curl_residual_scale) > 0.0:
+                high_frequency_names.append("render_geometry_residual.curl_radius_raw")
+            if float(config.guide_frizz_residual_scale) > 0.0:
+                high_frequency_names.append("render_geometry_residual.frizz_raw")
+            if float(config.guide_child_radius_residual_scale) > 0.0:
+                high_frequency_names.append("render_geometry_residual.child_radius_raw")
+            if float(config.guide_clump_residual_scale) > 0.0:
+                high_frequency_names.append("render_geometry_residual.clump_strength_raw")
+        else:
+            if float(config.guide_bend_residual_scale) > 0.0:
+                high_frequency_names.append("groom.bend_raw")
+            if float(config.guide_curl_residual_scale) > 0.0:
+                high_frequency_names.extend(["groom.curl_radius_raw", "groom.curl_frequency_raw", "groom.curl_phase"])
+            if float(config.guide_frizz_residual_scale) > 0.0:
+                high_frequency_names.append("groom.frizz_raw")
+            if float(config.guide_clump_residual_scale) > 0.0:
+                high_frequency_names.append("groom.clump_strength_raw")
     else:
         high_frequency_names.extend(
             [
@@ -4419,6 +4615,176 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
     if float(config.lr_calibration) > 0.0:
         names.insert(1, ["log_scale", "translation"])
     return names
+
+
+@dataclass(frozen=True)
+class OptimizerRowTransition:
+    old_count: int
+    keep_mask: torch.Tensor
+    child_count: int
+
+    @property
+    def retained_count(self) -> int:
+        return int(self.keep_mask.sum().detach().cpu())
+
+    @property
+    def new_count(self) -> int:
+        return self.retained_count + int(self.child_count)
+
+
+def optimizer_row_transition(
+    update: RootStructureUpdate,
+    old_count: int,
+) -> OptimizerRowTransition:
+    if update.prune_mask.shape != (int(old_count),):
+        raise ValueError(
+            "optimizer row transition prune mask mismatch: "
+            f"{tuple(update.prune_mask.shape)} != {(int(old_count),)}"
+        )
+    return OptimizerRowTransition(
+        old_count=int(old_count),
+        keep_mask=~update.prune_mask.detach().bool(),
+        child_count=int(update.new_barycentric.shape[0]),
+    )
+
+
+def _optimizer_parameter_domain(name: str) -> str | None:
+    if name.startswith("guide_"):
+        return "guide"
+    if (
+        name == "bary_logits"
+        or name == "child_color_delta_raw"
+        or name.startswith("groom.")
+        or name.startswith("render_geometry_residual.")
+    ):
+        return "render"
+    return None
+
+
+def _optimizer_named_parameters(
+    optimizer: torch.optim.Optimizer,
+    names: list[list[str]],
+) -> dict[str, torch.nn.Parameter]:
+    if len(optimizer.param_groups) != len(names):
+        raise RuntimeError(
+            "optimizer group/name count mismatch: "
+            f"{len(optimizer.param_groups)} != {len(names)}"
+        )
+    result: dict[str, torch.nn.Parameter] = {}
+    for group_index, (group, group_names) in enumerate(zip(optimizer.param_groups, names)):
+        params = list(group["params"])
+        if len(params) != len(group_names):
+            raise RuntimeError(
+                f"optimizer group {group_index} parameter/name count mismatch: "
+                f"{len(params)} != {len(group_names)}"
+            )
+        for name, parameter in zip(group_names, params):
+            if name in result:
+                raise RuntimeError(f"duplicate optimizer parameter name: {name}")
+            result[name] = parameter
+    return result
+
+
+def rebuild_stage1_optimizer_with_state(
+    model: WhiteTigerStage1Model,
+    config: Stage1Config,
+    old_optimizer: torch.optim.Optimizer,
+    old_param_names: list[list[str]],
+    *,
+    render_transition: OptimizerRowTransition | None = None,
+    guide_transition: OptimizerRowTransition | None = None,
+) -> tuple[torch.optim.Optimizer, dict[str, object]]:
+    """Rebuild Adam after root topology changes without resetting surviving rows."""
+
+    old_named = _optimizer_named_parameters(old_optimizer, old_param_names)
+    new_optimizer = make_stage1_optimizer(model, config)
+    new_names = stage1_optimizer_param_names(model, config)
+    new_named = _optimizer_named_parameters(new_optimizer, new_names)
+    if set(old_named) != set(new_named):
+        missing = sorted(set(old_named) - set(new_named))
+        added = sorted(set(new_named) - set(old_named))
+        raise RuntimeError(
+            "optimizer parameter contract changed during lifecycle update: "
+            f"missing={missing}, added={added}"
+        )
+
+    transitions = {
+        "render": render_transition,
+        "guide": guide_transition,
+    }
+    exact_parameter_count = 0
+    row_migrated_parameter_count = 0
+    restored_state_parameter_count = 0
+    uninitialized_parameter_count = 0
+
+    for name, old_parameter in old_named.items():
+        new_parameter = new_named[name]
+        old_state = old_optimizer.state.get(old_parameter)
+        if not old_state:
+            uninitialized_parameter_count += 1
+            continue
+        domain = _optimizer_parameter_domain(name)
+        transition = transitions.get(domain) if domain is not None else None
+        use_row_transition = (
+            transition is not None
+            and old_parameter.ndim > 0
+            and new_parameter.ndim > 0
+            and int(old_parameter.shape[0]) == int(transition.old_count)
+            and int(new_parameter.shape[0]) == int(transition.new_count)
+        )
+        if use_row_transition:
+            row_migrated_parameter_count += 1
+        elif tuple(old_parameter.shape) == tuple(new_parameter.shape):
+            exact_parameter_count += 1
+        else:
+            raise RuntimeError(
+                f"optimizer state shape changed without a matching row transition for {name}: "
+                f"{tuple(old_parameter.shape)} -> {tuple(new_parameter.shape)}"
+            )
+
+        migrated_state: dict[str, object] = {}
+        for state_name, value in old_state.items():
+            if not torch.is_tensor(value):
+                migrated_state[state_name] = value
+                continue
+            if value.ndim == 0:
+                migrated_state[state_name] = value.detach().clone().to(device=new_parameter.device)
+                continue
+            if tuple(value.shape) != tuple(old_parameter.shape):
+                raise RuntimeError(
+                    f"unexpected optimizer tensor shape for {name}.{state_name}: "
+                    f"{tuple(value.shape)} != {tuple(old_parameter.shape)}"
+                )
+            if use_row_transition:
+                keep = transition.keep_mask.to(device=value.device)
+                retained = value[keep]
+                migrated = value.new_zeros(tuple(new_parameter.shape), device=new_parameter.device)
+                migrated[: retained.shape[0]].copy_(retained.to(device=new_parameter.device))
+                migrated_state[state_name] = migrated
+            else:
+                migrated_state[state_name] = value.detach().clone().to(device=new_parameter.device)
+        new_optimizer.state[new_parameter] = migrated_state
+        restored_state_parameter_count += 1
+
+    def transition_report(transition: OptimizerRowTransition | None) -> dict[str, int] | None:
+        if transition is None:
+            return None
+        return {
+            "old_root_count": int(transition.old_count),
+            "retained_root_count": int(transition.retained_count),
+            "zero_initialized_child_count": int(transition.child_count),
+            "new_root_count": int(transition.new_count),
+        }
+
+    return new_optimizer, {
+        "old_state_parameter_count": int(len(old_optimizer.state)),
+        "restored_state_parameter_count": int(restored_state_parameter_count),
+        "uninitialized_parameter_count": int(uninitialized_parameter_count),
+        "exact_parameter_count": int(exact_parameter_count),
+        "row_migrated_parameter_count": int(row_migrated_parameter_count),
+        "render": transition_report(render_transition),
+        "guide": transition_report(guide_transition),
+    }
 
 
 def finite_tensor_report(name: str, tensor: torch.Tensor) -> dict[str, object]:
@@ -4504,9 +4870,7 @@ def render_parameter_finite_detail(
         "expanded_root_ids": finite_tensor_report("expanded_root_ids", expanded_root_ids.to(dtype=roots.dtype)),
         "groom_length": finite_tensor_report("groom.length", groom.length),
         "groom_root_width": finite_tensor_report("groom.root_width", groom.root_width),
-        "groom_flow_xy": finite_tensor_report("groom.flow_xy", groom.flow_xy),
-        "groom_flow_strength": finite_tensor_report("groom.flow_strength", groom.flow_strength),
-        "groom_lift": finite_tensor_report("groom.lift", groom.lift),
+        "groom_direction_local": finite_tensor_report("groom.direction_local", groom.direction_local),
         "groom_bend": finite_tensor_report("groom.bend", groom.bend),
         "groom_curl_radius": finite_tensor_report("groom.curl_radius", groom.curl_radius),
         "groom_curl_frequency": finite_tensor_report("groom.curl_frequency", groom.curl_frequency),
@@ -4536,17 +4900,16 @@ def zero_guide_gradients(model: WhiteTigerStage1Model) -> None:
     params = [
         model.guide_length_raw,
         model.guide_root_width_raw,
-        model.guide_flow_strength_raw,
-        model.guide_lift_raw,
+        model.guide_tip_width_ratio_raw,
+        model.guide_width_taper_raw,
         model.guide_bend_raw,
-        model.guide_stiffness_raw,
         model.guide_curl_radius_raw,
         model.guide_frizz_raw,
         model.guide_child_radius_raw,
         model.guide_clump_strength_raw,
     ]
-    if model.guide_flow_xy is not None:
-        params.append(model.guide_flow_xy)
+    if model.guide_direction_local_raw is not None:
+        params.append(model.guide_direction_local_raw)
     for param in params:
         if param is not None and param.grad is not None:
             param.grad.zero_()
@@ -4562,8 +4925,33 @@ def zero_shape_detail_gradients(model: WhiteTigerStage1Model) -> None:
     ]
     if model.guide_enabled():
         params.extend([model.guide_bend_raw, model.guide_curl_radius_raw, model.guide_frizz_raw])
+    if model.render_geometry_residual is not None:
+        params.extend(
+            [
+                model.render_geometry_residual.bend_raw,
+                model.render_geometry_residual.curl_radius_raw,
+                model.render_geometry_residual.frizz_raw,
+            ]
+        )
     for param in params:
         if param is not None and param.grad is not None:
+            param.grad.zero_()
+
+
+def zero_render_geometry_residual_gradients(model: WhiteTigerStage1Model) -> None:
+    """Freeze late geometry residuals while preserving coverage-residual timing.
+
+    Child spread is a coverage control and already has its own early ramp. It
+    must not be frozen until the later direction/length residual phase merely
+    because both controls share the same lifecycle-aware residual container.
+    """
+
+    if model.render_geometry_residual is None:
+        return
+    for name, param in model.render_geometry_residual.named_parameters():
+        if name == "child_radius_raw":
+            continue
+        if param.grad is not None:
             param.grad.zero_()
 
 
@@ -4573,16 +4961,157 @@ def raw_from_range(value: torch.Tensor, bounds: tuple[float, float]) -> torch.Te
     return inv_sigmoid(rel)
 
 
-def rebuild_graph_edges(model: WhiteTigerStage1Model, k: int = 8) -> torch.Tensor:
+def rebuild_graph_edges(
+    model: WhiteTigerStage1Model,
+    *,
+    mode: str,
+    k: int,
+) -> tuple[torch.Tensor, dict[str, float | int | str]]:
+    started = time.perf_counter()
     with torch.no_grad():
         roots, _, _ = model.roots_and_normals()
-        return build_knn_edges(roots, k=k)
+        if mode == "euclidean_knn":
+            edges = build_knn_edges(roots, k=k)
+        elif mode == "surface_hierarchical":
+            if not model.guide_enabled():
+                raise RuntimeError("surface_hierarchical smoothing requires guide roots")
+            support = model.guide_interpolation_support()
+            edges = build_hierarchical_surface_edges(
+                roots,
+                support.indices,
+                neighbor_count=k,
+            )
+        else:
+            raise ValueError(f"unknown smoothing graph mode: {mode}")
+        return edges, {
+            "mode": mode,
+            "root_count": int(roots.shape[0]),
+            "neighbor_count": min(max(int(k), 0), max(int(roots.shape[0]) - 1, 0)),
+            "edge_count": int(edges.shape[0]),
+            "build_seconds": float(time.perf_counter() - started),
+        }
 
 
-def build_guide_graph_edges(model: WhiteTigerStage1Model, k: int = 8) -> torch.Tensor:
+def build_guide_graph_edges(
+    model: WhiteTigerStage1Model,
+    *,
+    mode: str,
+    k: int,
+) -> tuple[torch.Tensor, dict[str, float | int | str]]:
+    started = time.perf_counter()
     if not model.guide_enabled():
-        return torch.empty((0, 2), dtype=torch.long, device=model.vertices.device)
-    return build_knn_edges(model.guide_points_local, k=k)
+        edges = torch.empty((0, 2), dtype=torch.long, device=model.vertices.device)
+    elif mode == "euclidean_knn":
+        edges = build_knn_edges(model.guide_points_local, k=k)
+    elif mode == "surface_hierarchical":
+        edges = model.guide_surface_smoothing_edges(k)
+    else:
+        raise ValueError(f"unknown smoothing graph mode: {mode}")
+    return edges, {
+        "mode": mode,
+        "root_count": int(model.guide_points_local.shape[0]),
+        "neighbor_count": min(
+            max(int(k), 0),
+            max(int(model.guide_points_local.shape[0]) - 1, 0),
+        ),
+        "edge_count": int(edges.shape[0]),
+        "build_seconds": float(time.perf_counter() - started),
+    }
+
+
+@torch.no_grad()
+def aggregate_render_need_to_guides(
+    model: WhiteTigerStage1Model,
+    render_need: torch.Tensor,
+    render_visible: torch.Tensor,
+    *,
+    policy: str,
+    legacy_neighbor_count: int,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, int | str]]:
+    """Attribute render-root evidence to the guide controls that produced it."""
+
+    _, _, roots_local = model.roots_and_normals()
+    guide_count = int(model.guide_points_local.shape[0])
+    root_count = int(roots_local.shape[0])
+    if render_need.reshape(-1).shape[0] != root_count:
+        raise ValueError("render_need must have one value per render root")
+    if render_visible.reshape(-1).shape[0] != root_count:
+        raise ValueError("render_visible must have one value per render root")
+
+    valid = render_visible.reshape(-1).to(device=roots_local.device, dtype=torch.bool)
+    need = render_need.reshape(-1).to(device=roots_local.device, dtype=roots_local.dtype).clamp_min(0.0)
+    guide_score_sum = torch.zeros((guide_count,), device=roots_local.device, dtype=roots_local.dtype)
+    guide_weight_sum = torch.zeros_like(guide_score_sum)
+
+    if policy == "global_score_budget":
+        k = min(max(1, int(legacy_neighbor_count)), guide_count)
+        for begin in range(0, root_count, 4096):
+            end = min(begin + 4096, root_count)
+            distance = torch.cdist(roots_local[begin:end].detach(), model.guide_points_local)
+            values, support_ids = torch.topk(distance, k=k, largest=False, dim=-1)
+            support_weights = values.clamp_min(1.0e-6).pow(-2.0)
+            support_weights = support_weights / support_weights.sum(dim=-1, keepdim=True).clamp_min(EPS)
+            support_weights = support_weights * valid[begin:end, None].to(dtype=support_weights.dtype)
+            guide_score_sum.scatter_add_(
+                0,
+                support_ids.reshape(-1),
+                (need[begin:end, None] * support_weights).reshape(-1),
+            )
+            guide_weight_sum.scatter_add_(0, support_ids.reshape(-1), support_weights.reshape(-1))
+        support_name = "euclidean_knn"
+    elif policy == "surface_attribution_local_max":
+        support, support_weights = model.guide_interpolation_attribution(roots_local)
+        support_ids = support.indices
+        k = int(support_ids.shape[1])
+        support_weights = support_weights * valid[:, None].to(dtype=support_weights.dtype)
+        guide_score_sum.scatter_add_(
+            0,
+            support_ids.reshape(-1),
+            (need[:, None] * support_weights).reshape(-1),
+        )
+        guide_weight_sum.scatter_add_(0, support_ids.reshape(-1), support_weights.reshape(-1))
+        support_name = "forward_surface_interpolation"
+    else:
+        raise ValueError(f"unknown guide densification policy: {policy}")
+
+    guide_score = guide_score_sum / guide_weight_sum.clamp_min(EPS)
+    return guide_score, guide_weight_sum, {
+        "evidence_support": support_name,
+        "render_root_k": int(k),
+    }
+
+
+@torch.no_grad()
+def select_surface_graph_local_maxima(
+    score: torch.Tensor,
+    valid: torch.Tensor,
+    edges: torch.Tensor,
+) -> torch.Tensor:
+    """Keep threshold-valid maxima in each intrinsic guide neighborhood."""
+
+    score = score.reshape(-1)
+    valid = valid.reshape(-1).to(device=score.device, dtype=torch.bool)
+    if score.shape != valid.shape:
+        raise ValueError("score and valid must have identical shapes")
+    candidates = torch.nonzero(valid, as_tuple=False).reshape(-1)
+    if candidates.numel() == 0:
+        return candidates
+    if edges.numel() == 0:
+        return candidates[torch.argsort(score[candidates], descending=True)]
+    edges = edges.to(device=score.device, dtype=torch.long)
+    if edges.ndim != 2 or edges.shape[1] != 2:
+        raise ValueError("edges must have shape [E, 2]")
+    candidate_score = torch.where(valid, score, torch.full_like(score, -torch.inf))
+    local_max = candidate_score.clone()
+    local_max.scatter_reduce_(
+        0,
+        edges[:, 0],
+        candidate_score[edges[:, 1]],
+        reduce="amax",
+        include_self=True,
+    )
+    selected = candidates[score[candidates] >= (local_max[candidates] - 1.0e-12)]
+    return selected[torch.argsort(score[selected], descending=True)]
 
 
 @torch.no_grad()
@@ -4590,11 +5119,18 @@ def propose_guide_densify_update(
     model: WhiteTigerStage1Model,
     stats,
     config: Stage1Config,
-) -> tuple[RootStructureUpdate | None, dict[str, float | int]]:
+) -> tuple[RootStructureUpdate | None, dict[str, float | int | str | dict[str, object]]]:
     if not model.guide_enabled():
         return None, {"enabled": 0, "reason": "guide_disabled"}
-    if int(config.guide_densify_max_splits_per_event) <= 0:
+    policy = str(config.guide_densify_policy)
+    max_splits = int(config.guide_densify_max_splits_per_event)
+    if policy == "global_score_budget" and max_splits <= 0:
         return None, {"enabled": 0, "reason": "max_splits_zero"}
+    if policy == "surface_attribution_local_max" and max_splits != 0:
+        raise ValueError(
+            "surface_attribution_local_max guide densification is threshold/local-max driven; "
+            "guide_densify_max_splits_per_event must be 0"
+        )
     if float(config.guide_densify_score_threshold) <= 0.0:
         return None, {"enabled": 0, "reason": "threshold_zero"}
 
@@ -4613,24 +5149,13 @@ def propose_guide_densify_update(
     if not bool(valid_render.any()):
         return None, {"enabled": 1, "candidate_count": 0, "selected_parent_count": 0, "reason": "no_visible_render_roots"}
 
-    k = min(max(1, int(config.guide_densify_render_root_k)), guide_count)
-    guide_score_sum = torch.zeros((guide_count,), device=roots_local.device, dtype=roots_local.dtype)
-    guide_weight_sum = torch.zeros((guide_count,), device=roots_local.device, dtype=roots_local.dtype)
-    chunk = 4096
-    valid_need = render_need.to(device=roots_local.device, dtype=roots_local.dtype).clamp_min(0.0)
-    valid_mask = valid_render.to(device=roots_local.device)
-    for begin in range(0, root_count, chunk):
-        end = min(begin + chunk, root_count)
-        dist = torch.cdist(roots_local[begin:end].detach(), model.guide_points_local)
-        values, ids = torch.topk(dist, k=k, largest=False, dim=-1)
-        weights = 1.0 / values.clamp_min(1.0e-6).square()
-        weights = weights * valid_mask[begin:end, None].to(dtype=weights.dtype)
-        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(EPS)
-        weighted_need = valid_need[begin:end, None] * weights
-        guide_score_sum.scatter_add_(0, ids.reshape(-1), weighted_need.reshape(-1))
-        guide_weight_sum.scatter_add_(0, ids.reshape(-1), weights.reshape(-1))
-
-    guide_score = guide_score_sum / guide_weight_sum.clamp_min(EPS)
+    guide_score, guide_weight_sum, attribution_report = aggregate_render_need_to_guides(
+        model,
+        render_need,
+        valid_render,
+        policy=policy,
+        legacy_neighbor_count=int(config.guide_densify_render_root_k),
+    )
     valid_guide = guide_weight_sum > 0.0
     valid_guide = valid_guide & (guide_score >= float(config.guide_densify_score_threshold))
     candidates = torch.nonzero(valid_guide, as_tuple=False).reshape(-1)
@@ -4644,9 +5169,16 @@ def propose_guide_densify_update(
             "threshold": float(config.guide_densify_score_threshold),
         }
 
-    max_parents = max(0, int(config.guide_densify_max_splits_per_event))
-    order = torch.argsort(guide_score[candidates], descending=True)
-    parents = candidates[order[:max_parents]]
+    if policy == "global_score_budget":
+        order = torch.argsort(guide_score[candidates], descending=True)
+        parents = candidates[order[:max_splits]]
+        local_max_candidate_count = int(candidates.numel())
+        parent_budget = int(max_splits)
+    else:
+        guide_edges = model.guide_surface_smoothing_edges(int(config.guide_densify_neighbor_count))
+        parents = select_surface_graph_local_maxima(guide_score, valid_guide, guide_edges)
+        local_max_candidate_count = int(parents.numel())
+        parent_budget = -1
     state = model.guide_lifecycle_state()
     child_parent_indices, new_face_ids, new_barycentric = propose_split_children(
         state,
@@ -4682,7 +5214,11 @@ def propose_guide_densify_update(
         "score_max": float(guide_score.max().detach().cpu()),
         "selected_score_mean": float(selected_scores.mean().detach().cpu()) if selected_scores.numel() else 0.0,
         "threshold": float(config.guide_densify_score_threshold),
-        "render_root_k": int(k),
+        "policy": policy,
+        **attribution_report,
+        "local_max_candidate_count": int(local_max_candidate_count),
+        "parent_budget": int(parent_budget),
+        "budget_saturated": int(parent_budget > 0 and local_max_candidate_count > parent_budget),
         "replace_parent": 0,
     }
     return update, record
@@ -4693,9 +5229,9 @@ def surface_flow_directions_local(model: WhiteTigerStage1Model) -> torch.Tensor:
     _, normals, _ = model.roots_and_normals()
     tangents, bitangents = model.tangent_frames(normals)
     groom = model.groom.decode()
-    flow_local = F.normalize(groom.flow_xy, dim=-1, eps=1.0e-8)
-    flow = flow_local[:, [0]] * tangents + flow_local[:, [1]] * bitangents
-    return F.normalize(flow, dim=-1, eps=1.0e-8)
+    direction = groom_direction_3d(groom, normals, tangents, bitangents)
+    tangent = direction - (direction * normals).sum(dim=-1, keepdim=True) * normals
+    return F.normalize(tangent, dim=-1, eps=1.0e-8)
 
 
 @torch.no_grad()
@@ -4744,16 +5280,21 @@ def shape_detail_multiplier_for_iteration(config: Stage1Config, iteration: int) 
     return float(iteration - freeze_until) / float(max(1, ramp_end - freeze_until))
 
 
-def guide_interpolation_prior_loss(model: WhiteTigerStage1Model, config: Stage1Config) -> torch.Tensor:
-    """Use guide roots as a low-frequency geometry prior, not as RGB detail owners."""
+def guide_interpolation_regularization_losses(
+    model: WhiteTigerStage1Model,
+    config: Stage1Config,
+) -> torch.Tensor:
+    """Return the configured render-root prior around interpolated guide controls."""
 
-    if not model.guide_enabled() or float(config.guide_prior_weight) <= 0.0:
-        return model.groom.length_raw.sum() * 0.0
+    zero = model.groom.length_raw.sum() * 0.0
+    needs_prior = float(config.guide_prior_weight) > 0.0
+    if not model.guide_enabled() or not needs_prior:
+        return zero
     _, normals, roots_local = model.roots_and_normals()
     tangents, bitangents = model.tangent_frames(normals)
     guide_interp, guide_direction = model.interpolate_guide_controls(roots_local, normals, tangents, bitangents)
     if not guide_interp:
-        return model.groom.length_raw.sum() * 0.0
+        return zero
     groom = model.groom.decode()
     ranges = model.groom.ranges
 
@@ -4764,20 +5305,107 @@ def guide_interpolation_prior_loss(model: WhiteTigerStage1Model, config: Stage1C
 
     terms: list[torch.Tensor] = []
     weights: list[float] = []
-    if guide_direction is not None and float(config.guide_prior_flow_weight) > 0.0:
-        render_direction = controls_direction_3d(groom.flow_xy, groom.flow_strength, groom.lift, normals, tangents, bitangents)
+    if model.render_geometry_residual is not None:
+        residual = model.render_geometry_residual.decode()
+
+        def add_residual(
+            value: torch.Tensor,
+            weight: float,
+            *,
+            reduction: str = "mean_l1",
+        ) -> None:
+            if weight > 0.0:
+                if reduction == "mean_l1":
+                    term = torch.abs(value).mean()
+                elif reduction == "fourth_moment":
+                    term = fourth_moment_norm(value)
+                elif reduction == "population_stable_handoff":
+                    term = population_stable_residual_norm(
+                        value,
+                        model.guide_residual_multiplier,
+                    )
+                elif reduction == "tail_concentration_handoff":
+                    term = tail_concentration_residual_loss(
+                        value,
+                        model.guide_residual_multiplier,
+                    )
+                else:
+                    raise ValueError(
+                        f"unsupported render length prior reduction: {reduction}"
+                    )
+                terms.append(term)
+                weights.append(weight)
+
+        add_residual(
+            residual.direction_local,
+            float(config.guide_prior_direction_weight),
+        )
+        add_residual(
+            residual.bend,
+            float(config.guide_prior_bend_weight),
+        )
+        add_residual(
+            residual.curl_radius,
+            float(config.guide_prior_curl_weight) if float(config.shape_curl_scale) > 0.0 else 0.0,
+        )
+        add_residual(
+            length_residual_prior_coordinate(
+                model.render_geometry_residual.length_raw,
+                model.render_geometry_parameterization,
+                config.render_length_prior_coordinate,
+            ),
+            float(config.guide_prior_length_weight),
+            reduction=str(config.render_length_prior_reduction),
+        )
+        add_residual(residual.clump_strength, float(config.guide_prior_clump_weight))
+        if float(config.guide_prior_width_weight) > 0.0:
+            width_weight = float(config.guide_prior_width_weight)
+            add_residual(residual.root_width_log_ratio, width_weight)
+            add_residual(residual.tip_width_logit_delta, width_weight)
+            add_residual(residual.width_taper_log_ratio, width_weight)
+            guide_profile_anchor = 0.5 * (
+                torch.asinh(model.guide_tip_width_ratio_raw).abs().mean()
+                + torch.asinh(model.guide_width_taper_raw).abs().mean()
+            )
+            terms.append(guide_profile_anchor)
+            weights.append(width_weight)
+        add_residual(
+            residual.child_radius_log_ratio,
+            float(config.guide_prior_child_radius_weight),
+        )
+        if not terms:
+            return zero
+        prior_loss = terms[0] * weights[0]
+        for term, weight in zip(terms[1:], weights[1:]):
+            prior_loss = prior_loss + term * weight
+        return prior_loss / max(sum(weights), EPS)
+
+    if guide_direction is not None and float(config.guide_prior_direction_weight) > 0.0:
+        render_direction = groom_direction_3d(groom, normals, tangents, bitangents)
         guide_direction = F.normalize(guide_direction, dim=-1, eps=1.0e-8)
         direction_loss = 1.0 - (render_direction * guide_direction).sum(dim=-1).clamp(-1.0, 1.0)
         terms.append(direction_loss.mean())
-        weights.append(float(config.guide_prior_flow_weight))
+        weights.append(float(config.guide_prior_direction_weight))
+    if float(config.guide_prior_length_weight) > 0.0:
+        length_log_ratio = torch.log(
+            groom.length.clamp_min(EPS)
+            / guide_interp["length"].clamp_min(EPS)
+        )
+        terms.append(length_log_ratio.abs().mean())
+        weights.append(float(config.guide_prior_length_weight))
     scalar_terms = [
-        ("bend", groom.bend, (-1.0, 1.0), float(config.guide_prior_bend_weight)),
-        ("lift", groom.lift, ranges.lift, float(config.guide_prior_lift_weight)),
-        ("stiffness", groom.stiffness, ranges.stiffness, float(config.guide_prior_stiffness_weight)),
-        ("curl_radius", groom.curl_radius, ranges.curl_radius, float(config.guide_prior_curl_weight)),
-        ("length", groom.length, ranges.length, float(config.guide_prior_length_weight)),
-        ("root_width", groom.root_width, ranges.root_width, float(config.guide_prior_width_weight)),
-        ("child_radius", groom.child_radius, ranges.child_radius, float(config.guide_prior_child_radius_weight)),
+        (
+            "bend",
+            groom.bend,
+            (-1.0, 1.0),
+            float(config.guide_prior_bend_weight),
+        ),
+        (
+            "curl_radius",
+            groom.curl_radius,
+            ranges.curl_radius,
+            float(config.guide_prior_curl_weight) if float(config.shape_curl_scale) > 0.0 else 0.0,
+        ),
         ("clump_strength", groom.clump_strength, ranges.clump_strength, float(config.guide_prior_clump_weight)),
     ]
     for name, value, bounds, weight in scalar_terms:
@@ -4785,356 +5413,49 @@ def guide_interpolation_prior_loss(model: WhiteTigerStage1Model, config: Stage1C
             continue
         terms.append(normalized_l1(value, guide_interp[name], bounds))
         weights.append(weight)
-    if not terms:
-        return model.groom.length_raw.sum() * 0.0
-    total = terms[0] * weights[0]
-    for term, weight in zip(terms[1:], weights[1:]):
-        total = total + term * weight
-    return total / max(sum(weights), EPS)
-
-
-@torch.no_grad()
-def propose_overlong_split_update(
-    model: WhiteTigerStage1Model,
-    stats,
-    config: Stage1Config,
-    *,
-    screen_diag: torch.Tensor | None = None,
-    screen_visible_count: torch.Tensor | None = None,
-    child_target_points: torch.Tensor | None = None,
-) -> tuple[RootStructureUpdate | None, dict[str, torch.Tensor] | None, dict[str, float | int]]:
-    if int(config.overlong_split_max_parents_per_event) <= 0:
-        return None, None, {"enabled": 0}
-    screen_split_enabled = float(config.screen_footprint_split_diag_threshold) > 0.0
-    if (
-        float(config.overlong_split_length_threshold) <= 0.0
-        and float(config.overlong_split_width_threshold) <= 0.0
-        and float(config.overlong_split_opacity_threshold) <= 0.0
-        and not screen_split_enabled
-    ):
-        return None, None, {"enabled": 0}
-    state = model.lifecycle_state()
-    groom = effective_groom_for_current_roots(model)
-    length = groom.length.reshape(-1)
-    width = groom.root_width.reshape(-1)
-    opacity = groom.opacity.reshape(-1)
-    contribution = stats.gaussian_contrib_sum.reshape(-1)
-    valid = torch.zeros_like(length, dtype=torch.bool)
-    score_terms = torch.zeros_like(length)
-    screen_valid = torch.zeros_like(length, dtype=torch.bool)
-    neutral_screen_valid = torch.zeros_like(length, dtype=torch.bool)
-    screen_excess = torch.zeros_like(length)
-    luma = (
-        0.2126 * groom.root_color[:, 0]
-        + 0.7152 * groom.root_color[:, 1]
-        + 0.0722 * groom.root_color[:, 2]
-    ).reshape(-1)
-    if float(config.overlong_split_length_threshold) > 0.0:
-        length_excess = (length / float(config.overlong_split_length_threshold)).clamp_min(1.0) - 1.0
-        valid = valid | (length >= float(config.overlong_split_length_threshold))
-        score_terms = score_terms + length_excess
-    if float(config.overlong_split_width_threshold) > 0.0:
-        width_excess = torch.relu(torch.log(width.clamp_min(1.0e-8) / float(config.overlong_split_width_threshold)))
-        valid = valid | (width >= float(config.overlong_split_width_threshold))
-        score_terms = score_terms + width_excess
-    if float(config.overlong_split_opacity_threshold) > 0.0:
-        opacity_excess = ((opacity - float(config.overlong_split_opacity_threshold)) / max(1.0 - float(config.overlong_split_opacity_threshold), 1.0e-6)).clamp_min(0.0)
-        valid = valid | (opacity >= float(config.overlong_split_opacity_threshold))
-        score_terms = score_terms + 0.5 * opacity_excess
-    if screen_split_enabled:
-        if screen_diag is None or screen_visible_count is None:
-            raise RuntimeError("screen footprint split requires current-view screen_diag and visible_count")
-        screen_diag = screen_diag.reshape(-1).to(device=length.device, dtype=length.dtype)
-        screen_visible_count = screen_visible_count.reshape(-1).to(device=length.device, dtype=length.dtype)
-        if screen_diag.shape[0] != length.shape[0] or screen_visible_count.shape[0] != length.shape[0]:
-            raise RuntimeError("screen footprint split statistics do not match root count")
-        threshold = float(config.screen_footprint_split_diag_threshold)
-        screen_excess = (screen_diag / max(threshold, EPS)).clamp_min(1.0) - 1.0
-        base_screen_valid = (screen_diag >= threshold) & (screen_visible_count > 0)
-        screen_valid = base_screen_valid
-        if float(config.screen_footprint_split_luma_threshold) > 0.0:
-            luma_threshold = float(config.screen_footprint_split_luma_threshold)
-            screen_valid = base_screen_valid & (luma <= luma_threshold)
-            neutral_screen_valid = base_screen_valid & (luma > luma_threshold)
-            darkness = ((luma_threshold - luma) / max(luma_threshold, EPS)).clamp_min(0.0)
-            screen_excess = screen_excess * (1.0 + darkness)
-        # Screen-footprint roots have their own dark/neutral budgets below.  Do
-        # not mix them into the primary overlong queue, otherwise lowering the
-        # screen threshold crowds out true length/width/opacity overlong roots.
-    if float(config.overlong_split_min_contribution) > 0.0:
-        valid = valid & (contribution >= float(config.overlong_split_min_contribution))
-    candidates = torch.nonzero(valid, as_tuple=False).reshape(-1)
-    if candidates.numel() == 0:
-        return None, None, {
-            "enabled": 1,
-            "candidate_count": 0,
-            "selected_parent_count": 0,
-            "inserted_child_count": 0,
-        }
-    score = score_terms[candidates] * contribution[candidates].clamp_min(1.0e-6)
-    order = torch.argsort(score, descending=True)
-    primary_parent_count = max(0, int(config.overlong_split_max_parents_per_event))
-    parents = candidates[order[:primary_parent_count]]
-    primary_parents = parents
-    primary_selected_parent_count = int(parents.numel())
-    extra_screen_parent_count = 0
-    screen_extra_parents = parents.new_empty((0,))
-    if screen_split_enabled and int(config.screen_footprint_split_extra_parents_per_event) > 0:
-        screen_candidates = torch.nonzero(
-            screen_valid & (contribution >= float(config.overlong_split_min_contribution)),
-            as_tuple=False,
-        ).reshape(-1)
-        if parents.numel() > 0 and screen_candidates.numel() > 0:
-            screen_candidates = screen_candidates[~torch.isin(screen_candidates, parents)]
-        if screen_candidates.numel() > 0:
-            screen_score = screen_excess[screen_candidates] * contribution[screen_candidates].clamp_min(1.0e-6)
-            screen_order = torch.argsort(screen_score, descending=True)
-            extra_parents = screen_candidates[
-                screen_order[: max(0, int(config.screen_footprint_split_extra_parents_per_event))]
+    if float(config.guide_prior_child_radius_weight) > 0.0:
+        child_radius_log_ratio = torch.log(
+            groom.child_radius.clamp_min(EPS)
+            / guide_interp["child_radius"].clamp_min(EPS)
+        )
+        terms.append(child_radius_log_ratio.abs().mean())
+        weights.append(float(config.guide_prior_child_radius_weight))
+    if float(config.guide_prior_width_weight) > 0.0:
+        width_weight = float(config.guide_prior_width_weight)
+        root_width_log_ratio = torch.log(
+            groom.root_width.clamp_min(EPS)
+            / guide_interp["root_width"].clamp_min(EPS)
+        )
+        tip_ratio = groom.tip_width / groom.root_width.clamp_min(EPS)
+        tip_target = guide_interp["tip_width_ratio"]
+        ratio_eps = torch.as_tensor(
+            torch.finfo(tip_ratio.dtype).eps,
+            device=tip_ratio.device,
+            dtype=tip_ratio.dtype,
+        )
+        tip_logit_delta = torch.logit(
+            tip_ratio.clamp(ratio_eps, 1.0 - ratio_eps)
+        ) - torch.logit(tip_target.clamp(ratio_eps, 1.0 - ratio_eps))
+        taper_log_ratio = torch.log(
+            groom.width_taper.clamp_min(EPS)
+            / guide_interp["width_taper"].clamp_min(EPS)
+        )
+        terms.extend(
+            [
+                root_width_log_ratio.abs().mean(),
+                tip_logit_delta.abs().mean(),
+                taper_log_ratio.abs().mean(),
             ]
-            if extra_parents.numel() > 0:
-                parents = torch.cat([parents, extra_parents], dim=0)
-                screen_extra_parents = extra_parents
-                extra_screen_parent_count = int(extra_parents.numel())
-    extra_neutral_screen_parent_count = 0
-    neutral_screen_extra_parents = parents.new_empty((0,))
-    if screen_split_enabled and int(config.screen_footprint_split_neutral_extra_parents_per_event) > 0:
-        neutral_candidates = torch.nonzero(
-            neutral_screen_valid & (contribution >= float(config.overlong_split_min_contribution)),
-            as_tuple=False,
-        ).reshape(-1)
-        if parents.numel() > 0 and neutral_candidates.numel() > 0:
-            neutral_candidates = neutral_candidates[~torch.isin(neutral_candidates, parents)]
-        if neutral_candidates.numel() > 0:
-            neutral_score = screen_excess[neutral_candidates] * contribution[neutral_candidates].clamp_min(1.0e-6)
-            neutral_order = torch.argsort(neutral_score, descending=True)
-            neutral_extra_parents = neutral_candidates[
-                neutral_order[: max(0, int(config.screen_footprint_split_neutral_extra_parents_per_event))]
-            ]
-            if neutral_extra_parents.numel() > 0:
-                parents = torch.cat([parents, neutral_extra_parents], dim=0)
-                neutral_screen_extra_parents = neutral_extra_parents
-                extra_neutral_screen_parent_count = int(neutral_extra_parents.numel())
-    directions = surface_flow_directions_local(model)
-    child_parent_indices, new_face_ids, new_barycentric = propose_directional_split_children(
-        state,
-        parents,
-        directions,
-        int(config.overlong_split_children_per_parent),
-        vertices=model.vertices,
-        faces=model.faces,
-        neighbor_count=int(config.split_neighbor_count),
-        candidate_rings=int(config.split_candidate_rings),
-        candidate_face_count=int(config.split_candidate_face_count),
-        min_child_distance=float(config.split_min_child_distance),
-        target_distance=float(config.overlong_split_target_distance),
-        target_weight=float(config.overlong_split_target_weight),
-        child_target_points=child_target_points,
-        residual_target_weight=float(config.overlong_split_residual_target_weight),
-    )
-    split_parent_indices = torch.unique(child_parent_indices.reshape(-1)) if child_parent_indices.numel() > 0 else parents.new_empty((0,))
-    skipped_parent_count = int(parents.numel() - split_parent_indices.numel())
-    prune_mask = torch.zeros((state.points.shape[0],), device=state.points.device, dtype=torch.bool)
-    if bool(config.overlong_split_replace_parent):
-        valid_primary_parents = (
-            primary_parents[torch.isin(primary_parents, split_parent_indices)]
-            if primary_parents.numel() > 0 and split_parent_indices.numel() > 0
-            else primary_parents.new_empty((0,))
         )
-        if valid_primary_parents.numel() > 0:
-            prune_mask[valid_primary_parents] = True
-    if bool(config.screen_footprint_split_replace_parent):
-        if screen_extra_parents.numel() > 0 and split_parent_indices.numel() > 0:
-            valid_screen_extra_parents = screen_extra_parents[torch.isin(screen_extra_parents, split_parent_indices)]
-            if valid_screen_extra_parents.numel() > 0:
-                prune_mask[valid_screen_extra_parents] = True
-        if neutral_screen_extra_parents.numel() > 0 and split_parent_indices.numel() > 0:
-            valid_neutral_screen_extra_parents = neutral_screen_extra_parents[
-                torch.isin(neutral_screen_extra_parents, split_parent_indices)
-            ]
-            if valid_neutral_screen_extra_parents.numel() > 0:
-                prune_mask[valid_neutral_screen_extra_parents] = True
-    screen_child_mask = torch.zeros_like(child_parent_indices, dtype=torch.bool)
-    if screen_extra_parents.numel() > 0:
-        screen_child_mask |= torch.isin(child_parent_indices, screen_extra_parents)
-    if neutral_screen_extra_parents.numel() > 0:
-        screen_child_mask |= torch.isin(child_parent_indices, neutral_screen_extra_parents)
-
-    def per_child_scale(global_scale: float, screen_scale: float) -> torch.Tensor:
-        scale = torch.full_like(length[child_parent_indices], float(global_scale))
-        if float(screen_scale) >= 0.0 and bool(screen_child_mask.any()):
-            scale = torch.where(
-                screen_child_mask,
-                torch.full_like(scale, float(screen_scale)),
-                scale,
-            )
-        return scale
-
-    child_length_scale = per_child_scale(
-        float(config.overlong_split_child_length_scale),
-        float(config.screen_footprint_split_child_length_scale),
-    )
-    child_length = length[child_parent_indices] * child_length_scale
-    lo, hi = model.groom.ranges.length
-    length_upper = min(float(hi), float(config.overlong_split_length_threshold)) if float(config.overlong_split_length_threshold) > 0.0 else float(hi)
-    child_length = child_length.clamp(float(lo), length_upper)
-    child_overrides = {
-        "length_raw": raw_from_range(child_length[:, None], model.groom.ranges.length),
-    }
-    width_scale = per_child_scale(
-        float(config.overlong_split_child_width_scale),
-        float(config.screen_footprint_split_child_width_scale),
-    )
-    width_needs_override = bool((width_scale != 1.0).any().detach().cpu())
-    if width_needs_override:
-        child_width = width[child_parent_indices] * width_scale
-        child_width = child_width.clamp(float(model.groom.ranges.root_width[0]), float(model.groom.ranges.root_width[1]))
-        child_overrides["root_width_raw"] = raw_from_range(child_width[:, None], model.groom.ranges.root_width)
-        if float(config.overlong_split_child_width_scale) == 1.0 and float(config.screen_footprint_split_child_width_scale) >= 0.0:
-            child_overrides["root_width_raw_mask"] = screen_child_mask
-    opacity_scale = per_child_scale(
-        float(config.overlong_split_child_opacity_scale),
-        float(config.screen_footprint_split_child_opacity_scale),
-    )
-    opacity_needs_override = bool((opacity_scale != 1.0).any().detach().cpu())
-    if opacity_needs_override:
-        child_opacity = opacity[child_parent_indices] * opacity_scale
-        child_opacity = child_opacity.clamp(float(model.groom.ranges.opacity[0]), float(model.groom.ranges.opacity[1]))
-        child_overrides["opacity_raw"] = raw_from_range(child_opacity[:, None], model.groom.ranges.opacity)
-        if float(config.overlong_split_child_opacity_scale) == 1.0 and float(config.screen_footprint_split_child_opacity_scale) >= 0.0:
-            child_overrides["opacity_raw_mask"] = screen_child_mask
-    spread_scale = per_child_scale(
-        float(config.overlong_split_child_spread_scale),
-        float(config.screen_footprint_split_child_spread_scale),
-    )
-    spread_needs_override = bool((spread_scale != 1.0).any().detach().cpu())
-    if spread_needs_override:
-        groom = effective_groom_for_current_roots(model)
-        child_radius = (groom.child_radius.reshape(-1)[child_parent_indices] * spread_scale).clamp(
-            float(model.groom.ranges.child_radius[0]),
-            float(model.groom.ranges.child_radius[1]),
-        )
-        curl_radius = (groom.curl_radius.reshape(-1)[child_parent_indices] * spread_scale).clamp(
-            float(model.groom.ranges.curl_radius[0]),
-            float(model.groom.ranges.curl_radius[1]),
-        )
-        frizz = (groom.frizz.reshape(-1)[child_parent_indices] * spread_scale).clamp(
-            float(model.groom.ranges.frizz[0]),
-            float(model.groom.ranges.frizz[1]),
-        )
-        child_overrides["child_radius_raw"] = raw_from_range(child_radius[:, None], model.groom.ranges.child_radius)
-        child_overrides["curl_radius_raw"] = raw_from_range(curl_radius[:, None], model.groom.ranges.curl_radius)
-        child_overrides["frizz_raw"] = raw_from_range(frizz[:, None], model.groom.ranges.frizz)
-        if float(config.overlong_split_child_spread_scale) == 1.0 and float(config.screen_footprint_split_child_spread_scale) >= 0.0:
-            child_overrides["child_radius_raw_mask"] = screen_child_mask
-            child_overrides["curl_radius_raw_mask"] = screen_child_mask
-            child_overrides["frizz_raw_mask"] = screen_child_mask
-    clump_min = per_child_scale(
-        float(config.overlong_split_child_clump_min),
-        float(config.screen_footprint_split_child_clump_min),
-    )
-    clump_needs_override = bool((clump_min > 0.0).any().detach().cpu())
-    if clump_needs_override:
-        groom = effective_groom_for_current_roots(model)
-        clump_target = clump_min.clamp(
-            float(model.groom.ranges.clump_strength[0]),
-            float(model.groom.ranges.clump_strength[1]),
-        )
-        clump = torch.maximum(
-            groom.clump_strength.reshape(-1)[child_parent_indices],
-            clump_target,
-        ).clamp(float(model.groom.ranges.clump_strength[0]), float(model.groom.ranges.clump_strength[1]))
-        child_overrides["clump_strength_raw"] = raw_from_range(clump[:, None], model.groom.ranges.clump_strength)
-        if float(config.overlong_split_child_clump_min) <= 0.0 and float(config.screen_footprint_split_child_clump_min) >= 0.0:
-            child_overrides["clump_strength_raw_mask"] = screen_child_mask
-    update = RootStructureUpdate(
-        parent_indices=parents,
-        child_parent_indices=child_parent_indices,
-        new_face_ids=new_face_ids,
-        new_barycentric=new_barycentric,
-        prune_mask=prune_mask,
-        scores={"screen_footprint_child_mask": screen_child_mask},
-    )
-    record = {
-        "enabled": 1,
-        "candidate_count": int(candidates.numel()),
-        "selected_parent_count": int(parents.numel()),
-        "split_parent_count": int(split_parent_indices.numel()),
-        "skipped_parent_count": int(skipped_parent_count),
-        "inserted_child_count": int(new_barycentric.shape[0]),
-        "primary_parent_count": int(primary_selected_parent_count),
-        "extra_screen_parent_count": int(extra_screen_parent_count),
-        "extra_neutral_screen_parent_count": int(extra_neutral_screen_parent_count),
-        "parent_length_mean": float(length[parents].mean().detach().cpu()) if parents.numel() else 0.0,
-        "parent_length_max": float(length[parents].max().detach().cpu()) if parents.numel() else 0.0,
-        "parent_width_mean": float(width[parents].mean().detach().cpu()) if parents.numel() else 0.0,
-        "parent_width_max": float(width[parents].max().detach().cpu()) if parents.numel() else 0.0,
-        "child_length_mean": float(child_length.mean().detach().cpu()) if child_length.numel() else 0.0,
-        "residual_target_weight": float(config.overlong_split_residual_target_weight),
-        "replace_parent": int(bool(config.overlong_split_replace_parent)),
-        "screen_replace_parent": int(bool(config.screen_footprint_split_replace_parent)),
-        "residual_target_valid_parent_count": int(torch.isfinite(child_target_points[parents]).all(dim=-1).sum().detach().cpu()) if child_target_points is not None and parents.numel() else 0,
-        "screen_candidate_count": int((screen_valid & (contribution >= float(config.overlong_split_min_contribution))).sum().detach().cpu()) if screen_split_enabled else 0,
-        "neutral_screen_candidate_count": int((neutral_screen_valid & (contribution >= float(config.overlong_split_min_contribution))).sum().detach().cpu()) if screen_split_enabled else 0,
-        "selected_screen_parent_count": int(screen_valid[parents].sum().detach().cpu()) if screen_split_enabled and parents.numel() else 0,
-        "selected_neutral_screen_parent_count": int(neutral_screen_valid[parents].sum().detach().cpu()) if screen_split_enabled and parents.numel() else 0,
-        "screen_child_override_count": int(screen_child_mask.sum().detach().cpu()) if child_parent_indices.numel() else 0,
-        "screen_child_length_scale": float(config.screen_footprint_split_child_length_scale),
-        "screen_child_width_scale": float(config.screen_footprint_split_child_width_scale),
-        "screen_child_opacity_scale": float(config.screen_footprint_split_child_opacity_scale),
-        "screen_child_spread_scale": float(config.screen_footprint_split_child_spread_scale),
-        "screen_child_clump_min": float(config.screen_footprint_split_child_clump_min),
-        "parent_screen_diag_mean": float(screen_diag[parents].mean().detach().cpu()) if screen_split_enabled and parents.numel() else 0.0,
-        "parent_screen_diag_max": float(screen_diag[parents].max().detach().cpu()) if screen_split_enabled and parents.numel() else 0.0,
-        "parent_luma_mean": float(luma[parents].mean().detach().cpu()) if screen_split_enabled and parents.numel() else 0.0,
-    }
-    return update, child_overrides, record
-
-
-def merge_structure_updates(
-    base: RootStructureUpdate,
-    extra: RootStructureUpdate | None,
-    *,
-    extra_child_overrides: dict[str, torch.Tensor] | None = None,
-) -> RootStructureUpdate:
-    if extra is None or extra.new_barycentric.numel() == 0:
-        return base
-    scores = dict(base.scores)
-    base_new_count = int(base.new_barycentric.shape[0])
-    total_new_count = base_new_count + int(extra.new_barycentric.shape[0])
-    child_mask = torch.zeros((total_new_count,), device=extra.new_barycentric.device, dtype=torch.bool)
-    child_mask[base_new_count:] = True
-    scores["overlong_child_mask"] = child_mask
-    if "screen_footprint_child_mask" in extra.scores:
-        screen_mask = torch.zeros((total_new_count,), device=extra.new_barycentric.device, dtype=torch.bool)
-        screen_mask[base_new_count:] = extra.scores["screen_footprint_child_mask"].to(
-            device=screen_mask.device,
-            dtype=torch.bool,
-        ).reshape(-1)
-        if "screen_footprint_child_mask" in scores:
-            prior = scores["screen_footprint_child_mask"].to(device=screen_mask.device, dtype=torch.bool).reshape(-1)
-            if prior.shape[0] != total_new_count:
-                merged_prior = torch.zeros_like(screen_mask)
-                merged_prior[: min(prior.shape[0], base_new_count)] = prior[: min(prior.shape[0], base_new_count)]
-                prior = merged_prior
-            screen_mask = screen_mask | prior
-        scores["screen_footprint_child_mask"] = screen_mask
-    for name, values in (extra_child_overrides or {}).items():
-        override = torch.zeros((total_new_count, *values.shape[1:]), device=values.device, dtype=values.dtype)
-        override[base_new_count:] = values
-        scores[f"overlong_child_{name}"] = override
-    parent_indices = torch.unique(torch.cat([base.parent_indices.reshape(-1), extra.parent_indices.reshape(-1)], dim=0))
-    prune_mask = base.prune_mask.clone()
-    if extra.prune_mask.numel() > 0:
-        prune_mask = prune_mask | extra.prune_mask.to(device=prune_mask.device)
-    return RootStructureUpdate(
-        parent_indices=parent_indices,
-        child_parent_indices=torch.cat([base.child_parent_indices.reshape(-1), extra.child_parent_indices.reshape(-1)], dim=0),
-        new_face_ids=torch.cat([base.new_face_ids.reshape(-1), extra.new_face_ids.reshape(-1)], dim=0),
-        new_barycentric=torch.cat([base.new_barycentric.reshape(-1, 3), extra.new_barycentric.reshape(-1, 3)], dim=0),
-        prune_mask=prune_mask,
-        scores=scores,
-    )
+        weights.extend([width_weight, width_weight, width_weight])
+    if not needs_prior or not terms:
+        prior_loss = zero
+    else:
+        prior_loss = terms[0] * weights[0]
+        for term, weight in zip(terms[1:], weights[1:]):
+            prior_loss = prior_loss + term * weight
+        prior_loss = prior_loss / max(sum(weights), EPS)
+    return prior_loss
 
 
 def parse_index_override(text: str, default: list[int]) -> list[int]:
@@ -5315,38 +5636,22 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         init_scale=config.init_mesh_scale,
         init_translation=config.init_mesh_translation,
         init_groom_length=config.init_groom_length,
-        init_guide_length=config.init_guide_length,
         max_child_count=config.child_count,
         local_child_color_support=config.local_child_color_support,
-        local_child_opacity_support=config.local_child_opacity_support,
         local_child_color_scale=config.local_child_color_scale,
-        local_child_opacity_scale=config.local_child_opacity_scale,
         guide_face_ids=guide_surface_roots.face_ids if guide_surface_roots is not None else None,
         guide_barycentric=guide_surface_roots.barycentric if guide_surface_roots is not None else None,
         guide_region_ids=guide_region_ids,
         guide_interpolation_k=config.guide_interpolation_k,
-        guide_controls_flow=config.guide_controls_flow,
-        guide_direction_primary=config.guide_direction_primary,
-        direction_lift_min=config.clean_flow_lift_min,
-        direction_lift_max=config.clean_flow_lift_max,
+        render_geometry_parameterization=config.render_geometry_parameterization,
         guide_length_residual_scale=config.guide_length_residual_scale,
         guide_bend_residual_scale=config.guide_bend_residual_scale,
-        guide_flow_residual_scale=config.guide_flow_residual_scale,
+        guide_direction_residual_scale=config.guide_direction_residual_scale,
         guide_width_residual_scale=config.guide_width_residual_scale,
-        guide_flow_strength_residual_scale=config.guide_flow_strength_residual_scale,
-        guide_lift_residual_scale=config.guide_lift_residual_scale,
-        guide_stiffness_residual_scale=config.guide_stiffness_residual_scale,
         guide_child_radius_residual_scale=config.guide_child_radius_residual_scale,
         guide_clump_residual_scale=config.guide_clump_residual_scale,
         guide_curl_residual_scale=config.guide_curl_residual_scale,
         guide_frizz_residual_scale=config.guide_frizz_residual_scale,
-        guide_region_body_residual_multiplier=config.guide_region_body_residual_multiplier,
-        guide_region_head_residual_multiplier=config.guide_region_head_residual_multiplier,
-        guide_region_body_shape_multiplier=config.guide_region_body_shape_multiplier,
-        guide_region_head_shape_multiplier=config.guide_region_head_shape_multiplier,
-        guide_region_body_coverage_multiplier=config.guide_region_body_coverage_multiplier,
-        guide_region_head_coverage_multiplier=config.guide_region_head_coverage_multiplier,
-        shape_bend_scale=config.shape_bend_scale,
         shape_curl_scale=config.shape_curl_scale,
         shape_frizz_scale=config.shape_frizz_scale,
         strand_shape_normal_mode=config.strand_shape_normal_mode,
@@ -5360,8 +5665,6 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             model,
             image_paths,
             mask_paths,
-            angle_paths,
-            conf_paths,
             viewmats,
             ks,
             report.train_indices,
@@ -5389,25 +5692,23 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             root_init_count=int(clean_flow_report.get("clean_flow_root_init_count", 0)),
             guide_init_count=int(clean_flow_report.get("clean_flow_guide_init_count", 0)),
         )
-        skip_render_to_guide_init = (
-            bool(config.guide_roots_from_clean_flow)
-            and bool(config.clean_flow_target)
-            and bool(config.clean_flow_init)
-        )
-        if skip_render_to_guide_init:
+        if model.guide_enabled():
+            if not (
+                bool(config.guide_roots_from_clean_flow)
+                and bool(config.clean_flow_target)
+                and bool(config.clean_flow_init)
+            ):
+                raise RuntimeError(
+                    "guide roots require direct clean-flow initialization; "
+                    "render-to-guide reverse initialization was deleted"
+                )
             guide_init_report = {
-                "guide_init_enabled": 0,
-                "skipped": "guide_roots_from_clean_flow",
-                "reason": "clean-flow guide roots are initialized directly from the clean-flow target",
+                "guide_init_enabled": 1,
+                "guide_init_count": int(model.guide_points_local.shape[0]),
+                "source": "direct_clean_flow_3d",
             }
-            setup_progress("guide_control_init_skipped", reason=str(guide_init_report["skipped"]))
         else:
-            preserve_clean_flow_direction = bool(config.clean_flow_target) and bool(config.clean_flow_init)
-            setup_progress("guide_control_init_start")
-            guide_init_report = initialize_guide_controls_from_roots(
-                model,
-                preserve_direction_controls=preserve_clean_flow_direction,
-            )
+            guide_init_report = {"guide_init_enabled": 0}
         (output_dir / "guide_control_init_report.json").write_text(
             json.dumps(guide_init_report, indent=2) + "\n",
             encoding="utf-8",
@@ -5433,17 +5734,36 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         if checkpoint is None:
             checkpoint_path = resolve_project_path(config.resume_checkpoint)
             checkpoint = load_training_checkpoint(checkpoint_path)
-        model.load_state_dict(compatible_model_state_dict(model, checkpoint["model"]), strict=True)
+        checkpoint_version = int(checkpoint.get("checkpoint_version", -1))
+        if checkpoint_version != CURRENT_CHECKPOINT_VERSION:
+            raise RuntimeError(
+                "checkpoint schema mismatch: "
+                f"expected {CURRENT_CHECKPOINT_VERSION}, got {checkpoint_version}; "
+                "the hierarchical width/child-profile route must start from zero"
+            )
+        model.load_state_dict(checkpoint["model"], strict=True)
         start_iteration = int(checkpoint.get("iteration", 0))
 
     setup_progress("root_graph_start", root_count=int(model.face_ids.shape[0]))
-    graph_edges = rebuild_graph_edges(model, k=8)
-    setup_progress("root_graph_done", edge_count=int(graph_edges.shape[0]))
+    graph_edges, graph_report = rebuild_graph_edges(
+        model,
+        mode=config.smooth_graph_mode,
+        k=config.smooth_graph_k,
+    )
+    setup_progress("root_graph_done", **graph_report)
     setup_progress("guide_graph_start", guide_root_count=int(model.guide_face_ids.shape[0]) if model.guide_enabled() else 0)
-    guide_graph_edges = build_guide_graph_edges(model, k=8)
-    setup_progress("guide_graph_done", edge_count=int(guide_graph_edges.shape[0]))
+    guide_graph_edges, guide_graph_report = build_guide_graph_edges(
+        model,
+        mode=config.smooth_graph_mode,
+        k=config.smooth_graph_k,
+    )
+    setup_progress("guide_graph_done", **guide_graph_report)
     (output_dir / "root_graph.json").write_text(
-        json.dumps({"edge_count": int(graph_edges.shape[0]), "knn": 8}, indent=2) + "\n",
+        json.dumps(
+            {"render": graph_report, "guide": guide_graph_report},
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -5480,18 +5800,16 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         restore_training_rng_state(checkpoint_rng_state, generator)
         setup_progress("rng_resume_done", checkpoint_iteration=int(start_iteration))
     root_accum = RootStatsWindow(int(model.face_ids.shape[0]), device)
-    root_target_sum = torch.zeros((int(model.face_ids.shape[0]), 3), device=device)
-    root_target_weight = torch.zeros((int(model.face_ids.shape[0]), 1), device=device)
-    lifecycle_history: list[dict[str, float | int]] = []
+    lifecycle_history = restored_lifecycle_history(
+        resume_checkpoint,
+        start_iteration=int(start_iteration),
+    )
     stage_save_iters = parse_iteration_set(config.stage_save_iters)
-    if float(config.early_capacity_weight) > 0.0 and int(config.early_capacity_until) <= 0:
-        raise RuntimeError("--early-capacity-weight requires explicit --early-capacity-until")
     if float(config.gpu_memory_limit_gb) > 0.0 and int(config.gpu_memory_check_interval) <= 0:
         raise RuntimeError("--gpu-memory-limit-gb requires --gpu-memory-check-interval > 0")
 
     log_path = output_dir / "metrics.jsonl"
     start = time.time()
-    needs_orientation_loss = float(config.orientation_weight) > 0.0 or float(config.orientation_detail_weight) > 0.0
     needs_rgb_flow_loss = float(config.rgb_flow_weight) > 0.0 or float(config.rgb_flow_detail_weight) > 0.0
     rgb_flow_target_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -5507,6 +5825,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         guide_root_count=int(model.guide_face_ids.shape[0]) if model.guide_enabled() else 0,
         graph_edges=int(graph_edges.shape[0]),
         guide_graph_edges=int(guide_graph_edges.shape[0]),
+        activation_checkpointing=memory_constrained_activation_checkpointing(device),
+        pytorch_alloc_conf=os.environ.get("PYTORCH_ALLOC_CONF", ""),
+        device_memory_gb=float(torch.cuda.get_device_properties(device).total_memory / 1024**3) if device.type == "cuda" else 0.0,
     )
     enforce_cuda_memory_guard(config, device, iteration=int(start_iteration), stage="setup_complete", progress_event=progress_event)
     if torch.cuda.is_available():
@@ -5523,19 +5844,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             model.guide_residual_multiplier = guide_residual_multiplier_for_iteration(config, iteration)
             model.guide_coverage_residual_multiplier = guide_coverage_residual_multiplier_for_iteration(config, iteration)
             model.shape_detail_multiplier = shape_detail_multiplier_for_iteration(config, iteration)
-            overlong_split_until = config.densify_until if int(config.overlong_split_until) < 0 else int(config.overlong_split_until)
             should_densify = (
                 iteration >= config.densify_warmup
                 and iteration <= config.densify_until
                 and config.densify_interval > 0
                 and (iteration - config.densify_warmup) % config.densify_interval == 0
-            )
-            should_overlong_split = (
-                iteration >= config.densify_warmup
-                and iteration <= overlong_split_until
-                and config.densify_interval > 0
-                and (iteration - config.densify_warmup) % config.densify_interval == 0
-                and int(config.overlong_split_max_parents_per_event) > 0
             )
             should_prune = (
                 iteration >= config.prune_start
@@ -5546,7 +5859,6 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 model.guide_enabled()
                 and int(config.guide_densify_interval) > 0
                 and int(config.guide_densify_start) > 0
-                and int(config.guide_densify_max_splits_per_event) > 0
                 and iteration >= int(config.guide_densify_start)
                 and iteration <= int(config.guide_densify_until)
                 and (iteration - int(config.guide_densify_start)) % int(config.guide_densify_interval) == 0
@@ -5562,14 +5874,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 )
             target = load_image(image_paths[idx], device)
             mask = load_mask(mask_paths[idx], device)
-            flow_loss_mask = mask * mask_edge_confidence(mask, config.projected_init_mask_edge_kernel)
-            if needs_orientation_loss:
-                target_orientation, target_conf = load_orientation(angle_paths[idx], conf_paths[idx], (width, height), bins=180, device=device)
-                target_conf = target_conf * flow_loss_mask
-            else:
-                target_orientation = torch.zeros((*target.shape[:2], 2), device=device, dtype=target.dtype)
-                target_conf = torch.zeros((*target.shape[:2], 1), device=device, dtype=target.dtype)
-            flow_loss_mask_vis = target_conf.detach()
+            flow_loss_mask_vis = torch.zeros((*target.shape[:2], 1), device=device, dtype=target.dtype)
             target_flow_vis = None
             mesh_color = sample_backing_color(config, device, train=True)
             scene_bg = scene_background_color(config, device)
@@ -5625,36 +5930,29 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             fixed_bg = scene_background_color(config, device).view(1, 1, 3)
             pred_fixed = render_info["raw_fur_image"] + (1.0 - alpha) * fixed_bg
             target_fixed = composite_target(target, mask, fixed_bg)
-            rgb_weight = (0.25 + 1.75 * mask).detach()
+            edge_loss_weight = loss_mask_edge_weight(mask, int(config.loss_mask_edge_kernel))
+            flow_supervision_mask = (mask * mask_edge_confidence(mask, int(config.loss_mask_edge_kernel))).detach().clamp(0.0, 1.0)
+            densify_supervision_mask = (mask * edge_loss_weight).detach().clamp(0.0, 1.0)
+            rgb_weight = ((0.25 + 1.75 * mask) * edge_loss_weight).detach()
             fixed_rgb_loss = (torch.abs(pred_fixed - target_fixed) * rgb_weight).sum() / torch.clamp(rgb_weight.sum() * 3.0, min=1.0)
             random_backing_loss = (
                 torch.abs((pred - pred_fixed) - (target_with_backing - target_fixed)) * rgb_weight
             ).sum() / torch.clamp(rgb_weight.sum() * 3.0, min=1.0)
             rgb_loss = fixed_rgb_loss + float(config.random_backing_loss_weight) * random_backing_loss
-            mask_loss = torch.mean(torch.abs(alpha - mask))
+            mask_loss = (torch.abs(alpha - mask) * edge_loss_weight).sum() / torch.clamp(edge_loss_weight.sum(), min=1.0)
             residual_per_root = None
             residual_image = None
             if float(config.densify_residual_weight) > 0.0:
-                needs_child_target_points = (
-                    (should_densify and float(config.densify_target_placement_weight) > 0.0)
-                    or (should_overlong_split and float(config.overlong_split_residual_target_weight) > 0.0)
-                )
-                needs_direct_target_image = should_densify and str(config.densify_parent_selection) == "target_direct"
-                needs_residual_per_root = (
-                    float(config.overpaint_capacity_weight) > 0.0
-                    or needs_child_target_points
-                    or (should_densify and str(config.densify_parent_selection) != "target_direct")
-                )
-                needs_residual_image = needs_residual_per_root or needs_direct_target_image
-                if needs_residual_image:
-                    residual_image = densification_residual_image(pred_fixed, target_fixed, alpha, mask, config)
+                needs_residual_per_root = should_densify
+                if needs_residual_per_root:
+                    residual_image = densification_residual_image(pred_fixed, target_fixed, alpha, densify_supervision_mask, config)
                 if str(config.densify_residual_mode) == "pixel_to_root":
                     if needs_residual_per_root and trace_iteration:
                         progress_event("before_pixel_to_root_evidence", iteration=int(iteration))
                     if needs_residual_per_root:
                         if residual_image is None:
                             raise RuntimeError("pixel_to_root evidence requested without residual_image")
-                        residual_per_root, target_local, target_weight = pixel_to_root_evidence(
+                        residual_per_root, _, _ = pixel_to_root_evidence(
                             model,
                             roots_local_for_grad,
                             residual_image,
@@ -5665,10 +5963,6 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         )
                     if needs_residual_per_root and trace_iteration:
                         progress_event("after_pixel_to_root_evidence", iteration=int(iteration))
-                    if needs_child_target_points:
-                        valid_target = torch.isfinite(target_local).all(dim=-1, keepdim=True) & (target_weight > 0.0)
-                        root_target_sum += torch.where(valid_target, target_local * target_weight, torch.zeros_like(root_target_sum))
-                        root_target_weight += torch.where(valid_target, target_weight, torch.zeros_like(root_target_weight))
                 else:
                     if needs_residual_per_root:
                         if residual_image is None:
@@ -5684,45 +5978,12 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         )
                 if residual_per_root is not None:
                     residual_per_root = residual_per_root * float(config.densify_residual_weight)
-            if float(config.overpaint_capacity_weight) > 0.0 and residual_per_root is None:
-                raise RuntimeError("overpaint capacity loss requires residual evidence; set --densify-residual-weight > 0")
-            if needs_orientation_loss:
-                pred_orientation, pred_orientation_conf = render_orientation_map(
-                    gaussians,
-                    viewmats[idx],
-                    ks[idx],
-                    width,
-                    height,
-                )
-                if trace_iteration:
-                    progress_event("after_render_orientation_map", iteration=int(iteration))
-                orient_loss, orient_detail_loss, orient_stats = orientation_map_losses(
-                    pred_orientation,
-                    pred_orientation_conf,
-                    target_orientation,
-                    target_conf,
-                    config.orientation_min_confidence,
-                )
-            else:
-                pred_orientation = torch.zeros((*pred_fixed.shape[:2], 2), device=pred_fixed.device, dtype=pred_fixed.dtype)
-                pred_orientation_conf = torch.zeros((*pred_fixed.shape[:2], 1), device=pred_fixed.device, dtype=pred_fixed.dtype)
-                orient_loss = pred_fixed.sum() * 0.0
-                orient_detail_loss = pred_fixed.sum() * 0.0
-                orient_stats = {
-                    "orientation_loss": 0.0,
-                    "orientation_detail_loss": 0.0,
-                    "orientation_weight_sum": 0.0,
-                    "orientation_valid_pixels": 0,
-                    "orientation_pred_visible_pixels": 0,
-                }
-                if trace_iteration:
-                    progress_event("skip_render_orientation_map", iteration=int(iteration))
             if needs_rgb_flow_loss:
                 if trace_iteration:
                     progress_event("before_rgb_flow_loss", iteration=int(iteration))
                 if idx not in rgb_flow_target_cache:
                     with torch.no_grad():
-                        target_flow_cached, target_conf_cached = image_structure_flow(target_fixed, mask)
+                        target_flow_cached, target_conf_cached = image_structure_flow(target_fixed, flow_supervision_mask)
                     rgb_flow_target_cache[idx] = (
                         target_flow_cached.detach(),
                         target_conf_cached.detach(),
@@ -5734,7 +5995,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 rgb_flow_loss, rgb_flow_detail_loss, rgb_flow_stats = image_structure_flow_losses(
                     pred_fixed,
                     target_fixed,
-                    mask,
+                    flow_supervision_mask,
                     min_confidence=float(config.rgb_flow_min_confidence),
                     target_flow=target_flow_cached,
                     target_confidence=target_conf_cached,
@@ -5755,8 +6016,33 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             _, normals_now, roots_local = model.roots_and_normals()
             tangents_now, bitangents_now = model.tangent_frames(normals_now)
             effective_groom_now = model.apply_guide_controls(model.groom.decode(), roots_local)
-            smooth_loss = root_graph_smoothness(model.groom, graph_edges, model.root_observation_confidence)
-            guide_smooth_loss = guide_root_graph_smoothness(model, guide_graph_edges)
+            zero_loss = model.groom.length_raw.sum() * 0.0
+            smooth_loss = root_graph_smoothness(
+                model.groom,
+                graph_edges,
+                model.root_observation_confidence,
+                normals=normals_now,
+                tangents=tangents_now,
+                bitangents=bitangents_now,
+                smooth_field_metric=config.smooth_field_metric,
+                include_geometry=not model.uses_zero_centered_geometry(),
+            )
+            geometry_residual_smooth_loss = render_geometry_residual_graph_smoothness(
+                model,
+                graph_edges,
+                normals_now,
+                tangents_now,
+                bitangents_now,
+                model.root_observation_confidence,
+            )
+            smooth_loss = smooth_loss + geometry_residual_smooth_loss
+            guide_smooth_loss = guide_root_graph_smoothness(
+                model,
+                guide_graph_edges,
+                smooth_field_metric=config.smooth_field_metric,
+                guide_length_smooth_mode=config.guide_length_smooth_mode,
+                smooth_graph_k=config.smooth_graph_k,
+            )
             effective_smooth_loss = effective_groom_graph_smoothness(
                 effective_groom_now,
                 graph_edges,
@@ -5765,120 +6051,42 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 bitangents_now,
                 model.groom.ranges,
                 model.root_observation_confidence,
+                smooth_field_metric=config.smooth_field_metric,
             )
-            clean_flow_length_loss = clean_flow_length_anchor_loss(model, effective_groom_now, config)
-            strand_shape_loss = strand_shape_consistency_loss(
-                model.guide_strands_for_loss(min(config.samples, 32)),
-                graph_edges,
-                model.root_observation_confidence,
-            )
-            shape_prior_loss = groom_shape_prior(model.groom) + guide_control_prior_loss(model)
-            effective_geometry_loss = effective_geometry_budget_loss(model, config)
-            zero_loss = model.groom.length_raw.sum() * 0.0
-            if float(config.overpaint_capacity_weight) > 0.0:
-                overpaint_loss = overpaint_capacity_loss(
-                    model.groom,
-                    residual_per_root,
-                    residual_threshold=config.overpaint_residual_threshold,
-                    length_target=config.overpaint_length_target,
-                    width_target=config.overpaint_width_target,
-                    opacity_target=config.overpaint_opacity_target,
+            strand_shape_samples = min(config.samples, 32)
+            if memory_constrained_activation_checkpointing(model.groom.length_raw.device):
+                strand_shape_loss = activation_checkpoint(
+                    lambda _anchor: strand_shape_consistency_loss(
+                        model.guide_strands_for_loss(strand_shape_samples),
+                        graph_edges,
+                        model.root_observation_confidence,
+                    ),
+                    model.groom.length_raw,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
                 )
             else:
-                overpaint_loss = zero_loss
-            if float(config.dark_stroke_capacity_weight) > 0.0:
-                dark_stroke_loss = dark_stroke_capacity_loss(
-                    model.groom,
-                    luma_threshold=config.dark_stroke_luma_threshold,
-                    length_target=config.dark_stroke_length_target,
-                    width_target=config.dark_stroke_width_target,
-                    child_radius_target=config.dark_stroke_child_radius_target,
-                    clump_target=config.dark_stroke_clump_target,
-                    opacity_target=config.dark_stroke_opacity_target,
-                )
-            else:
-                dark_stroke_loss = zero_loss
-            if float(config.screen_stroke_capacity_weight) > 0.0:
-                screen_stroke_loss = screen_stroke_capacity_loss(
-                    model.groom,
-                    gaussians,
-                    viewmats[idx],
-                    ks[idx],
-                    width,
-                    height,
-                    luma_threshold=config.screen_stroke_luma_threshold,
-                    screen_diag_threshold=config.screen_stroke_diag_threshold,
-                    length_target=config.screen_stroke_length_target,
-                    width_target=config.screen_stroke_width_target,
-                    opacity_target=config.screen_stroke_opacity_target,
-                )
-            else:
-                screen_stroke_loss = zero_loss
-            if float(config.neutral_screen_capacity_weight) > 0.0:
-                neutral_screen_loss = neutral_screen_capacity_loss(
-                    model.groom,
-                    gaussians,
-                    viewmats[idx],
-                    ks[idx],
-                    width,
-                    height,
-                    luma_threshold=config.neutral_screen_luma_threshold,
-                    screen_diag_threshold=config.neutral_screen_diag_threshold,
-                    length_target=config.neutral_screen_length_target,
-                    width_target=config.neutral_screen_width_target,
-                    opacity_target=config.neutral_screen_opacity_target,
-                )
-            else:
-                neutral_screen_loss = zero_loss
-            if float(config.color_contrast_capacity_weight) > 0.0:
-                color_contrast_loss = color_contrast_capacity_loss(
-                    model.groom,
+                strand_shape_loss = strand_shape_consistency_loss(
+                    model.guide_strands_for_loss(strand_shape_samples),
                     graph_edges,
-                    contrast_threshold=config.color_contrast_threshold,
-                    length_target=config.color_contrast_length_target,
-                    width_target=config.color_contrast_width_target,
-                    opacity_target=config.color_contrast_opacity_target,
+                    model.root_observation_confidence,
                 )
-            else:
-                color_contrast_loss = zero_loss
-            early_capacity_active = float(config.early_capacity_weight) > 0.0 and iteration <= int(config.early_capacity_until)
-            early_capacity_loss = early_capacity_staging_loss(
-                model.groom,
-                length_target=config.early_capacity_length_target,
-                width_target=config.early_capacity_width_target,
-                opacity_target=config.early_capacity_opacity_target,
-            ) + guide_capacity_staging_loss(
-                model,
-                length_target=config.early_capacity_length_target,
-                width_target=config.early_capacity_width_target,
-            )
-            guide_prior_loss = guide_interpolation_prior_loss(model, config)
+            guide_prior_loss = guide_interpolation_regularization_losses(model, config)
             clean_pred_direction = groom_direction_3d(effective_groom_now, normals_now, tangents_now, bitangents_now)
-            clean_flow_loss = clean_flow_anchor_loss(
-                clean_pred_direction,
-                model.clean_flow_direction_target,
-                model.clean_flow_anchor_confidence,
-                min_confidence=float(config.clean_flow_anchor_min_confidence),
-            )
             clean_flow_smooth_loss = clean_flow_smoothness_loss(
                 clean_pred_direction,
                 graph_edges,
                 model.clean_flow_anchor_confidence,
+                normals=(
+                    normals_now
+                    if smooth_metric_uses_transport(config.smooth_field_metric)
+                    else None
+                ),
             )
             if trace_iteration:
                 progress_event("after_regularizers", iteration=int(iteration))
-            if model.guide_enabled() and model.guide_flow_xy is not None:
-                guide_normals_now, guide_tangents_now, guide_bitangents_now = model.guide_normals_and_tangent_frames()
-                guide_flow_strength_now = GroomParameterField._decode_range(model.guide_flow_strength_raw, model.groom.ranges.flow_strength)
-                guide_lift_now = GroomParameterField._decode_range(model.guide_lift_raw, model.groom.ranges.lift)
-                guide_clean_pred_direction = controls_direction_3d(
-                    model.guide_flow_xy,
-                    guide_flow_strength_now,
-                    guide_lift_now,
-                    guide_normals_now,
-                    guide_tangents_now,
-                    guide_bitangents_now,
-                )
+            guide_clean_pred_direction = model.guide_direction_world()
+            if guide_clean_pred_direction is not None:
                 guide_clean_flow_loss = clean_flow_anchor_loss(
                     guide_clean_pred_direction,
                     model.guide_clean_flow_direction_target,
@@ -5891,25 +6099,13 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             loss = (
                 config.rgb_weight * rgb_loss
                 + config.mask_weight * mask_loss
-                + config.orientation_weight * orient_loss
-                + config.orientation_detail_weight * orient_detail_loss
                 + config.rgb_flow_weight * rgb_flow_loss
                 + config.rgb_flow_detail_weight * rgb_flow_detail_loss
                 + config.smooth_weight * smooth_loss
                 + config.guide_smooth_weight * guide_smooth_loss
                 + config.effective_smooth_weight * effective_smooth_loss
-                + config.clean_flow_length_anchor_weight * clean_flow_length_loss
                 + config.strand_shape_smooth_weight * strand_shape_loss
-                + config.shape_prior_weight * shape_prior_loss
-                + config.effective_geometry_budget_weight * effective_geometry_loss
-                + config.overpaint_capacity_weight * overpaint_loss
-                + config.dark_stroke_capacity_weight * dark_stroke_loss
-                + config.screen_stroke_capacity_weight * screen_stroke_loss
-                + config.neutral_screen_capacity_weight * neutral_screen_loss
-                + config.color_contrast_capacity_weight * color_contrast_loss
-                + (config.early_capacity_weight if early_capacity_active else 0.0) * early_capacity_loss
                 + config.guide_prior_weight * guide_prior_loss
-                + config.clean_flow_anchor_weight * clean_flow_loss
                 + config.clean_flow_guide_anchor_weight * guide_clean_flow_loss
                 + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
                 + config.root_move_reg_weight * root_move_loss
@@ -5924,12 +6120,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                             "loss": float(loss.detach().cpu()) if loss.detach().numel() == 1 else None,
                             "rgb_loss": float(rgb_loss.detach().cpu()),
                             "mask_loss": float(mask_loss.detach().cpu()),
-                            "orientation_loss": float(orient_loss.detach().cpu()),
-                            "orientation_detail_loss": float(orient_detail_loss.detach().cpu()),
                             "smooth_loss": float(smooth_loss.detach().cpu()),
-                            "shape_prior_loss": float(shape_prior_loss.detach().cpu()),
                             "guide_prior_loss": float(guide_prior_loss.detach().cpu()),
-                            "clean_flow_loss": float(clean_flow_loss.detach().cpu()),
                             "guide_clean_flow_loss": float(guide_clean_flow_loss.detach().cpu()),
                         },
                         sort_keys=True,
@@ -5948,6 +6140,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             root_accum.add(root_points=roots_local_for_grad, gaussians=gaussians, infos=[render_info], residual_per_root=residual_per_root)
             if int(config.guide_freeze_until) > 0 and iteration <= int(config.guide_freeze_until):
                 zero_guide_gradients(model)
+            if (
+                model.uses_zero_centered_geometry()
+                and iteration <= int(config.guide_residual_unlock_start)
+            ):
+                zero_render_geometry_residual_gradients(model)
             shape_detail_frozen = int(config.shape_detail_freeze_until) > 0 and iteration <= int(config.shape_detail_freeze_until)
             if shape_detail_frozen:
                 zero_shape_detail_gradients(model)
@@ -5964,26 +6161,17 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 )
             assert_model_parameters_finite(model, f"non-finite parameter after optimizer.step at iteration={iteration}, view_index={idx}")
 
-            if should_densify or should_overlong_split or should_prune or should_guide_densify:
+            if should_densify or should_prune or should_guide_densify:
                 stats = root_accum.to_stats()
                 root_count_before = int(model.face_ids.shape[0])
-                child_target_points = None
-                needs_child_target_points = (
-                    (should_densify and float(config.densify_target_placement_weight) > 0.0)
-                    or (should_overlong_split and float(config.overlong_split_residual_target_weight) > 0.0)
-                )
-                if needs_child_target_points:
-                    child_target_points = root_target_sum / torch.clamp(root_target_weight, min=1.0e-8)
-                    child_target_points = torch.where(
-                        root_target_weight > 0.0,
-                        child_target_points,
-                        torch.full_like(child_target_points, torch.nan),
-                    )
+                optimizer_param_names_before_structure = stage1_optimizer_param_names(model, config)
+                render_optimizer_transition: OptimizerRowTransition | None = None
+                guide_optimizer_transition: OptimizerRowTransition | None = None
                 densify_cfg = DensifyConfig(
                     grad_threshold=float(config.densify_score_threshold) if should_densify else float("inf"),
                     visibility_threshold=1.0,
                     score_mode=str(config.lifecycle_score_mode),
-                    parent_selection_mode=str(config.densify_parent_selection) if should_densify else "score",
+                    parent_selection_mode="evidence_local_max" if should_densify else "score",
                     max_new_roots=int(config.max_splits_per_event) * int(config.split_children_per_parent),
                     children_per_parent=int(config.split_children_per_parent),
                     replace_parent=True,
@@ -5998,46 +6186,16 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     min_opacity=float(config.prune_min_opacity) if should_prune else 0.0,
                     max_prune_fraction=float(config.prune_max_fraction) if should_prune else 0.0,
                 )
-                direct_target_record: dict[str, float | int] = {}
-                if should_densify and str(config.densify_parent_selection) == "target_direct":
-                    if float(config.densify_residual_weight) <= 0.0 or str(config.densify_residual_mode) != "pixel_to_root":
-                        raise RuntimeError("target_direct densification requires --densify-residual-weight > 0 and --densify-residual-mode pixel_to_root")
-                    if residual_image is None:
-                        raise RuntimeError("target_direct densification requires residual_image on the structure-update iteration")
-                    direct_parent_ids, direct_face_ids, direct_bary, direct_target_record = pixel_to_surface_child_roots(
-                        model,
-                        model.lifecycle_state().points,
-                        residual_image,
-                        viewmats[idx],
-                        ks[idx],
-                        mesh_depth,
-                        config,
-                        max_children=int(config.max_splits_per_event) * int(config.split_children_per_parent),
-                    )
-                    update = propose_direct_target_structure_update(
-                        model.lifecycle_state(),
-                        stats,
-                        prune_cfg,
-                        child_parent_indices=direct_parent_ids,
-                        new_face_ids=direct_face_ids,
-                        new_barycentric=direct_bary,
-                        score_mode=str(config.lifecycle_score_mode),
-                    )
-                else:
-                    update = propose_structure_update(
-                        model.lifecycle_state(),
-                        stats,
-                        densify_cfg,
-                        prune_cfg,
-                        vertices=model.vertices,
-                        faces=model.faces,
-                        child_target_points=child_target_points,
-                        child_target_weights=root_target_weight if should_densify else None,
-                        child_target_placement_weight=float(config.densify_target_placement_weight) if should_densify else 0.0,
-                    )
+                update = propose_structure_update(
+                    model.lifecycle_state(),
+                    stats,
+                    densify_cfg,
+                    prune_cfg,
+                    vertices=model.vertices,
+                    faces=model.faces,
+                )
                 if (
                     should_densify
-                    and str(config.densify_parent_selection) != "target_direct"
                     and float(config.densify_min_contribution) > 0.0
                     and update.parent_indices.numel() > 0
                 ):
@@ -6057,49 +6215,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         new_prune[original_parents] = False
                         new_prune[kept_parents] = True
                         update.prune_mask = new_prune
-                overlong_record: dict[str, float | int] = {"enabled": 0}
-                if should_overlong_split:
-                    screen_split_diag = None
-                    screen_split_visible_count = None
-                    if float(config.screen_footprint_split_diag_threshold) > 0.0:
-                        screen_split_diag, screen_split_visible_count = root_screen_footprint(
-                            gaussians,
-                            viewmats[idx],
-                            ks[idx],
-                            width,
-                            height,
-                            int(model.face_ids.shape[0]),
-                        )
-                    overlong_update, overlong_child_overrides, overlong_record = propose_overlong_split_update(
-                        model,
-                        stats,
-                        config,
-                        screen_diag=screen_split_diag,
-                        screen_visible_count=screen_split_visible_count,
-                        child_target_points=child_target_points,
-                    )
-                    update = merge_structure_updates(
-                        update,
-                        overlong_update,
-                        extra_child_overrides=overlong_child_overrides,
-                    )
-                target_placement_record: dict[str, float | int] = {}
-                if child_target_points is not None and update.new_barycentric.numel() > 0:
-                    current_state = model.lifecycle_state()
-                    target_for_child = child_target_points[update.child_parent_indices]
-                    target_valid = torch.isfinite(target_for_child).all(dim=-1)
-                    if bool(target_valid.any()):
-                        tri = model.vertices[model.faces[update.new_face_ids]]
-                        child_points = (tri * update.new_barycentric[:, :, None]).sum(dim=1)
-                        parent_points = current_state.points[update.child_parent_indices]
-                        parent_dist = torch.linalg.norm(parent_points[target_valid] - target_for_child[target_valid], dim=-1)
-                        child_dist = torch.linalg.norm(child_points[target_valid] - target_for_child[target_valid], dim=-1)
-                        target_placement_record = {
-                            "targeted_child_count": int(target_valid.sum().detach().cpu()),
-                            "parent_target_distance_mean": float(parent_dist.mean().detach().cpu()),
-                            "child_target_distance_mean": float(child_dist.mean().detach().cpu()),
-                            "target_distance_improvement_mean": float((parent_dist - child_dist).mean().detach().cpu()),
-                        }
+                current_state = model.lifecycle_state()
                 changed = update.new_barycentric.numel() > 0 or bool(update.prune_mask.any())
                 lifecycle_record = {
                     "iteration": iteration,
@@ -6108,6 +6224,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "inserted_child_count": int(update.new_barycentric.shape[0]),
                     "prune_count": int(update.prune_mask.sum().detach().cpu()),
                     "diagnostics": {
+                        "selection": lifecycle_selection_report(update.scores),
+                        "spatial_selected_parents": lifecycle_spatial_report(current_state, update.parent_indices),
                         "global": lifecycle_global_report(model, stats, update.scores),
                         "selected_parents": lifecycle_subset_report(model, stats, update.scores, update.parent_indices),
                         "pruned_roots": lifecycle_subset_report(
@@ -6118,39 +6236,60 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         ),
                     },
                 }
-                if config.stroke_drag_diagnostics:
-                    lifecycle_record["diagnostics"]["stroke_drag"] = stroke_drag_report(model, stats, update.scores)
-                if target_placement_record:
-                    lifecycle_record["target_placement"] = target_placement_record
-                if direct_target_record:
-                    lifecycle_record["direct_target"] = direct_target_record
-                if overlong_record.get("enabled", 0):
-                    lifecycle_record["overlong_split"] = overlong_record
                 guide_changed = False
                 if should_guide_densify:
                     guide_update, guide_record = propose_guide_densify_update(model, stats, config)
                     if guide_update is not None and guide_update.new_barycentric.numel() > 0:
+                        guide_record["spatial_selected_parents"] = lifecycle_spatial_report(
+                            model.guide_lifecycle_state(),
+                            guide_update.parent_indices,
+                        )
+                        guide_optimizer_transition = optimizer_row_transition(
+                            guide_update,
+                            old_count=int(model.guide_face_ids.shape[0]),
+                        )
                         guide_result = model.apply_guide_structure_update(guide_update)
                         guide_record.update(guide_result)
                         guide_changed = True
                     lifecycle_record["guide_densify"] = guide_record
                 if changed:
+                    render_optimizer_transition = optimizer_row_transition(
+                        update,
+                        old_count=root_count_before,
+                    )
                     result = model.apply_structure_update(update)
-                    graph_edges = rebuild_graph_edges(model, k=8)
                     lifecycle_record.update(result)
                 else:
                     lifecycle_record["root_count_after"] = root_count_before
                 if changed or guide_changed:
-                    graph_edges = rebuild_graph_edges(model, k=8)
-                    guide_graph_edges = build_guide_graph_edges(model, k=8)
-                    optimizer = make_stage1_optimizer(model, config)
+                    graph_edges, graph_report = rebuild_graph_edges(
+                        model,
+                        mode=config.smooth_graph_mode,
+                        k=config.smooth_graph_k,
+                    )
+                    guide_graph_edges, guide_graph_report = build_guide_graph_edges(
+                        model,
+                        mode=config.smooth_graph_mode,
+                        k=config.smooth_graph_k,
+                    )
+                    lifecycle_record["smoothing_graph"] = {
+                        "render": graph_report,
+                        "guide": guide_graph_report,
+                    }
+                    optimizer, optimizer_migration = rebuild_stage1_optimizer_with_state(
+                        model,
+                        config,
+                        optimizer,
+                        optimizer_param_names_before_structure,
+                        render_transition=render_optimizer_transition,
+                        guide_transition=guide_optimizer_transition,
+                    )
+                    lifecycle_record["optimizer_state_migration"] = optimizer_migration
                 lifecycle_history.append(lifecycle_record)
                 log.write(json.dumps({"lifecycle": lifecycle_record}) + "\n")
                 log.flush()
                 print(json.dumps({"lifecycle": lifecycle_record}), flush=True)
                 root_accum = RootStatsWindow(int(model.face_ids.shape[0]), device)
-                root_target_sum = torch.zeros((int(model.face_ids.shape[0]), 3), device=device)
-                root_target_weight = torch.zeros((int(model.face_ids.shape[0]), 1), device=device)
                 release_cuda_cache()
                 progress_event(
                     "after_lifecycle_cache_release",
@@ -6173,29 +6312,16 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "fixed_rgb_l1": float(fixed_rgb_loss.detach().cpu()),
                     "random_backing_l1": float(random_backing_loss.detach().cpu()),
                     "mask_l1": float(mask_loss.detach().cpu()),
-                    "orientation_loss": float(orient_loss.detach().cpu()),
-                    "orientation_detail_loss": float(orient_detail_loss.detach().cpu()),
                     "rgb_flow_loss": float(rgb_flow_loss.detach().cpu()),
                     "rgb_flow_detail_loss": float(rgb_flow_detail_loss.detach().cpu()),
                     "smooth_loss": float(smooth_loss.detach().cpu()),
+                    "geometry_residual_smooth_loss": float(geometry_residual_smooth_loss.detach().cpu()),
                     "guide_smooth_loss": float(guide_smooth_loss.detach().cpu()),
                     "effective_smooth_loss": float(effective_smooth_loss.detach().cpu()),
-                    "clean_flow_length_anchor_loss": float(clean_flow_length_loss.detach().cpu()),
                     "strand_shape_smooth_loss": float(strand_shape_loss.detach().cpu()),
-                    "shape_prior_loss": float(shape_prior_loss.detach().cpu()),
-                    "effective_geometry_budget_loss": float(effective_geometry_loss.detach().cpu()),
-                    "overpaint_capacity_loss": float(overpaint_loss.detach().cpu()),
-                    "dark_stroke_capacity_loss": float(dark_stroke_loss.detach().cpu()),
-                    "screen_stroke_capacity_loss": float(screen_stroke_loss.detach().cpu()),
-                    "neutral_screen_capacity_loss": float(neutral_screen_loss.detach().cpu()),
-                    "color_contrast_capacity_loss": float(color_contrast_loss.detach().cpu()),
-                    "early_capacity_loss": float(early_capacity_loss.detach().cpu()),
-                    "early_capacity_active": bool(early_capacity_active),
                     "guide_prior_loss": float(guide_prior_loss.detach().cpu()),
-                    "clean_flow_anchor_loss": float(clean_flow_loss.detach().cpu()),
                     "clean_flow_guide_anchor_loss": float(guide_clean_flow_loss.detach().cpu()),
                     "clean_flow_3d_smooth_loss": float(clean_flow_smooth_loss.detach().cpu()),
-                    "clean_flow_root_anchor_fraction": float((model.clean_flow_anchor_confidence >= float(config.clean_flow_anchor_min_confidence)).float().mean().detach().cpu()),
                     "clean_flow_guide_anchor_fraction": float((model.guide_clean_flow_anchor_confidence >= float(config.clean_flow_anchor_min_confidence)).float().mean().detach().cpu()) if model.guide_clean_flow_anchor_confidence.numel() else 0.0,
                     "guide_residual_multiplier": float(model.guide_residual_multiplier),
                     "guide_coverage_residual_multiplier": float(model.guide_coverage_residual_multiplier),
@@ -6208,8 +6334,14 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "render": render_stats,
                     "groom": groom_parameter_stats(model.groom),
                     "effective_groom": effective_groom_stats(model),
-                    "orientation": orient_stats,
+                    "render_geometry_residual": render_geometry_residual_stats(model),
                     "rgb_flow": rgb_flow_stats,
+                    "loss_mask": {
+                        "edge_kernel": int(config.loss_mask_edge_kernel),
+                        "edge_weight_mean": float(edge_loss_weight.detach().mean().cpu()),
+                        "edge_weight_active_fraction": float((edge_loss_weight.detach() > 0.0).float().mean().cpu()),
+                        "flow_mask_active_fraction": float((flow_supervision_mask.detach() > 0.0).float().mean().cpu()),
+                    },
                     "max_memory_mb": round(memory_payload["max_memory_allocated_mb"], 2),
                     "memory_allocated_mb": round(memory_payload["memory_allocated_mb"], 2),
                     "memory_reserved_mb": round(memory_payload["memory_reserved_mb"], 2),
@@ -6227,6 +6359,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 save_image(eval_dir / f"view_{idx:02d}_mesh_valid.png", mesh_depth.valid[..., None].float())
                 save_image(eval_dir / f"view_{idx:02d}_backing.png", backing_image)
                 save_image(eval_dir / f"view_{idx:02d}_target_with_backing.png", target_with_backing)
+                save_image(eval_dir / f"view_{idx:02d}_loss_edge_weight.png", edge_loss_weight)
+                save_image(eval_dir / f"view_{idx:02d}_flow_supervision_mask.png", flow_supervision_mask)
                 save_image(eval_dir / f"view_{idx:02d}_flow_loss_mask.png", flow_loss_mask_vis)
                 if target_flow_vis is not None:
                     save_image(
@@ -6239,10 +6373,6 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                             dim=-1,
                         ),
                     )
-                save_image(eval_dir / f"view_{idx:02d}_pred_orientation_conf.png", pred_orientation_conf)
-                save_image(eval_dir / f"view_{idx:02d}_pred_orientation.png", torch.cat([0.5 + 0.5 * pred_orientation, torch.full_like(pred_orientation[..., :1], 0.5)], dim=-1))
-                target_double_vis = double_angle_orientation(target_orientation)
-                save_image(eval_dir / f"view_{idx:02d}_target_orientation.png", torch.cat([0.5 + 0.5 * target_double_vis, target_conf.clamp(0.0, 1.0)], dim=-1))
                 save_image(eval_dir / f"view_{idx:02d}_raw_diff.png", torch.abs(pred - target) * 4.0)
                 save_image(eval_dir / f"view_{idx:02d}_composite_diff.png", torch.abs(pred - target_with_backing) * 4.0)
                 save_clip_overlay(
@@ -6355,32 +6485,6 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     behind_mesh_mask=diag_info["mesh_depth_behind_mesh_mask"],
                     mode="clipped",
                 )
-                capacity_report = {
-                    "high_capacity": save_capacity_overlay(
-                        eval_dir / f"view_{diag_idx:02d}_eval_high_capacity_overlay.png",
-                        diag_target_eval,
-                        diag_gaussians,
-                        model,
-                        viewmats[diag_idx],
-                        ks[diag_idx],
-                        width,
-                        height,
-                        dark_only=False,
-                    ),
-                    "dark_high_capacity": save_capacity_overlay(
-                        eval_dir / f"view_{diag_idx:02d}_eval_dark_high_capacity_overlay.png",
-                        diag_target_eval,
-                        diag_gaussians,
-                        model,
-                        viewmats[diag_idx],
-                        ks[diag_idx],
-                        width,
-                        height,
-                        dark_only=True,
-                    ),
-                }
-                with (eval_dir / f"view_{diag_idx:02d}_eval_capacity_overlay.json").open("w", encoding="utf-8") as f:
-                    json.dump(capacity_report, f, indent=2)
                 del (
                     train_eval,
                     test_eval,
@@ -6395,7 +6499,6 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     diag_gaussians,
                     diag_info,
                     diag_target_eval,
-                    capacity_report,
                 )
                 release_cuda_cache()
                 progress_event(
@@ -6419,7 +6522,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     save_reason = "regular"
                 torch.save(
                     {
-                        "checkpoint_version": 2,
+                        "checkpoint_version": CURRENT_CHECKPOINT_VERSION,
                         "checkpoint_kind": "stage1_full",
                         "iteration": iteration,
                         "config": asdict(config),
@@ -6459,10 +6562,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init-mesh-scale", type=float, default=1.28)
     parser.add_argument("--init-mesh-translation", type=float, nargs=3, default=[0.0, 0.32, 0.02])
     parser.add_argument("--init-groom-length", type=float, default=0.060)
-    parser.add_argument("--init-guide-length", type=float, default=0.060)
-    parser.add_argument("--samples", type=int, default=48)
-    parser.add_argument("--min-segments", type=int, default=6)
-    parser.add_argument("--max-segments", type=int, default=22)
+    parser.add_argument("--samples", type=int, default=64)
+    parser.add_argument("--min-segments", type=int, default=10)
+    parser.add_argument("--segment-length-origin", type=float, default=0.010)
+    parser.add_argument("--segments-per-unit-length", type=float, default=84.19047619047619)
+    parser.add_argument("--segments-per-unit-complexity", type=float, default=23.771428571428572)
     parser.add_argument("--child-count", type=int, default=8)
     parser.add_argument("--gaussian-length-overlap", type=float, default=1.45)
     parser.add_argument("--projected-init-views", type=int, default=24)
@@ -6475,57 +6579,66 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--projected-init-view-angle-power", type=float, default=1.0)
     parser.add_argument("--clean-flow-target", default="")
     parser.add_argument("--clean-flow-init", action="store_true")
-    parser.add_argument("--disable-clean-flow-init-lift", action="store_true")
     parser.add_argument("--clean-flow-init-k", type=int, default=8)
     parser.add_argument("--clean-flow-init-min-confidence", type=float, default=0.03)
     parser.add_argument("--clean-flow-anchor-min-confidence", type=float, default=0.35)
-    parser.add_argument("--clean-flow-lift-min", type=float, default=0.008)
-    parser.add_argument("--clean-flow-lift-max", type=float, default=0.040)
     parser.add_argument("--clean-flow-length-init", action="store_true")
     parser.add_argument("--clean-flow-length-init-scale", type=float, default=0.30)
     parser.add_argument("--clean-flow-length-init-min-confidence", type=float, default=0.50)
-    parser.add_argument("--clean-flow-length-init-min", type=float, default=0.010)
-    parser.add_argument("--clean-flow-length-init-max", type=float, default=0.040)
-    parser.add_argument("--clean-flow-length-anchor-weight", type=float, default=0.0)
-    parser.add_argument("--clean-flow-length-anchor-multiplier", type=float, default=2.0)
-    parser.add_argument("--clean-flow-length-anchor-min-confidence", type=float, default=0.50)
-    parser.add_argument("--clean-flow-anchor-weight", type=float, default=0.0)
     parser.add_argument("--clean-flow-guide-anchor-weight", type=float, default=0.0)
     parser.add_argument("--clean-flow-3d-smooth-weight", type=float, default=0.0)
     parser.add_argument("--guide-root-count", type=int, default=0)
     parser.add_argument("--guide-candidate-multiplier", type=float, default=8.0)
     parser.add_argument("--guide-roots-from-clean-flow", action="store_true")
     parser.add_argument("--guide-interpolation-k", type=int, default=8)
-    parser.add_argument("--guide-controls-flow", action="store_true")
-    parser.add_argument("--guide-direction-primary", action="store_true")
+    parser.add_argument(
+        "--render-geometry-parameterization",
+        choices=(
+            "absolute_endpoint",
+            "zero_centered_residual",
+            "zero_centered_log_length_residual",
+            "zero_centered_unbounded_log_length_residual",
+            "zero_centered_asinh_log_length_residual",
+        ),
+        default="absolute_endpoint",
+    )
     parser.add_argument("--guide-length-residual-scale", type=float, default=0.0)
     parser.add_argument("--guide-bend-residual-scale", type=float, default=0.0)
-    parser.add_argument("--guide-flow-residual-scale", type=float, default=1.0)
+    parser.add_argument("--guide-direction-residual-scale", type=float, default=1.0)
     parser.add_argument("--guide-width-residual-scale", type=float, default=1.0)
-    parser.add_argument("--guide-flow-strength-residual-scale", type=float, default=1.0)
-    parser.add_argument("--guide-lift-residual-scale", type=float, default=1.0)
-    parser.add_argument("--guide-stiffness-residual-scale", type=float, default=1.0)
     parser.add_argument("--guide-child-radius-residual-scale", type=float, default=1.0)
     parser.add_argument("--guide-clump-residual-scale", type=float, default=1.0)
     parser.add_argument("--guide-curl-residual-scale", type=float, default=1.0)
     parser.add_argument("--guide-frizz-residual-scale", type=float, default=1.0)
-    parser.add_argument("--guide-region-body-residual-multiplier", type=float, default=1.0)
-    parser.add_argument("--guide-region-head-residual-multiplier", type=float, default=1.0)
-    parser.add_argument("--guide-region-body-shape-multiplier", type=float, default=1.0)
-    parser.add_argument("--guide-region-head-shape-multiplier", type=float, default=1.0)
-    parser.add_argument("--guide-region-body-coverage-multiplier", type=float, default=1.0)
-    parser.add_argument("--guide-region-head-coverage-multiplier", type=float, default=1.0)
     parser.add_argument("--guide-prior-weight", type=float, default=0.0)
-    parser.add_argument("--guide-prior-flow-weight", type=float, default=1.0)
+    parser.add_argument("--guide-prior-direction-weight", type=float, default=1.0)
     parser.add_argument("--guide-prior-bend-weight", type=float, default=0.20)
-    parser.add_argument("--guide-prior-lift-weight", type=float, default=0.15)
-    parser.add_argument("--guide-prior-stiffness-weight", type=float, default=0.10)
     parser.add_argument("--guide-prior-curl-weight", type=float, default=0.08)
     parser.add_argument("--guide-prior-length-weight", type=float, default=0.0)
     parser.add_argument("--guide-prior-width-weight", type=float, default=0.0)
     parser.add_argument("--guide-prior-child-radius-weight", type=float, default=0.0)
     parser.add_argument("--guide-prior-clump-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--render-length-prior-coordinate",
+        choices=("decoded", "natural_log_ratio", "raw"),
+        default="decoded",
+    )
+    parser.add_argument(
+        "--render-length-prior-reduction",
+        choices=(
+            "mean_l1",
+            "fourth_moment",
+            "population_stable_handoff",
+            "tail_concentration_handoff",
+        ),
+        default="mean_l1",
+    )
     parser.add_argument("--guide-smooth-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--guide-length-smooth-mode",
+        choices=GUIDE_LENGTH_SMOOTH_MODES,
+        default="edge_relative",
+    )
     parser.add_argument("--guide-residual-unlock-start", type=int, default=0)
     parser.add_argument("--guide-residual-unlock-end", type=int, default=0)
     parser.add_argument("--guide-residual-initial-multiplier", type=float, default=1.0)
@@ -6534,7 +6647,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guide-coverage-residual-initial-multiplier", type=float, default=1.0)
     parser.add_argument("--guide-freeze-until", type=int, default=0)
     parser.add_argument("--shape-detail-freeze-until", type=int, default=0)
-    parser.add_argument("--shape-bend-scale", type=float, default=1.0)
     parser.add_argument("--shape-curl-scale", type=float, default=1.0)
     parser.add_argument("--shape-frizz-scale", type=float, default=1.0)
     parser.add_argument("--guide-densify-start", type=int, default=0)
@@ -6542,6 +6654,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guide-densify-until", type=int, default=0)
     parser.add_argument("--guide-densify-score-threshold", type=float, default=0.0)
     parser.add_argument("--guide-densify-max-splits-per-event", type=int, default=0)
+    parser.add_argument(
+        "--guide-densify-policy",
+        choices=("global_score_budget", "surface_attribution_local_max"),
+        default="global_score_budget",
+    )
     parser.add_argument("--guide-densify-children-per-parent", type=int, default=1)
     parser.add_argument("--guide-densify-neighbor-count", type=int, default=12)
     parser.add_argument("--guide-densify-candidate-rings", type=int, default=3)
@@ -6557,55 +6674,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rgb-weight", type=float, default=1.0)
     parser.add_argument("--random-backing-loss-weight", type=float, default=0.25)
     parser.add_argument("--mask-weight", type=float, default=0.15)
-    parser.add_argument("--orientation-weight", type=float, default=0.08)
-    parser.add_argument("--orientation-detail-weight", type=float, default=0.02)
     parser.add_argument("--rgb-flow-weight", type=float, default=0.0)
     parser.add_argument("--rgb-flow-detail-weight", type=float, default=0.0)
     parser.add_argument("--rgb-flow-min-confidence", type=float, default=0.08)
+    parser.add_argument("--loss-mask-edge-kernel", type=int, default=1)
+    parser.add_argument(
+        "--smooth-graph-mode",
+        choices=("euclidean_knn", "surface_hierarchical"),
+        default="euclidean_knn",
+    )
+    parser.add_argument("--smooth-graph-k", type=int, default=8)
+    parser.add_argument(
+        "--smooth-field-metric",
+        choices=SMOOTH_FIELD_METRICS,
+        default="ambient",
+    )
     parser.add_argument("--smooth-weight", type=float, default=0.04)
     parser.add_argument("--strand-shape-smooth-weight", type=float, default=0.0)
     parser.add_argument("--effective-smooth-weight", type=float, default=0.0)
-    parser.add_argument("--shape-prior-weight", type=float, default=0.015)
-    parser.add_argument("--effective-geometry-budget-weight", type=float, default=0.0)
-    parser.add_argument("--effective-length-target", type=float, default=0.0)
-    parser.add_argument("--effective-width-target", type=float, default=0.0)
-    parser.add_argument("--effective-child-radius-target", type=float, default=0.0)
-    parser.add_argument("--overpaint-capacity-weight", type=float, default=0.0)
-    parser.add_argument("--overpaint-residual-threshold", type=float, default=0.08)
-    parser.add_argument("--overpaint-length-target", type=float, default=0.075)
-    parser.add_argument("--overpaint-width-target", type=float, default=0.00024)
-    parser.add_argument("--overpaint-opacity-target", type=float, default=0.82)
-    parser.add_argument("--dark-stroke-capacity-weight", type=float, default=0.0)
-    parser.add_argument("--dark-stroke-luma-threshold", type=float, default=0.38)
-    parser.add_argument("--dark-stroke-length-target", type=float, default=0.070)
-    parser.add_argument("--dark-stroke-width-target", type=float, default=0.00030)
-    parser.add_argument("--dark-stroke-child-radius-target", type=float, default=0.0020)
-    parser.add_argument("--dark-stroke-clump-target", type=float, default=0.18)
-    parser.add_argument("--dark-stroke-opacity-target", type=float, default=0.82)
-    parser.add_argument("--screen-stroke-capacity-weight", type=float, default=0.0)
-    parser.add_argument("--screen-stroke-luma-threshold", type=float, default=0.38)
-    parser.add_argument("--screen-stroke-diag-threshold", type=float, default=50.0)
-    parser.add_argument("--screen-stroke-length-target", type=float, default=0.075)
-    parser.add_argument("--screen-stroke-width-target", type=float, default=0.00042)
-    parser.add_argument("--screen-stroke-opacity-target", type=float, default=0.88)
-    parser.add_argument("--neutral-screen-capacity-weight", type=float, default=0.0)
-    parser.add_argument("--neutral-screen-luma-threshold", type=float, default=0.50)
-    parser.add_argument("--neutral-screen-diag-threshold", type=float, default=45.0)
-    parser.add_argument("--neutral-screen-length-target", type=float, default=0.070)
-    parser.add_argument("--neutral-screen-width-target", type=float, default=0.00042)
-    parser.add_argument("--neutral-screen-opacity-target", type=float, default=0.88)
-    parser.add_argument("--color-contrast-capacity-weight", type=float, default=0.0)
-    parser.add_argument("--color-contrast-threshold", type=float, default=0.18)
-    parser.add_argument("--color-contrast-length-target", type=float, default=0.075)
-    parser.add_argument("--color-contrast-width-target", type=float, default=0.00042)
-    parser.add_argument("--color-contrast-opacity-target", type=float, default=0.90)
-    parser.add_argument("--early-capacity-weight", type=float, default=0.0)
-    parser.add_argument("--early-capacity-until", type=int, default=0)
-    parser.add_argument("--early-capacity-length-target", type=float, default=0.075)
-    parser.add_argument("--early-capacity-width-target", type=float, default=0.00024)
-    parser.add_argument("--early-capacity-opacity-target", type=float, default=0.82)
     parser.add_argument("--root-move-reg-weight", type=float, default=0.003)
-    parser.add_argument("--orientation-min-confidence", type=float, default=0.08)
     parser.add_argument("--compute-lpips", action="store_true")
     parser.add_argument("--black-background", action="store_true")
     parser.add_argument("--disable-random-backing-color", action="store_true")
@@ -6636,47 +6723,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--densify-pixel-evidence-root-k", type=int, default=4)
     parser.add_argument("--densify-pixel-evidence-min", type=float, default=0.02)
     parser.add_argument("--densify-pixel-evidence-chunk", type=int, default=512)
-    parser.add_argument("--densify-parent-selection", choices=("score", "evidence_local_max", "target", "target_direct"), default="score")
-    parser.add_argument("--densify-target-placement-weight", type=float, default=0.0)
-    parser.add_argument("--lifecycle-score-mode", choices=("raw", "sample_normalized"), default="raw")
-    parser.add_argument("--stroke-drag-diagnostics", action="store_true")
+    parser.add_argument("--lifecycle-score-mode", choices=("raw", "sample_normalized", "mean_visible"), default="raw")
     parser.add_argument("--local-child-color-support", action="store_true")
-    parser.add_argument("--local-child-opacity-support", action="store_true")
     parser.add_argument("--local-child-color-scale", type=float, default=0.20)
-    parser.add_argument("--local-child-opacity-scale", type=float, default=0.12)
     parser.add_argument("--max-splits-per-event", type=int, required=True)
     parser.add_argument("--split-children-per-parent", type=int, required=True)
     parser.add_argument("--split-neighbor-count", type=int, required=True)
     parser.add_argument("--split-candidate-rings", type=int, required=True)
     parser.add_argument("--split-candidate-face-count", type=int, required=True)
     parser.add_argument("--split-min-child-distance", type=float, required=True)
-    parser.add_argument("--overlong-split-length-threshold", type=float, default=0.0)
-    parser.add_argument("--overlong-split-width-threshold", type=float, default=0.0)
-    parser.add_argument("--overlong-split-opacity-threshold", type=float, default=0.0)
-    parser.add_argument("--overlong-split-min-contribution", type=float, default=0.0)
-    parser.add_argument("--overlong-split-max-parents-per-event", type=int, default=0)
-    parser.add_argument("--overlong-split-children-per-parent", type=int, default=2)
-    parser.add_argument("--overlong-split-target-distance", type=float, default=0.006)
-    parser.add_argument("--overlong-split-target-weight", type=float, default=2.0)
-    parser.add_argument("--overlong-split-residual-target-weight", type=float, default=0.0)
-    parser.add_argument("--overlong-split-until", type=int, default=-1)
-    parser.add_argument("--overlong-split-replace-parent", type=int, choices=(0, 1), default=1)
-    parser.add_argument("--overlong-split-child-length-scale", type=float, default=0.58)
-    parser.add_argument("--overlong-split-child-width-scale", type=float, default=1.0)
-    parser.add_argument("--overlong-split-child-opacity-scale", type=float, default=1.0)
-    parser.add_argument("--overlong-split-child-spread-scale", type=float, default=1.0)
-    parser.add_argument("--overlong-split-child-clump-min", type=float, default=0.0)
-    parser.add_argument("--screen-footprint-split-diag-threshold", type=float, default=0.0)
-    parser.add_argument("--screen-footprint-split-luma-threshold", type=float, default=0.38)
-    parser.add_argument("--screen-footprint-split-score-weight", type=float, default=1.0)
-    parser.add_argument("--screen-footprint-split-extra-parents-per-event", type=int, default=0)
-    parser.add_argument("--screen-footprint-split-neutral-extra-parents-per-event", type=int, default=0)
-    parser.add_argument("--screen-footprint-split-replace-parent", type=int, choices=(0, 1), default=1)
-    parser.add_argument("--screen-footprint-split-child-length-scale", type=float, default=-1.0)
-    parser.add_argument("--screen-footprint-split-child-width-scale", type=float, default=-1.0)
-    parser.add_argument("--screen-footprint-split-child-opacity-scale", type=float, default=-1.0)
-    parser.add_argument("--screen-footprint-split-child-spread-scale", type=float, default=-1.0)
-    parser.add_argument("--screen-footprint-split-child-clump-min", type=float, default=-1.0)
     parser.add_argument("--prune-start", type=int, required=True)
     parser.add_argument("--prune-interval", type=int, required=True)
     parser.add_argument("--prune-min-contribution", type=float, required=True)
@@ -6708,10 +6763,11 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         init_mesh_scale=args.init_mesh_scale,
         init_mesh_translation=tuple(float(v) for v in args.init_mesh_translation),
         init_groom_length=args.init_groom_length,
-        init_guide_length=args.init_guide_length,
         samples=args.samples,
         min_segments=args.min_segments,
-        max_segments=args.max_segments,
+        segment_length_origin=args.segment_length_origin,
+        segments_per_unit_length=args.segments_per_unit_length,
+        segments_per_unit_complexity=args.segments_per_unit_complexity,
         child_count=args.child_count,
         gaussian_length_overlap=args.gaussian_length_overlap,
         projected_init_views=args.projected_init_views,
@@ -6724,57 +6780,39 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         projected_init_view_angle_power=args.projected_init_view_angle_power,
         clean_flow_target=args.clean_flow_target,
         clean_flow_init=args.clean_flow_init,
-        clean_flow_init_lift=not args.disable_clean_flow_init_lift,
         clean_flow_init_k=args.clean_flow_init_k,
         clean_flow_init_min_confidence=args.clean_flow_init_min_confidence,
         clean_flow_anchor_min_confidence=args.clean_flow_anchor_min_confidence,
-        clean_flow_lift_min=args.clean_flow_lift_min,
-        clean_flow_lift_max=args.clean_flow_lift_max,
         clean_flow_length_init=args.clean_flow_length_init,
         clean_flow_length_init_scale=args.clean_flow_length_init_scale,
         clean_flow_length_init_min_confidence=args.clean_flow_length_init_min_confidence,
-        clean_flow_length_init_min=args.clean_flow_length_init_min,
-        clean_flow_length_init_max=args.clean_flow_length_init_max,
-        clean_flow_length_anchor_weight=args.clean_flow_length_anchor_weight,
-        clean_flow_length_anchor_multiplier=args.clean_flow_length_anchor_multiplier,
-        clean_flow_length_anchor_min_confidence=args.clean_flow_length_anchor_min_confidence,
-        clean_flow_anchor_weight=args.clean_flow_anchor_weight,
         clean_flow_guide_anchor_weight=args.clean_flow_guide_anchor_weight,
         clean_flow_3d_smooth_weight=args.clean_flow_3d_smooth_weight,
         guide_root_count=args.guide_root_count,
         guide_candidate_multiplier=args.guide_candidate_multiplier,
         guide_roots_from_clean_flow=args.guide_roots_from_clean_flow,
         guide_interpolation_k=args.guide_interpolation_k,
-        guide_controls_flow=args.guide_controls_flow,
-        guide_direction_primary=args.guide_direction_primary,
+        render_geometry_parameterization=args.render_geometry_parameterization,
         guide_length_residual_scale=args.guide_length_residual_scale,
         guide_bend_residual_scale=args.guide_bend_residual_scale,
-        guide_flow_residual_scale=args.guide_flow_residual_scale,
+        guide_direction_residual_scale=args.guide_direction_residual_scale,
         guide_width_residual_scale=args.guide_width_residual_scale,
-        guide_flow_strength_residual_scale=args.guide_flow_strength_residual_scale,
-        guide_lift_residual_scale=args.guide_lift_residual_scale,
-        guide_stiffness_residual_scale=args.guide_stiffness_residual_scale,
         guide_child_radius_residual_scale=args.guide_child_radius_residual_scale,
         guide_clump_residual_scale=args.guide_clump_residual_scale,
         guide_curl_residual_scale=args.guide_curl_residual_scale,
         guide_frizz_residual_scale=args.guide_frizz_residual_scale,
-        guide_region_body_residual_multiplier=args.guide_region_body_residual_multiplier,
-        guide_region_head_residual_multiplier=args.guide_region_head_residual_multiplier,
-        guide_region_body_shape_multiplier=args.guide_region_body_shape_multiplier,
-        guide_region_head_shape_multiplier=args.guide_region_head_shape_multiplier,
-        guide_region_body_coverage_multiplier=args.guide_region_body_coverage_multiplier,
-        guide_region_head_coverage_multiplier=args.guide_region_head_coverage_multiplier,
         guide_prior_weight=args.guide_prior_weight,
-        guide_prior_flow_weight=args.guide_prior_flow_weight,
+        guide_prior_direction_weight=args.guide_prior_direction_weight,
         guide_prior_bend_weight=args.guide_prior_bend_weight,
-        guide_prior_lift_weight=args.guide_prior_lift_weight,
-        guide_prior_stiffness_weight=args.guide_prior_stiffness_weight,
         guide_prior_curl_weight=args.guide_prior_curl_weight,
         guide_prior_length_weight=args.guide_prior_length_weight,
         guide_prior_width_weight=args.guide_prior_width_weight,
         guide_prior_child_radius_weight=args.guide_prior_child_radius_weight,
         guide_prior_clump_weight=args.guide_prior_clump_weight,
+        render_length_prior_coordinate=args.render_length_prior_coordinate,
+        render_length_prior_reduction=args.render_length_prior_reduction,
         guide_smooth_weight=args.guide_smooth_weight,
+        guide_length_smooth_mode=args.guide_length_smooth_mode,
         guide_residual_unlock_start=args.guide_residual_unlock_start,
         guide_residual_unlock_end=args.guide_residual_unlock_end,
         guide_residual_initial_multiplier=args.guide_residual_initial_multiplier,
@@ -6783,7 +6821,6 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         guide_coverage_residual_initial_multiplier=args.guide_coverage_residual_initial_multiplier,
         guide_freeze_until=args.guide_freeze_until,
         shape_detail_freeze_until=args.shape_detail_freeze_until,
-        shape_bend_scale=args.shape_bend_scale,
         shape_curl_scale=args.shape_curl_scale,
         shape_frizz_scale=args.shape_frizz_scale,
         guide_densify_start=args.guide_densify_start,
@@ -6791,6 +6828,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         guide_densify_until=args.guide_densify_until,
         guide_densify_score_threshold=args.guide_densify_score_threshold,
         guide_densify_max_splits_per_event=args.guide_densify_max_splits_per_event,
+        guide_densify_policy=args.guide_densify_policy,
         guide_densify_children_per_parent=args.guide_densify_children_per_parent,
         guide_densify_neighbor_count=args.guide_densify_neighbor_count,
         guide_densify_candidate_rings=args.guide_densify_candidate_rings,
@@ -6806,55 +6844,17 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         rgb_weight=args.rgb_weight,
         random_backing_loss_weight=args.random_backing_loss_weight,
         mask_weight=args.mask_weight,
-        orientation_weight=args.orientation_weight,
-        orientation_detail_weight=args.orientation_detail_weight,
         rgb_flow_weight=args.rgb_flow_weight,
         rgb_flow_detail_weight=args.rgb_flow_detail_weight,
         rgb_flow_min_confidence=args.rgb_flow_min_confidence,
+        loss_mask_edge_kernel=args.loss_mask_edge_kernel,
+        smooth_graph_mode=args.smooth_graph_mode,
+        smooth_graph_k=args.smooth_graph_k,
+        smooth_field_metric=args.smooth_field_metric,
         smooth_weight=args.smooth_weight,
         strand_shape_smooth_weight=args.strand_shape_smooth_weight,
         effective_smooth_weight=args.effective_smooth_weight,
-        shape_prior_weight=args.shape_prior_weight,
-        effective_geometry_budget_weight=args.effective_geometry_budget_weight,
-        effective_length_target=args.effective_length_target,
-        effective_width_target=args.effective_width_target,
-        effective_child_radius_target=args.effective_child_radius_target,
-        overpaint_capacity_weight=args.overpaint_capacity_weight,
-        overpaint_residual_threshold=args.overpaint_residual_threshold,
-        overpaint_length_target=args.overpaint_length_target,
-        overpaint_width_target=args.overpaint_width_target,
-        overpaint_opacity_target=args.overpaint_opacity_target,
-        dark_stroke_capacity_weight=args.dark_stroke_capacity_weight,
-        dark_stroke_luma_threshold=args.dark_stroke_luma_threshold,
-        dark_stroke_length_target=args.dark_stroke_length_target,
-        dark_stroke_width_target=args.dark_stroke_width_target,
-        dark_stroke_child_radius_target=args.dark_stroke_child_radius_target,
-        dark_stroke_clump_target=args.dark_stroke_clump_target,
-        dark_stroke_opacity_target=args.dark_stroke_opacity_target,
-        screen_stroke_capacity_weight=args.screen_stroke_capacity_weight,
-        screen_stroke_luma_threshold=args.screen_stroke_luma_threshold,
-        screen_stroke_diag_threshold=args.screen_stroke_diag_threshold,
-        screen_stroke_length_target=args.screen_stroke_length_target,
-        screen_stroke_width_target=args.screen_stroke_width_target,
-        screen_stroke_opacity_target=args.screen_stroke_opacity_target,
-        neutral_screen_capacity_weight=args.neutral_screen_capacity_weight,
-        neutral_screen_luma_threshold=args.neutral_screen_luma_threshold,
-        neutral_screen_diag_threshold=args.neutral_screen_diag_threshold,
-        neutral_screen_length_target=args.neutral_screen_length_target,
-        neutral_screen_width_target=args.neutral_screen_width_target,
-        neutral_screen_opacity_target=args.neutral_screen_opacity_target,
-        color_contrast_capacity_weight=args.color_contrast_capacity_weight,
-        color_contrast_threshold=args.color_contrast_threshold,
-        color_contrast_length_target=args.color_contrast_length_target,
-        color_contrast_width_target=args.color_contrast_width_target,
-        color_contrast_opacity_target=args.color_contrast_opacity_target,
-        early_capacity_weight=args.early_capacity_weight,
-        early_capacity_until=args.early_capacity_until,
-        early_capacity_length_target=args.early_capacity_length_target,
-        early_capacity_width_target=args.early_capacity_width_target,
-        early_capacity_opacity_target=args.early_capacity_opacity_target,
         root_move_reg_weight=args.root_move_reg_weight,
-        orientation_min_confidence=args.orientation_min_confidence,
         compute_lpips=args.compute_lpips,
         white_background=not args.black_background,
         random_backing_color=not args.disable_random_backing_color,
@@ -6885,47 +6885,15 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         densify_pixel_evidence_root_k=args.densify_pixel_evidence_root_k,
         densify_pixel_evidence_min=args.densify_pixel_evidence_min,
         densify_pixel_evidence_chunk=args.densify_pixel_evidence_chunk,
-        densify_parent_selection=args.densify_parent_selection,
-        densify_target_placement_weight=args.densify_target_placement_weight,
         lifecycle_score_mode=args.lifecycle_score_mode,
-        stroke_drag_diagnostics=args.stroke_drag_diagnostics,
         local_child_color_support=args.local_child_color_support,
-        local_child_opacity_support=args.local_child_opacity_support,
         local_child_color_scale=args.local_child_color_scale,
-        local_child_opacity_scale=args.local_child_opacity_scale,
         max_splits_per_event=args.max_splits_per_event,
         split_children_per_parent=args.split_children_per_parent,
         split_neighbor_count=args.split_neighbor_count,
         split_candidate_rings=args.split_candidate_rings,
         split_candidate_face_count=args.split_candidate_face_count,
         split_min_child_distance=args.split_min_child_distance,
-        overlong_split_length_threshold=args.overlong_split_length_threshold,
-        overlong_split_width_threshold=args.overlong_split_width_threshold,
-        overlong_split_opacity_threshold=args.overlong_split_opacity_threshold,
-        overlong_split_min_contribution=args.overlong_split_min_contribution,
-        overlong_split_max_parents_per_event=args.overlong_split_max_parents_per_event,
-        overlong_split_children_per_parent=args.overlong_split_children_per_parent,
-        overlong_split_target_distance=args.overlong_split_target_distance,
-        overlong_split_target_weight=args.overlong_split_target_weight,
-        overlong_split_residual_target_weight=args.overlong_split_residual_target_weight,
-        overlong_split_until=args.overlong_split_until,
-        overlong_split_replace_parent=bool(args.overlong_split_replace_parent),
-        overlong_split_child_length_scale=args.overlong_split_child_length_scale,
-        overlong_split_child_width_scale=args.overlong_split_child_width_scale,
-        overlong_split_child_opacity_scale=args.overlong_split_child_opacity_scale,
-        overlong_split_child_spread_scale=args.overlong_split_child_spread_scale,
-        overlong_split_child_clump_min=args.overlong_split_child_clump_min,
-        screen_footprint_split_diag_threshold=args.screen_footprint_split_diag_threshold,
-        screen_footprint_split_luma_threshold=args.screen_footprint_split_luma_threshold,
-        screen_footprint_split_score_weight=args.screen_footprint_split_score_weight,
-        screen_footprint_split_extra_parents_per_event=args.screen_footprint_split_extra_parents_per_event,
-        screen_footprint_split_neutral_extra_parents_per_event=args.screen_footprint_split_neutral_extra_parents_per_event,
-        screen_footprint_split_replace_parent=bool(args.screen_footprint_split_replace_parent),
-        screen_footprint_split_child_length_scale=args.screen_footprint_split_child_length_scale,
-        screen_footprint_split_child_width_scale=args.screen_footprint_split_child_width_scale,
-        screen_footprint_split_child_opacity_scale=args.screen_footprint_split_child_opacity_scale,
-        screen_footprint_split_child_spread_scale=args.screen_footprint_split_child_spread_scale,
-        screen_footprint_split_child_clump_min=args.screen_footprint_split_child_clump_min,
         prune_start=args.prune_start,
         prune_interval=args.prune_interval,
         prune_min_contribution=args.prune_min_contribution,

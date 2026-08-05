@@ -255,111 +255,14 @@ def sample_clean_flow_targets(
 
 
 def groom_direction_3d(groom, normals: torch.Tensor, tangents: torch.Tensor, bitangents: torch.Tensor) -> torch.Tensor:
-    """Full initial hair direction implied by lift plus local brushed flow."""
+    """Decode the groom's direct local 3D direction into world space."""
 
-    return controls_direction_3d(groom.flow_xy, groom.flow_strength, groom.lift, normals, tangents, bitangents)
-
-
-def controls_direction_3d(
-    flow_xy: torch.Tensor,
-    flow_strength: torch.Tensor,
-    lift: torch.Tensor,
-    normals: torch.Tensor,
-    tangents: torch.Tensor,
-    bitangents: torch.Tensor,
-) -> torch.Tensor:
-    """Full 3D direction implied by explicit flow, flow strength, and lift controls."""
-
-    flow_xy = _normalize(flow_xy)
-    tangent_flow = _normalize(flow_xy[:, [0]] * tangents + flow_xy[:, [1]] * bitangents)
-    return _normalize(lift * normals + flow_strength * tangent_flow)
-
-
-def direction_to_local_controls(
-    directions: torch.Tensor,
-    normals: torch.Tensor,
-    tangents: torch.Tensor,
-    bitangents: torch.Tensor,
-    lambda_values: torch.Tensor,
-    *,
-    lift_min: float,
-    lift_max: float,
-    lambda_low: torch.Tensor | float | None = None,
-    lambda_high: torch.Tensor | float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Convert 3D clean-flow directions into local flow_xy plus a lift value."""
-
-    directions = _normalize(directions)
-    normals = _normalize(normals)
-    tangents = _normalize(tangents)
-    bitangents = _normalize(bitangents)
-    tangent_part = directions - (directions * normals).sum(dim=-1, keepdim=True) * normals
-    flow_xy = torch.stack(
-        [
-            (tangent_part * tangents).sum(dim=-1),
-            (tangent_part * bitangents).sum(dim=-1),
-        ],
-        dim=-1,
+    local = _normalize(groom.direction_local)
+    return _normalize(
+        local[..., 0:1] * tangents
+        + local[..., 1:2] * bitangents
+        + local[..., 2:3] * normals
     )
-    flow_xy = _normalize(flow_xy)
-
-    if lambda_low is None or lambda_high is None:
-        valid_lambda = lambda_values[torch.isfinite(lambda_values)]
-        if valid_lambda.numel() >= 4:
-            lambda_low = torch.quantile(valid_lambda, 0.10)
-            lambda_high = torch.quantile(valid_lambda, 0.90)
-        else:
-            lambda_low = lambda_values.new_tensor(0.0)
-            lambda_high = lambda_values.new_tensor(1.0)
-    lo = torch.as_tensor(lambda_low, device=lambda_values.device, dtype=lambda_values.dtype)
-    hi = torch.as_tensor(lambda_high, device=lambda_values.device, dtype=lambda_values.dtype)
-    alpha = ((lambda_values - lo) / (hi - lo).clamp_min(EPS)).clamp(0.0, 1.0)
-    lift = float(lift_min) + (float(lift_max) - float(lift_min)) * alpha
-    return flow_xy, lift.reshape(-1, 1)
-
-
-def direction_to_flow_lift_strength(
-    directions: torch.Tensor,
-    normals: torch.Tensor,
-    tangents: torch.Tensor,
-    bitangents: torch.Tensor,
-    *,
-    lift_bounds: tuple[float, float],
-    flow_strength_bounds: tuple[float, float],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Convert a 3D direction to local controls while preserving its 3D angle.
-
-    ``direction_to_local_controls`` is useful when a scalar lift proxy is
-    supplied externally.  For formal clean-flow initialization we already have a
-    3D direction, so lift and tangential strength must be solved together;
-    otherwise high-lift hairs get flattened into the tangent plane.
-    """
-
-    directions = _normalize(directions)
-    normals = _normalize(normals)
-    tangents = _normalize(tangents)
-    bitangents = _normalize(bitangents)
-    normal_component = (directions * normals).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
-    tangent_part = directions - normal_component * normals
-    tangent_component = torch.linalg.norm(tangent_part, dim=-1, keepdim=True).clamp_min(EPS)
-    tangent_dir = tangent_part / tangent_component
-    flow_xy = torch.stack(
-        [
-            (tangent_dir * tangents).sum(dim=-1),
-            (tangent_dir * bitangents).sum(dim=-1),
-        ],
-        dim=-1,
-    )
-    flow_xy = _normalize(flow_xy)
-
-    lift_lo, lift_hi = float(lift_bounds[0]), float(lift_bounds[1])
-    flow_lo, flow_hi = float(flow_strength_bounds[0]), float(flow_strength_bounds[1])
-    scale_from_lift = lift_hi / normal_component.clamp_min(1.0e-4)
-    scale_from_flow = flow_hi / tangent_component.clamp_min(1.0e-4)
-    scale = torch.minimum(scale_from_lift, scale_from_flow)
-    lift = (scale * normal_component).clamp(lift_lo, lift_hi)
-    flow_strength = (scale * tangent_component).clamp(flow_lo, flow_hi)
-    return flow_xy, lift, flow_strength
 
 
 def clean_flow_anchor_loss(
@@ -386,16 +289,34 @@ def clean_flow_smoothness_loss(
     directions: torch.Tensor,
     edges: torch.Tensor,
     confidence: torch.Tensor | None = None,
+    *,
+    normals: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Mesh-neighborhood smoothing on actual 3D hair direction, not local 2D flow."""
+    """Mesh-neighborhood smoothing on actual 3D hair direction.
+
+    When normals are supplied, neighbor directions are parallel transported to
+    the source tangent plane before comparison. This keeps curvature of the
+    carrier surface from being mistaken for a discontinuity in the groom.
+    """
 
     if edges.numel() == 0:
         return directions.sum() * 0.0
     src, dst = edges[:, 0], edges[:, 1]
-    diff = _normalize(directions[src]) - _normalize(directions[dst])
+    if normals is None:
+        neighbor_direction = _normalize(directions[dst])
+    else:
+        neighbor_direction = parallel_transport_vectors(
+            directions[dst],
+            normals[dst],
+            normals[src],
+        )
+    diff = _normalize(directions[src]) - neighbor_direction
     value = diff.square().mean(dim=-1)
     if confidence is None:
         return value.mean()
     conf = confidence.reshape(-1).to(device=directions.device, dtype=directions.dtype).clamp(0.0, 1.0)
-    edge_weight = 0.25 + 0.75 * torch.minimum(conf[src], conf[dst])
+    # Reliable directions are already constrained by the anchor loss.  The
+    # smoothness term should propagate that field through uncertain regions,
+    # rather than spending most of its weight on already-observed edges.
+    edge_weight = 1.0 + (1.0 - torch.minimum(conf[src], conf[dst]))
     return (value * edge_weight).sum() / edge_weight.sum().clamp_min(EPS)

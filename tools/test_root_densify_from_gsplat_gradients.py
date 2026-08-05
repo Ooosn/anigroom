@@ -84,10 +84,10 @@ def apply_regional_teacher(field: GroomParameterField, roots: torch.Tensor) -> t
         field.root_width_raw.add_(1.5 * demand)
         field.tip_width_ratio_raw.add_(0.8 * demand)
         field.opacity_raw.add_(1.1 * demand)
-        field.flow_xy[:, 0:1].add_(1.1 * demand)
-        field.flow_xy[:, 1:2].add_(0.9 * demand)
+        field.direction_local_raw[:, 0:1].add_(1.1 * demand)
+        field.direction_local_raw[:, 1:2].add_(0.9 * demand)
+        field.direction_local_raw[:, 2:3].add_(0.3 * demand)
         field.bend_raw.add_(1.5 * demand)
-        field.sag_raw.add_(1.0 * demand)
         field.root_color_raw.add_(-2.0 * demand * stripe.expand(-1, 3))
         field.tip_color_raw.add_(-1.8 * demand * stripe.expand(-1, 3))
     return demand.detach()
@@ -104,7 +104,9 @@ def render_with_gaussians(
     height: int,
     samples: int,
     min_segments: int,
-    max_segments: int,
+    segment_length_origin: float,
+    segments_per_unit_length: float,
+    segments_per_unit_complexity: float,
     retain_gaussian_grad: bool,
 ):
     from gsplat.rendering import rasterization
@@ -112,7 +114,17 @@ def render_with_gaussians(
     tangents, bitangents = make_tangent_frames(normals)
     groom = field.decode()
     strands, widths, colors, opacities = build_strands(roots, normals, tangents, bitangents, groom, samples=samples)
-    resampled = adaptive_resample_strands(strands, widths, colors, opacities, groom.length, min_segments, max_segments)
+    resampled = adaptive_resample_strands(
+        strands,
+        widths,
+        colors,
+        opacities,
+        groom.length,
+        min_segments,
+        segment_length_origin,
+        segments_per_unit_length,
+        segments_per_unit_complexity,
+    )
     gaussians = strands_to_gaussians(
         resampled.strands,
         resampled.widths,
@@ -262,7 +274,9 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=256)
     parser.add_argument("--samples", type=int, default=14)
     parser.add_argument("--min-segments", type=int, default=4)
-    parser.add_argument("--max-segments", type=int, default=13)
+    parser.add_argument("--segment-length-origin", type=float, default=0.010)
+    parser.add_argument("--segments-per-unit-length", type=float, default=84.19047619047619)
+    parser.add_argument("--segments-per-unit-complexity", type=float, default=23.771428571428572)
     parser.add_argument("--grad-threshold", type=float, default=1e-7)
     parser.add_argument("--max-new-roots", type=int, default=80)
     parser.add_argument("--view-count", type=int, default=3)
@@ -299,7 +313,9 @@ def main() -> None:
             args.height,
             args.samples,
             args.min_segments,
-            args.max_segments,
+            args.segment_length_origin,
+            args.segments_per_unit_length,
+            args.segments_per_unit_complexity,
             retain_gaussian_grad=False,
         )
     pred_images, pred_alphas, gaussians, infos, render_stats = render_with_gaussians(
@@ -313,7 +329,9 @@ def main() -> None:
         args.height,
         args.samples,
         args.min_segments,
-        args.max_segments,
+        args.segment_length_origin,
+        args.segments_per_unit_length,
+        args.segments_per_unit_complexity,
         retain_gaussian_grad=True,
     )
     image_loss = torch.stack([F.mse_loss(pred, target) for pred, target in zip(pred_images, target_images)]).mean()

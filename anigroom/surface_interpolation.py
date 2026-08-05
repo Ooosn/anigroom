@@ -15,7 +15,9 @@ from time import perf_counter
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.sparse import coo_matrix, diags
 from scipy.sparse.csgraph import dijkstra
+from scipy.sparse.linalg import spsolve
 
 from anigroom.flow.direction_geometry import parallel_transport_vectors
 from anigroom.flow.surface_graph import _augmented_surface_graph, _root_voronoi_graph
@@ -47,6 +49,16 @@ class LocalSurfaceSupport:
 
     indices: torch.Tensor
     report: dict[str, float | int]
+
+
+@dataclass(frozen=True)
+class SurfaceSourceGraph:
+    """Intrinsic source neighborhoods with density-aware quadrature weights."""
+
+    edges: torch.Tensor
+    distances: torch.Tensor
+    source_area_weights: torch.Tensor
+    reference_spacing: torch.Tensor
 
 
 def _source_neighbors(
@@ -178,6 +190,96 @@ class SurfaceFieldInterpolator:
             "build_seconds": float(perf_counter() - started),
         }
 
+    def source_neighbor_edges(self, neighbor_count: int) -> torch.Tensor:
+        """Return intrinsic directed edges between the interpolation sources.
+
+        The source Voronoi graph is already built to support surface-aware
+        interpolation. Reusing it here keeps guide smoothing and guide-to-render
+        interpolation on the same mesh-topology contract.
+        """
+
+        source_count = int(self.source_points_reference.shape[0])
+        if source_count < 2 or int(neighbor_count) <= 0:
+            return torch.empty((0, 2), device=self.vertices.device, dtype=torch.long)
+        count = min(int(neighbor_count), source_count - 1)
+        source_ids = np.arange(source_count, dtype=np.int64)
+        selected = np.empty((source_count, count), dtype=np.int64)
+        for source_id in source_ids.tolist():
+            candidates = self._source_neighbors[source_id]
+            distances = self._source_neighbor_distances[source_id]
+            valid = (candidates != source_id) & np.isfinite(distances)
+            candidates = candidates[valid]
+            if candidates.size < count:
+                raise RuntimeError(
+                    f"surface source {source_id} has only {candidates.size} intrinsic "
+                    f"neighbors for K={count}"
+                )
+            selected[source_id] = candidates[:count]
+        src = np.repeat(source_ids, count)
+        edges = np.stack([src, selected.reshape(-1)], axis=-1)
+        return torch.as_tensor(edges, device=self.vertices.device, dtype=torch.long)
+
+    def source_neighbor_graph(self, neighbor_count: int) -> SurfaceSourceGraph:
+        """Return metric data for a sampling-density-invariant source field loss."""
+
+        source_count = int(self.source_points_reference.shape[0])
+        if source_count < 2 or int(neighbor_count) <= 0:
+            empty_edges = torch.empty(
+                (0, 2), device=self.vertices.device, dtype=torch.long
+            )
+            empty_values = torch.empty(
+                (0,), device=self.vertices.device, dtype=self.vertices.dtype
+            )
+            return SurfaceSourceGraph(
+                edges=empty_edges,
+                distances=empty_values,
+                source_area_weights=empty_values,
+                reference_spacing=self.vertices.new_tensor(0.0),
+            )
+
+        count = min(int(neighbor_count), source_count - 1)
+        source_ids = np.arange(source_count, dtype=np.int64)
+        selected = np.empty((source_count, count), dtype=np.int64)
+        selected_distances = np.empty((source_count, count), dtype=np.float64)
+        for source_id in source_ids.tolist():
+            candidates = self._source_neighbors[source_id]
+            distances = self._source_neighbor_distances[source_id]
+            valid = (candidates != source_id) & np.isfinite(distances)
+            candidates = candidates[valid]
+            distances = distances[valid]
+            if candidates.size < count:
+                raise RuntimeError(
+                    f"surface source {source_id} has only {candidates.size} intrinsic "
+                    f"neighbors for K={count}"
+                )
+            selected[source_id] = candidates[:count]
+            selected_distances[source_id] = distances[:count]
+
+        src = np.repeat(source_ids, count)
+        edges = np.stack([src, selected.reshape(-1)], axis=-1)
+        local_spacing = np.median(selected_distances, axis=1)
+        if not np.isfinite(local_spacing).all() or np.any(local_spacing <= 0.0):
+            raise RuntimeError("surface source graph contains a non-positive spacing")
+        target_device = self.vertices.device
+        return SurfaceSourceGraph(
+            edges=torch.as_tensor(edges, device=target_device, dtype=torch.long),
+            distances=torch.as_tensor(
+                selected_distances.reshape(-1),
+                device=target_device,
+                dtype=self.vertices.dtype,
+            ),
+            source_area_weights=torch.as_tensor(
+                np.square(local_spacing),
+                device=target_device,
+                dtype=self.vertices.dtype,
+            ),
+            reference_spacing=torch.as_tensor(
+                np.median(local_spacing),
+                device=target_device,
+                dtype=self.vertices.dtype,
+            ),
+        )
+
     def build_support(
         self,
         query_points: np.ndarray | torch.Tensor,
@@ -210,41 +312,80 @@ class SurfaceFieldInterpolator:
             np.inf,
             dtype=np.float32,
         )
-        query_faces = self._faces_np[query_face_ids_np]
-        query_vertices = self._vertices_np[query_faces]
-        query_vertex_distances = np.linalg.norm(
-            query_points_np[:, None, :] - query_vertices,
-            axis=-1,
-        )
+        candidate_count = int(self._source_neighbors.shape[1])
+        fallback_queries: list[int] = []
+        for begin in range(0, query_count, 2048):
+            end = min(begin + 2048, query_count)
+            query_faces = self._faces_np[query_face_ids_np[begin:end]]
+            query_vertices = self._vertices_np[query_faces]
+            query_vertex_distances = np.linalg.norm(
+                query_points_np[begin:end, None, :] - query_vertices,
+                axis=-1,
+            )
+            seeds = self._vertex_source[query_faces]
+            candidate_ids = self._source_neighbors[seeds]
+            candidate_paths = (
+                self._vertex_distance[query_faces, None]
+                + self._source_neighbor_distances[seeds]
+            )
+            candidate_scores = candidate_paths + query_vertex_distances[:, :, None]
+            batch_size = end - begin
+            flat_ids = candidate_ids.reshape(batch_size, 3 * candidate_count)
+            flat_scores = candidate_scores.reshape(batch_size, 3 * candidate_count)
 
-        for query_id in range(query_count):
+            # Preserve the reference dictionary's first-occurrence order while
+            # aggregating candidates reached through multiple face vertices.
+            equal_ids = flat_ids[:, :, None] == flat_ids[:, None, :]
+            repeated_from_earlier = np.tril(equal_ids, k=-1).any(axis=2)
+            aggregate_scores = np.where(
+                equal_ids,
+                flat_scores[:, None, :],
+                np.inf,
+            ).min(axis=2)
+            aggregate_scores[repeated_from_earlier] = np.inf
+            order = np.argsort(aggregate_scores, axis=1, kind="stable")[:, : self.neighbor_count]
+            chosen_ids = np.take_along_axis(flat_ids, order, axis=1)
+            chosen_scores = np.take_along_axis(aggregate_scores, order, axis=1)
+            normal = np.isfinite(chosen_scores).all(axis=1)
+            if np.any(normal):
+                normal_ids = chosen_ids[normal]
+                indices[begin:end][normal] = normal_ids
+                matches = candidate_ids[normal, None, :, :] == normal_ids[:, :, None, None]
+                selected_paths = np.where(
+                    matches,
+                    candidate_paths[normal, None, :, :],
+                    np.inf,
+                ).min(axis=3)
+                vertex_paths[begin:end][normal] = selected_paths.astype(np.float32)
+            fallback_queries.extend((begin + np.flatnonzero(~normal)).tolist())
+
+        # Disconnected or very small source components can contain fewer than
+        # K unique candidates. Preserve the original padded-support contract.
+        for query_id in fallback_queries:
+            query_face = self._faces_np[query_face_ids_np[query_id]]
+            query_vertices = self._vertices_np[query_face]
+            query_vertex_distances = np.linalg.norm(
+                query_points_np[query_id : query_id + 1] - query_vertices,
+                axis=-1,
+            )
             paths: dict[int, np.ndarray] = {}
-            for vertex_slot, vertex_id in enumerate(query_faces[query_id].tolist()):
+            for vertex_slot, vertex_id in enumerate(query_face.tolist()):
                 seed = int(self._vertex_source[vertex_id])
                 base = float(self._vertex_distance[vertex_id])
-                candidate_ids = self._source_neighbors[seed]
-                candidate_distances = self._source_neighbor_distances[seed]
                 for candidate_id, source_distance in zip(
-                    candidate_ids.tolist(),
-                    candidate_distances.tolist(),
+                    self._source_neighbors[seed].tolist(),
+                    self._source_neighbor_distances[seed].tolist(),
                 ):
-                    values = paths.get(int(candidate_id))
-                    if values is None:
-                        values = np.full((3,), np.inf, dtype=np.float64)
-                        paths[int(candidate_id)] = values
-                    values[vertex_slot] = min(
-                        float(values[vertex_slot]),
-                        base + float(source_distance),
+                    values = paths.setdefault(
+                        int(candidate_id),
+                        np.full((3,), np.inf, dtype=np.float64),
                     )
-
+                    values[vertex_slot] = min(values[vertex_slot], base + float(source_distance))
             if not paths:
                 raise RuntimeError(f"query {query_id} has no topology-valid interpolation source")
             candidate_ids = np.fromiter(paths.keys(), dtype=np.int64)
             candidate_paths = np.stack([paths[int(candidate_id)] for candidate_id in candidate_ids])
-            score = np.min(
-                candidate_paths + query_vertex_distances[query_id][None, :],
-                axis=1,
-            )
+            score = np.min(candidate_paths + query_vertex_distances[None, :], axis=1)
             order = np.argsort(score, kind="stable")
             chosen_ids = candidate_ids[order[: self.neighbor_count]]
             chosen_paths = candidate_paths[order[: self.neighbor_count]]
@@ -271,6 +412,7 @@ class SurfaceFieldInterpolator:
                 "query_count": query_count,
                 "support_seconds": float(perf_counter() - started),
                 "support_bytes": int(indices.nbytes + vertex_paths.nbytes),
+                "fallback_query_count": int(len(fallback_queries)),
             },
         )
 
@@ -358,6 +500,211 @@ def interpolate_physical(
         return (gathered * weights).sum(dim=1)
     weight_shape = tuple(weights.shape) + (1,) * (gathered.ndim - weights.ndim)
     return (gathered * weights.reshape(weight_shape)).sum(dim=1)
+
+
+def density_invariant_log_scalar_smoothness(
+    positive_values: torch.Tensor,
+    graph: SurfaceSourceGraph,
+    reference_spacing: torch.Tensor | float,
+) -> torch.Tensor:
+    """Dirichlet-style smoothness independent of adaptive source density.
+
+    The positive scalar is represented in log space, differentiated with
+    intrinsic surface distances, and integrated with a local surface-area
+    proxy. The fixed reference spacing preserves the original regularization
+    scale when new sources are inserted.
+    """
+
+    if graph.edges.numel() == 0:
+        return positive_values.sum() * 0.0
+    values = positive_values.reshape(positive_values.shape[0], -1)
+    if values.shape[1] != 1:
+        raise ValueError("density-invariant log smoothness requires one scalar per source")
+    if graph.source_area_weights.shape != (values.shape[0],):
+        raise ValueError("surface source area weights do not match the scalar field")
+    if graph.distances.shape != (graph.edges.shape[0],):
+        raise ValueError("surface source distances do not match graph edges")
+
+    src, dst = graph.edges[:, 0], graph.edges[:, 1]
+    log_values = torch.log(values[:, 0].clamp_min(EPS))
+    spacing = torch.as_tensor(
+        reference_spacing,
+        device=values.device,
+        dtype=values.dtype,
+    ).reshape(())
+    if not bool(torch.isfinite(spacing).detach().cpu()) or float(spacing.detach().cpu()) <= 0.0:
+        raise ValueError("reference spacing must be finite and positive")
+    distance = graph.distances.to(device=values.device, dtype=values.dtype)
+    distance = distance.clamp_min(spacing * 1.0e-6)
+    edge_gradient_squared = ((log_values[src] - log_values[dst]) / distance).square()
+
+    source_sum = torch.zeros_like(log_values)
+    source_count = torch.zeros_like(log_values)
+    source_sum.scatter_add_(0, src, edge_gradient_squared)
+    source_count.scatter_add_(0, src, torch.ones_like(edge_gradient_squared))
+    source_gradient_squared = source_sum / source_count.clamp_min(1.0)
+    area = graph.source_area_weights.to(device=values.device, dtype=values.dtype)
+    metric_mean = (source_gradient_squared * area).sum() / area.sum().clamp_min(EPS)
+    return 0.25 * spacing.square() * metric_mean
+
+
+@torch.no_grad()
+def harmonic_inpaint_physical(
+    values: torch.Tensor,
+    points: torch.Tensor,
+    reliable: torch.Tensor,
+    edges: torch.Tensor,
+) -> torch.Tensor:
+    """Reconstruct an unreliable physical field on a topology-safe root graph.
+
+    Reliable samples are fixed Dirichlet anchors. Every other value is the
+    harmonic extension on the supplied surface graph, so folded or nearby
+    disconnected mesh sheets cannot exchange values through ambient-space KNN.
+    This is intended for one-time initialization, not the differentiable
+    training path.
+    """
+
+    if values.shape[0] != points.shape[0] or reliable.reshape(-1).shape[0] != points.shape[0]:
+        raise ValueError("surface inpaint inputs must have the same root count")
+    if points.ndim != 2 or points.shape[-1] != 3:
+        raise ValueError("points must have shape [N, 3]")
+    if edges.ndim != 2 or edges.shape[-1] != 2:
+        raise ValueError("edges must have shape [E, 2]")
+
+    root_count = int(points.shape[0])
+    reliable_flat = reliable.reshape(-1).to(dtype=torch.bool)
+    if root_count == 0:
+        return values.clone()
+    if not bool(reliable_flat.any()):
+        raise RuntimeError("surface inpaint requires at least one reliable anchor")
+    if bool(reliable_flat.all()):
+        return values.clone()
+
+    edges_np = edges.detach().cpu().numpy().astype(np.int64, copy=False)
+    if edges_np.size == 0:
+        raise RuntimeError("surface inpaint cannot reconstruct values without graph edges")
+    src = edges_np[:, 0]
+    dst = edges_np[:, 1]
+    valid_edge = (src >= 0) & (src < root_count) & (dst >= 0) & (dst < root_count) & (src != dst)
+    src = src[valid_edge]
+    dst = dst[valid_edge]
+    if src.size == 0:
+        raise RuntimeError("surface inpaint graph contains no valid non-self edge")
+
+    pair_lo = np.minimum(src, dst)
+    pair_hi = np.maximum(src, dst)
+    pairs = np.unique(np.stack([pair_lo, pair_hi], axis=-1), axis=0)
+    points_np = points.detach().cpu().numpy().astype(np.float64, copy=False)
+    distance = np.linalg.norm(points_np[pairs[:, 0]] - points_np[pairs[:, 1]], axis=-1)
+    weight = 1.0 / np.maximum(distance, 1.0e-6) ** 2
+    row = np.concatenate([pairs[:, 0], pairs[:, 1]])
+    col = np.concatenate([pairs[:, 1], pairs[:, 0]])
+    data = np.concatenate([weight, weight])
+    adjacency = coo_matrix((data, (row, col)), shape=(root_count, root_count)).tocsr()
+    laplacian = diags(np.asarray(adjacency.sum(axis=1)).reshape(-1)) - adjacency
+
+    reliable_np = reliable_flat.detach().cpu().numpy().astype(bool, copy=False)
+    unknown_np = ~reliable_np
+    unknown_ids = np.flatnonzero(unknown_np)
+    anchor_ids = np.flatnonzero(reliable_np)
+    values_np = values.detach().cpu().numpy().astype(np.float64, copy=False)
+    scalar_input = values_np.ndim == 1
+    values_2d = values_np[:, None] if scalar_input else values_np.reshape(root_count, -1)
+    system = laplacian[unknown_ids][:, unknown_ids].tocsc()
+    rhs = -(laplacian[unknown_ids][:, anchor_ids] @ values_2d[anchor_ids])
+    solved = np.asarray(spsolve(system, rhs), dtype=np.float64)
+    if solved.ndim == 1:
+        solved = solved[:, None]
+    if solved.shape != (unknown_ids.size, values_2d.shape[1]) or not np.isfinite(solved).all():
+        raise RuntimeError(
+            "surface inpaint failed; every connected root component must contain a reliable anchor"
+        )
+
+    output = values_2d.copy()
+    output[unknown_ids] = solved
+    output = output[:, 0] if scalar_input else output.reshape(values_np.shape)
+    return torch.as_tensor(output, device=values.device, dtype=values.dtype)
+
+
+@torch.no_grad()
+def reconstruct_surface_directions(
+    directions: torch.Tensor,
+    normals: torch.Tensor,
+    points: torch.Tensor,
+    confidence: torch.Tensor,
+    edges: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Repair isolated direction outliers with one topology-local consensus pass.
+
+    Neighbor directions are parallel transported to each root before averaging.
+    A confident observation is retained when it agrees with a coherent local
+    field. An isolated disagreement in a coherent neighborhood loses reliability,
+    while a genuinely multi-directional neighborhood stays data-driven. The
+    operation is deliberately a single pass so initialization cannot iteratively
+    flatten the groom field.
+    """
+
+    if directions.ndim != 2 or directions.shape[-1] != 3:
+        raise ValueError("directions must have shape [N, 3]")
+    if normals.shape != directions.shape or points.shape != directions.shape:
+        raise ValueError("directions, normals, and points must have matching [N, 3] shapes")
+    if confidence.reshape(-1).shape[0] != directions.shape[0]:
+        raise ValueError("confidence must have one value per direction")
+    if edges.ndim != 2 or edges.shape[-1] != 2:
+        raise ValueError("edges must have shape [E, 2]")
+    if edges.numel() == 0:
+        raise RuntimeError("surface direction reconstruction requires graph edges")
+
+    direction = F.normalize(directions, dim=-1, eps=EPS)
+    normal = F.normalize(normals, dim=-1, eps=EPS)
+    confidence_flat = confidence.reshape(-1).to(
+        device=direction.device,
+        dtype=direction.dtype,
+    ).clamp(0.0, 1.0)
+    if not bool((confidence_flat > 0.0).any()):
+        raise RuntimeError("surface direction reconstruction requires confident anchors")
+
+    edge_ids = edges.to(device=direction.device, dtype=torch.long)
+    src, dst = edge_ids[:, 0], edge_ids[:, 1]
+    root_count = int(direction.shape[0])
+    if bool(((src < 0) | (src >= root_count) | (dst < 0) | (dst >= root_count)).any()):
+        raise ValueError("surface direction graph contains an out-of-range root index")
+
+    transported = parallel_transport_vectors(direction[dst], normal[dst], normal[src])
+    distance = torch.linalg.norm(points[src] - points[dst], dim=-1).clamp_min(1.0e-6)
+    weight = confidence_flat[dst] / distance.square()
+    weighted_direction = transported * weight[:, None]
+    vector_sum = torch.zeros_like(direction).scatter_add(
+        0,
+        src[:, None].expand_as(weighted_direction),
+        weighted_direction,
+    )
+    weight_sum = torch.zeros_like(confidence_flat).scatter_add(0, src, weight)
+    supported = weight_sum > EPS
+    consensus = torch.where(
+        supported[:, None],
+        F.normalize(vector_sum, dim=-1, eps=EPS),
+        direction,
+    )
+    concentration = torch.where(
+        supported,
+        vector_sum.norm(dim=-1) / weight_sum.clamp_min(EPS),
+        torch.zeros_like(weight_sum),
+    ).clamp(0.0, 1.0)
+
+    disagreement = 1.0 - (direction * consensus).sum(dim=-1).clamp(-1.0, 1.0)
+    dispersion = (1.0 - concentration).clamp_min(1.0e-4)
+    agreement = torch.exp(-disagreement / dispersion)
+    reliability = (confidence_flat * agreement).clamp(0.0, 1.0)
+    reconstructed = F.normalize(
+        reliability[:, None] * direction
+        + (1.0 - reliability[:, None]) * consensus,
+        dim=-1,
+        eps=EPS,
+    )
+    reconstructed = torch.where(supported[:, None], reconstructed, direction)
+    reliability = torch.where(supported, reliability, confidence_flat)
+    return reconstructed, reliability, supported
 
 
 def interpolate_directions(
@@ -514,17 +861,74 @@ def build_hierarchical_surface_edges(
     if root_count < 2 or int(neighbor_count) <= 0:
         return torch.empty((0, 2), device=points.device, dtype=torch.long)
 
-    primary = guide_support_indices[:, 0].detach().cpu().numpy().astype(np.int64)
-    support_np = guide_support_indices.detach().cpu().numpy().astype(np.int64)
-    points_np = points.detach().cpu().numpy().astype(np.float32)
-    buckets: dict[int, list[int]] = defaultdict(list)
-    for root_id, guide_id in enumerate(primary.tolist()):
-        buckets[int(guide_id)].append(int(root_id))
-
+    points_np = np.ascontiguousarray(points.detach().cpu().numpy(), dtype=np.float32)
+    support_np = np.ascontiguousarray(
+        guide_support_indices.detach().cpu().numpy(),
+        dtype=np.int64,
+    )
+    primary = support_np[:, 0]
     k = min(int(neighbor_count), root_count - 1)
-    src_out = np.repeat(np.arange(root_count, dtype=np.int64), k)
+    support_width = int(support_np.shape[1])
+    guide_count = int(max(primary.max(initial=0), support_np.max(initial=0)) + 1)
+
+    bucket_order = np.argsort(primary, kind="stable")
+    bucket_counts = np.bincount(primary, minlength=guide_count)
+    bucket_offsets = np.concatenate([[0], np.cumsum(bucket_counts)])
+
+    flat_support = support_np.reshape(-1)
+    incidence_order = np.argsort(flat_support, kind="stable")
+    incidence_counts = np.bincount(flat_support, minlength=guide_count)
+    incidence_offsets = np.concatenate([[0], np.cumsum(incidence_counts)])
+    incidence_roots = incidence_order // support_width
+    incidence_slots = incidence_order % support_width
+
+    candidate_ids = np.full((root_count, support_width, k), -1, dtype=np.int64)
+    candidate_distances = np.full(
+        (root_count, support_width, k),
+        np.inf,
+        dtype=np.float32,
+    )
+    for guide_id in np.flatnonzero(incidence_counts).tolist():
+        bucket = bucket_order[bucket_offsets[guide_id] : bucket_offsets[guide_id + 1]]
+        incidence_slice = slice(incidence_offsets[guide_id], incidence_offsets[guide_id + 1])
+        query_roots = incidence_roots[incidence_slice]
+        query_slots = incidence_slots[incidence_slice]
+        if bucket.size == 0 or query_roots.size == 0:
+            continue
+        delta = points_np[query_roots, None, :] - points_np[bucket][None, :, :]
+        distance = np.linalg.norm(delta, axis=-1)
+        distance[bucket[None, :] == query_roots[:, None]] = np.inf
+        local_k = min(k, int(bucket.size))
+        order = np.argsort(distance, axis=1, kind="stable")[:, :local_k]
+        selected_ids = bucket[order]
+        selected_distances = np.take_along_axis(distance, order, axis=1)
+        valid = np.isfinite(selected_distances)
+        candidate_ids[query_roots, query_slots, :local_k] = np.where(
+            valid,
+            selected_ids,
+            -1,
+        )
+        candidate_distances[query_roots, query_slots, :local_k] = selected_distances
+
+    merged_ids = candidate_ids.reshape(root_count, -1)
+    merged_distances = candidate_distances.reshape(root_count, -1)
+    sorted_support = np.sort(support_np, axis=1)
+    duplicate_support = np.any(np.diff(sorted_support, axis=1) == 0, axis=1)
+    fallback = duplicate_support | (np.sum(merged_ids >= 0, axis=1) < k)
     dst_out = np.empty((root_count, k), dtype=np.int64)
-    for root_id in range(root_count):
+    normal = ~fallback
+    if np.any(normal):
+        order = np.lexsort(
+            (merged_ids[normal], merged_distances[normal]),
+            axis=1,
+        )[:, :k]
+        dst_out[normal] = np.take_along_axis(merged_ids[normal], order, axis=1)
+
+    buckets = {
+        int(guide_id): bucket_order[bucket_offsets[guide_id] : bucket_offsets[guide_id + 1]]
+        for guide_id in np.flatnonzero(bucket_counts).tolist()
+    }
+    for root_id in np.flatnonzero(fallback).tolist():
         candidates: set[int] = set()
         for guide_id in support_np[root_id].tolist():
             candidates.update(buckets.get(int(guide_id), ()))
@@ -562,6 +966,7 @@ def build_hierarchical_surface_edges(
             axis=-1,
         )
         dst_out[root_id] = candidate_ids[np.argsort(distance, kind="stable")[:k]]
+    src_out = np.repeat(np.arange(root_count, dtype=np.int64), k)
     return torch.as_tensor(
         np.stack([src_out, dst_out.reshape(-1)], axis=-1),
         device=points.device,

@@ -138,11 +138,16 @@ def summarize_tensor(value: torch.Tensor) -> dict[str, float]:
 
 
 def load_checkpoint_model(checkpoint_path: Path, device: torch.device):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    config_path = checkpoint_path.parent / "config.json"
-    if not config_path.exists():
-        raise FileNotFoundError(f"missing config next to checkpoint: {config_path}")
-    config = stage1.Stage1Config(**json.loads(config_path.read_text(encoding="utf-8")))
+    checkpoint = stage1.load_training_checkpoint(checkpoint_path)
+    config_mapping = checkpoint.get("config")
+    if config_mapping is None:
+        config_path = checkpoint_path.parent / "config.json"
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"checkpoint has no embedded config and no config exists next to it: {config_path}"
+            )
+        config_mapping = json.loads(config_path.read_text(encoding="utf-8"))
+    config = stage1.stage1_config_from_checkpoint_mapping(config_mapping)
     state = checkpoint["model"]
     mesh_path = stage1.resolve_project_path(config.mesh_path)
     mesh = stage1.read_obj_mesh(mesh_path)
@@ -157,6 +162,7 @@ def load_checkpoint_model(checkpoint_path: Path, device: torch.device):
     model = stage1.WhiteTigerStage1Model(
         mesh,
         normals,
+        None,
         face_ids,
         bary,
         stage1.dense_groom_ranges(),
@@ -164,27 +170,28 @@ def load_checkpoint_model(checkpoint_path: Path, device: torch.device):
         init_scale=config.init_mesh_scale,
         init_translation=tuple(config.init_mesh_translation),
         init_groom_length=getattr(config, "init_groom_length", 0.060),
-        init_guide_length=getattr(config, "init_guide_length", 0.060),
         max_child_count=config.child_count,
         local_child_color_support=config.local_child_color_support,
-        local_child_opacity_support=config.local_child_opacity_support,
         local_child_color_scale=config.local_child_color_scale,
-        local_child_opacity_scale=config.local_child_opacity_scale,
         guide_face_ids=guide_face_ids,
         guide_barycentric=guide_bary,
         guide_interpolation_k=config.guide_interpolation_k,
-        guide_controls_flow=getattr(config, "guide_controls_flow", False),
+        render_geometry_parameterization=getattr(
+            config,
+            "render_geometry_parameterization",
+            "absolute_endpoint",
+        ),
         guide_length_residual_scale=getattr(config, "guide_length_residual_scale", 0.0),
         guide_bend_residual_scale=getattr(config, "guide_bend_residual_scale", 0.0),
-        guide_flow_residual_scale=getattr(config, "guide_flow_residual_scale", 1.0),
+        guide_direction_residual_scale=config.guide_direction_residual_scale,
         guide_width_residual_scale=getattr(config, "guide_width_residual_scale", 1.0),
-        guide_flow_strength_residual_scale=getattr(config, "guide_flow_strength_residual_scale", 1.0),
-        guide_lift_residual_scale=getattr(config, "guide_lift_residual_scale", 1.0),
-        guide_stiffness_residual_scale=getattr(config, "guide_stiffness_residual_scale", 1.0),
         guide_child_radius_residual_scale=getattr(config, "guide_child_radius_residual_scale", 1.0),
         guide_clump_residual_scale=getattr(config, "guide_clump_residual_scale", 1.0),
         guide_curl_residual_scale=getattr(config, "guide_curl_residual_scale", 1.0),
         guide_frizz_residual_scale=getattr(config, "guide_frizz_residual_scale", 1.0),
+        shape_curl_scale=getattr(config, "shape_curl_scale", 1.0),
+        shape_frizz_scale=getattr(config, "shape_frizz_scale", 1.0),
+        strand_shape_normal_mode=getattr(config, "strand_shape_normal_mode", "full"),
     )
     model.load_state_dict(state, strict=True)
     model.eval()
@@ -248,7 +255,6 @@ def run_diagnostics(args: argparse.Namespace) -> None:
     length = groom.length.reshape(-1).float()
     width_root = groom.root_width.reshape(-1).float()
     opacity = groom.opacity.reshape(-1).float()
-    flow_strength = groom.flow_strength.reshape(-1).float()
     clump = groom.clump_strength.reshape(-1).float()
     child_radius = groom.child_radius.reshape(-1).float()
     curl = groom.curl_radius.reshape(-1).float()
@@ -312,7 +318,6 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         "length": summarize_tensor(length),
         "root_width": summarize_tensor(width_root),
         "opacity": summarize_tensor(opacity),
-        "flow_strength": summarize_tensor(flow_strength),
         "clump_strength": summarize_tensor(clump),
         "child_radius": summarize_tensor(child_radius),
         "curl_radius": summarize_tensor(curl),
@@ -331,7 +336,6 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         "length_p95": length >= q["length"]["q95"],
         "width_p95": width_root >= q["root_width"]["q95"],
         "opacity_p95": opacity >= q["opacity"]["q95"],
-        "high_flow_p95": flow_strength >= q["flow_strength"]["q95"],
         "high_gaussian_count_p95": gaussian_count >= q["gaussian_count_per_root"]["q95"],
         "dark_luma_le_038": luma <= 0.38,
         "dark_overlength": (luma <= 0.38) & (length > 0.080),
@@ -417,7 +421,6 @@ def run_diagnostics(args: argparse.Namespace) -> None:
                 "width_mean": float(width_root[idx].mean().cpu()),
                 "opacity_mean": float(opacity[idx].mean().cpu()),
                 "luma_mean": float(luma[idx].mean().cpu()),
-                "flow_strength_mean": float(flow_strength[idx].mean().cpu()),
                 "clump_strength_mean": float(clump[idx].mean().cpu()),
                 "child_radius_mean": float(child_radius[idx].mean().cpu()),
                 "curl_radius_mean": float(curl[idx].mean().cpu()),

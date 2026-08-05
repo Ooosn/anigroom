@@ -139,10 +139,9 @@ def apply_teacher_pattern(field: GroomParameterField, roots: torch.Tensor) -> No
         stripe = torch.sigmoid(4.0 * (torch.sin(26.0 * z + 8.0 * x) - 0.30))
         head = torch.sigmoid(10.0 * (x - torch.quantile(x, 0.70)))
         field.length_raw.add_(1.10 * length_wave + 0.70 * head)
-        field.flow_xy[:, 0:1].add_(0.40 * torch.sin(7.0 * z))
-        field.flow_xy[:, 1:2].add_(0.35 * torch.cos(6.0 * x))
-        field.lift_raw.add_(0.40 * head)
-        field.sag_raw.add_(0.55 * torch.sigmoid(6.0 * (0.15 - y)))
+        field.direction_local_raw[:, 0:1].add_(0.40 * torch.sin(7.0 * z))
+        field.direction_local_raw[:, 1:2].add_(0.35 * torch.cos(6.0 * x))
+        field.direction_local_raw[:, 2:3].add_(0.40 * head)
         field.bend_raw.add_(0.60 * torch.sin(9.0 * z))
         field.root_width_raw.add_(0.55 * stripe + 0.25 * head)
         field.tip_width_ratio_raw.add_(0.35 * torch.cos(6.0 * z))
@@ -163,14 +162,26 @@ def render_groom(
     height: int,
     samples: int,
     min_segments: int,
-    max_segments: int,
+    segment_length_origin: float,
+    segments_per_unit_length: float,
+    segments_per_unit_complexity: float,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], dict[str, float | int]]:
     from gsplat.rendering import rasterization
 
     tangents, bitangents = make_tangent_frames(normals)
     groom = field.decode()
     strands, widths, colors, opacities = build_strands(roots, normals, tangents, bitangents, groom, samples=samples)
-    resampled = adaptive_resample_strands(strands, widths, colors, opacities, groom.length, min_segments, max_segments)
+    resampled = adaptive_resample_strands(
+        strands,
+        widths,
+        colors,
+        opacities,
+        groom.length,
+        min_segments,
+        segment_length_origin,
+        segments_per_unit_length,
+        segments_per_unit_complexity,
+    )
     gaussians = strands_to_gaussians(
         resampled.strands,
         resampled.widths,
@@ -213,7 +224,9 @@ def decoded_error(student: GroomParameterField, teacher: GroomParameterField) ->
         "length_l1": float((s.length - t.length).abs().mean().detach().cpu()),
         "root_width_l1": float((s.root_width - t.root_width).abs().mean().detach().cpu()),
         "tip_width_l1": float((s.tip_width - t.tip_width).abs().mean().detach().cpu()),
-        "flow_xy_l1": float((s.flow_xy - t.flow_xy).abs().mean().detach().cpu()),
+        "direction_local_l1": float(
+            (s.direction_local - t.direction_local).abs().mean().detach().cpu()
+        ),
         "root_color_l1": float((s.root_color - t.root_color).abs().mean().detach().cpu()),
         "tip_color_l1": float((s.tip_color - t.tip_color).abs().mean().detach().cpu()),
         "opacity_l1": float((s.opacity - t.opacity).abs().mean().detach().cpu()),
@@ -231,7 +244,9 @@ def save_controlled_edit_panel(
     height: int,
     samples: int,
     min_segments: int,
-    max_segments: int,
+    segment_length_origin: float,
+    segments_per_unit_length: float,
+    segments_per_unit_complexity: float,
 ) -> list[Path]:
     """Render direct grooming edits for visual sanity checks."""
 
@@ -249,11 +264,10 @@ def save_controlled_edit_panel(
 
     brushed = GroomParameterField(int(roots.shape[0]), device=roots.device)
     with torch.no_grad():
-        brushed.flow_xy[:, 0:1].add_(1.90)
-        brushed.flow_xy[:, 1:2].add_(1.45)
+        brushed.direction_local_raw[:, 0:1].add_(1.90)
+        brushed.direction_local_raw[:, 1:2].add_(1.45)
+        brushed.direction_local_raw[:, 2:3].add_(0.55)
         brushed.bend_raw.add_(2.20)
-        brushed.sag_raw.add_(1.80)
-        brushed.stiffness_raw.sub_(1.25)
         brushed.length_raw.add_(1.25)
         brushed.opacity_raw.add_(0.45)
     edit_specs.append(("edit_brushed_bent", brushed))
@@ -280,7 +294,9 @@ def save_controlled_edit_panel(
             height,
             samples,
             min_segments,
-            max_segments,
+            segment_length_origin,
+            segments_per_unit_length,
+            segments_per_unit_complexity,
         )
         for view_idx, image in zip(view_indices, images):
             path = output_dir / f"{label}_view_{view_idx:04d}.png"
@@ -301,7 +317,9 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=256)
     parser.add_argument("--samples", type=int, default=14)
     parser.add_argument("--min-segments", type=int, default=4)
-    parser.add_argument("--max-segments", type=int, default=13)
+    parser.add_argument("--segment-length-origin", type=float, default=0.010)
+    parser.add_argument("--segments-per-unit-length", type=float, default=84.19047619047619)
+    parser.add_argument("--segments-per-unit-complexity", type=float, default=23.771428571428572)
     parser.add_argument("--views", default="")
     parser.add_argument("--iterations", type=int, default=80)
     parser.add_argument("--lr", type=float, default=0.035)
@@ -342,7 +360,9 @@ def main() -> None:
             args.height,
             args.samples,
             args.min_segments,
-            args.max_segments,
+            args.segment_length_origin,
+            args.segments_per_unit_length,
+            args.segments_per_unit_complexity,
         )
         init_images, init_alphas, init_stats = render_groom(
             student,
@@ -355,7 +375,9 @@ def main() -> None:
             args.height,
             args.samples,
             args.min_segments,
-            args.max_segments,
+            args.segment_length_origin,
+            args.segments_per_unit_length,
+            args.segments_per_unit_complexity,
         )
 
     initial_param_error = decoded_error(student, teacher)
@@ -372,7 +394,9 @@ def main() -> None:
             args.height,
             args.samples,
             args.min_segments,
-            args.max_segments,
+            args.segment_length_origin,
+            args.segments_per_unit_length,
+            args.segments_per_unit_complexity,
         )
         image_loss = torch.stack([F.mse_loss(pred, target) for pred, target in zip(pred_images, target_images)]).mean()
         alpha_loss = torch.stack([F.mse_loss(pred, target) for pred, target in zip(pred_alphas, target_alphas)]).mean()
@@ -406,7 +430,9 @@ def main() -> None:
             args.height,
             args.samples,
             args.min_segments,
-            args.max_segments,
+            args.segment_length_origin,
+            args.segments_per_unit_length,
+            args.segments_per_unit_complexity,
         )
     final_param_error = decoded_error(student, teacher)
 
@@ -440,7 +466,9 @@ def main() -> None:
         args.height,
         args.samples,
         args.min_segments,
-        args.max_segments,
+        args.segment_length_origin,
+        args.segments_per_unit_length,
+        args.segments_per_unit_complexity,
     )
     make_contact_sheet(written, output_dir / "contact_sheet.jpg")
     metrics = {

@@ -13,9 +13,9 @@ shadows, and inter-fur appearance from corrupting fur geometry.
 
 Before changing training logic or documentation, read:
 
-1. `docs/research_narrative.md`
+1. `docs/current_route.md`
 2. `docs/anigroom_module_map.md`
-3. the relevant `docs/modules/*.md` file
+3. `docs/accept_line_recovery_ledger.md` and the relevant R-series document
 
 The formal direction is explicit grooming parameters, clean 3D flow
 initialization, guide/render-root separation, root lifecycle, and delayed
@@ -73,12 +73,11 @@ fields is a failed route.
     script, view, crop, root mode, line length, line width, and color convention
     when comparing versions. Do not change visualization code or style while
     claiming algorithmic progress.
-    Every accepted training phase must be visualized through
-    `anigroom.visualization.stage1`; visualization implementations belong only
-    under `anigroom/visualization`, while `tools/` may contain thin CLI entry
-    points. Phase comparisons must use the checked-in protocol file and may
-    not override its views, resolution, sampling seed, strand count, camera,
-    material, arrow style, or scalar display ranges.
+    Structural QA and asset rendering must use the two fixed protocols in
+    `docs/current_route.md`. Do not present parent-only QA as an asset render,
+    and do not add another visualization implementation for an R-series
+    comparison. Phase comparisons may not change views, resolution, sampling
+    seed, strand count, camera, material, arrow style, or scalar ranges.
 14. Diagnostic code must not be presented as a formal result. If a script or
     output is exploratory, label it as diagnostic and keep it out of the formal
     path until it has passed the agreed visual and numeric checks.
@@ -125,7 +124,7 @@ or ask.
 Use `docs/anigroom_module_map.md` as the current module map. The active split is:
 
 - Flow / initialization: mesh alignment, SMAL head/body guide roots, multi-view
-  flow projection, normal-shell lift, direction clean/flip, and consensus.
+  flow projection, normal-shell outward evidence, direction clean/flip, and consensus.
 - Strand-to-Gaussian representation: explicit groom controls, strand generation,
   child strands, adaptive segments, and Gaussian conversion.
 - Multi-level root / training: guide/render-root hierarchy, interpolation,
@@ -138,9 +137,9 @@ design or tune it as an isolated standalone module.
 
 ## Current Flow Target
 
-The current accepted clean-flow target is:
+The frozen R036 baseline uses the accepted clean-flow target:
 
-`D:\petsgaussianhair\_downloads\tiger_hair_flow_36\shell_fused_smal_head500_body4000_candidate65536_headk24_bodyk12_v4_surface_direction`
+`baseline_inputs/v4_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
 `v3_height_smooth` and `v2_consensus` are retained only as controlled
 rollback/ablation lines. Do not treat either as the default.
@@ -157,11 +156,10 @@ with composite PSNR.
 
 ## Local Environment Notes
 
-- Canonical local project root: `D:\petsgaussianhair`. Do not use the legacy
-  Documents checkout, `D:\RTS`, or any outer Codex workspace directory as the
-  AniGroom project root.
-- Local PowerShell entry scripts should source `scripts/local/env.ps1`, which
-  sets the project root, activates `mygs`, and sets `PYTHONPATH`.
+- Canonical R-series worktree: `D:\petsgaussianhair-accept-line`.
+  `D:\petsgaussianhair` is a separate development checkout and must not be
+  mixed into the accepted R036 route. `D:\RTS` may hold temporary QA artifacts,
+  but it is not the project root.
 - Local training/debug environment: activate with `conda activate mygs` from
   PowerShell. The environment currently imports `torch`, `gsplat`, `trimesh`,
   and `numpy`.

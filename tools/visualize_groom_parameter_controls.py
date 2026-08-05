@@ -46,13 +46,15 @@ def make_roots(device: torch.device, rows: int = 4, cols: int = 6) -> tuple[torc
 
 def field_with_pattern(name: str, root_count: int, roots: torch.Tensor, device: torch.device) -> GroomParameterField:
     ranges = GroomRanges(
-        length=(0.055, 0.210),
-        root_width=(0.00010, 0.00155),
-        tip_width_ratio=(0.025, 0.42),
         curl_radius=(0.0, 0.045),
         frizz=(0.0, 0.020),
     )
-    field = GroomParameterField(root_count, ranges=ranges, device=device)
+    field = GroomParameterField(
+        root_count,
+        ranges=ranges,
+        init_length=0.1325,
+        device=device,
+    )
     x = roots[:, [0]]
     y = roots[:, [1]]
     phase = 8.0 * x + 3.5 * y
@@ -61,16 +63,16 @@ def field_with_pattern(name: str, root_count: int, roots: torch.Tensor, device: 
         field.root_width_raw.fill_(-0.55)
         field.tip_width_ratio_raw.fill_(-1.15)
         field.opacity_raw.fill_(1.65)
-        field.flow_xy[:, 0:1].fill_(0.05)
-        field.flow_xy[:, 1:2].fill_(1.05)
+        field.direction_local_raw.copy_(
+            torch.tensor([0.05, 1.05, 0.25], device=device).expand(root_count, -1)
+        )
         if name == "base":
             pass
         elif name == "long_bent":
             field.length_raw.add_(1.65)
-            field.sag_raw.add_(2.2)
             field.bend_raw.add_(1.4 * torch.sin(5.5 * x))
-            field.stiffness_raw.sub_(1.8)
-            field.flow_xy[:, 0:1].add_(0.7)
+            field.direction_local_raw[:, 0:1].add_(0.7)
+            field.direction_local_raw[:, 2:3].add_(0.45)
         elif name == "root_tip_taper":
             field.root_width_raw.add_(1.35)
             field.tip_width_ratio_raw.sub_(2.15)
@@ -89,7 +91,6 @@ def field_with_pattern(name: str, root_count: int, roots: torch.Tensor, device: 
             field.curl_radius_raw.add_(2.2)
             field.curl_frequency_raw.add_(1.8)
             field.curl_phase.copy_(1.7 * phase)
-            field.stiffness_raw.sub_(2.2)
         elif name == "root_tip_color_alpha":
             root_color = torch.tensor([0.09, 0.07, 0.045], device=device).view(1, 3)
             tip_color = torch.tensor([1.00, 0.86, 0.45], device=device).view(1, 3)
@@ -112,7 +113,9 @@ def render_field(
     focal: float,
     samples: int,
     min_segments: int,
-    max_segments: int,
+    segment_length_origin: float,
+    segments_per_unit_length: float,
+    segments_per_unit_complexity: float,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float | int]]:
     from gsplat.rendering import rasterization
 
@@ -126,7 +129,9 @@ def render_field(
         opacities,
         groom.length,
         min_segments=min_segments,
-        max_segments=max_segments,
+        length_origin=segment_length_origin,
+        segments_per_unit_length=segments_per_unit_length,
+        segments_per_unit_complexity=segments_per_unit_complexity,
     )
     gaussians = strands_to_gaussians(
         resampled.strands,
@@ -222,11 +227,8 @@ def gradient_report(device: torch.device) -> dict[str, float]:
         "root_width_raw",
         "tip_width_ratio_raw",
         "width_taper_raw",
-        "flow_xy",
-        "lift_raw",
+        "direction_local_raw",
         "bend_raw",
-        "sag_raw",
-        "stiffness_raw",
         "curl_radius_raw",
         "curl_frequency_raw",
         "curl_phase",
@@ -254,7 +256,9 @@ def main() -> None:
     parser.add_argument("--focal", type=float, default=2175.0)
     parser.add_argument("--samples", type=int, default=72)
     parser.add_argument("--min-segments", type=int, default=10)
-    parser.add_argument("--max-segments", type=int, default=48)
+    parser.add_argument("--segment-length-origin", type=float, default=0.010)
+    parser.add_argument("--segments-per-unit-length", type=float, default=84.19047619047619)
+    parser.add_argument("--segments-per-unit-complexity", type=float, default=23.771428571428572)
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -277,7 +281,9 @@ def main() -> None:
             args.focal,
             args.samples,
             args.min_segments,
-            args.max_segments,
+            args.segment_length_origin,
+            args.segments_per_unit_length,
+            args.segments_per_unit_complexity,
         )
         path = args.output_dir / f"{label}.png"
         to_pil(image).save(path)

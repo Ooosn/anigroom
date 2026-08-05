@@ -1,0 +1,223 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from anigroom.data.white_tiger import build_stage1_input_report, list_images  # noqa: E402
+from anigroom.mesh_roots import read_obj_mesh  # noqa: E402
+from tools.train_white_tiger_stage1 import (  # noqa: E402
+    Stage1Config,
+    WhiteTigerStage1Model,
+    composite_target,
+    dense_groom_ranges,
+    depth_to_image,
+    face_normals_np,
+    guide_coverage_residual_multiplier_for_iteration,
+    guide_residual_multiplier_for_iteration,
+    load_camera_tensors,
+    load_image,
+    load_mask,
+    make_mesh_backing_image,
+    render_model_mesh_depth,
+    render_view,
+    resolve_project_path,
+    sample_backing_color,
+    save_image,
+    scene_background_color,
+    shape_detail_multiplier_for_iteration,
+    stage1_config_from_checkpoint_mapping,
+)
+
+
+def parse_view_ids(value: str) -> list[int]:
+    ids: list[int] = []
+    for part in value.replace(",", " ").split():
+        if part.strip():
+            ids.append(int(part))
+    if not ids:
+        raise ValueError("at least one view id is required")
+    return ids
+
+
+def tensor_to_numpy(value: torch.Tensor) -> np.ndarray:
+    return value.detach().cpu().numpy()
+
+
+def build_model(checkpoint: dict, config: Stage1Config, device: torch.device) -> WhiteTigerStage1Model:
+    state = checkpoint["model"]
+    mesh = read_obj_mesh(resolve_project_path(config.mesh_path))
+    face_normals = face_normals_np(mesh)
+    face_tangents = None
+    if config.face_tangent_field:
+        tangent_path = resolve_project_path(config.face_tangent_field)
+        face_tangents = np.load(tangent_path).astype(np.float32)
+        if face_tangents.shape != (mesh.face_count, 3):
+            raise RuntimeError(f"face tangent field shape mismatch: {face_tangents.shape} != {(mesh.face_count, 3)}")
+        tangent_norm = np.linalg.norm(face_tangents, axis=-1, keepdims=True)
+        face_tangents = face_tangents / np.maximum(tangent_norm, 1.0e-8)
+
+    face_ids = tensor_to_numpy(state["face_ids"]).astype(np.int64)
+    if "bary_initial" in state:
+        barycentric = tensor_to_numpy(state["bary_initial"]).astype(np.float32)
+    else:
+        barycentric = tensor_to_numpy(torch.softmax(state["bary_logits"], dim=-1)).astype(np.float32)
+
+    guide_face_ids = None
+    guide_barycentric = None
+    if "guide_face_ids" in state and state["guide_face_ids"].numel() > 0:
+        guide_face_ids = tensor_to_numpy(state["guide_face_ids"]).astype(np.int64)
+        guide_barycentric = tensor_to_numpy(state["guide_barycentric"]).astype(np.float32)
+
+    model = WhiteTigerStage1Model(
+        mesh,
+        face_normals,
+        face_tangents,
+        face_ids,
+        barycentric,
+        dense_groom_ranges(),
+        device,
+        init_scale=config.init_mesh_scale,
+        init_translation=config.init_mesh_translation,
+        init_groom_length=config.init_groom_length,
+        max_child_count=config.child_count,
+        local_child_color_support=config.local_child_color_support,
+        local_child_color_scale=config.local_child_color_scale,
+        guide_face_ids=guide_face_ids,
+        guide_barycentric=guide_barycentric,
+        guide_interpolation_k=config.guide_interpolation_k,
+        render_geometry_parameterization=config.render_geometry_parameterization,
+        guide_length_residual_scale=config.guide_length_residual_scale,
+        guide_bend_residual_scale=config.guide_bend_residual_scale,
+        guide_direction_residual_scale=config.guide_direction_residual_scale,
+        guide_width_residual_scale=config.guide_width_residual_scale,
+        guide_child_radius_residual_scale=config.guide_child_radius_residual_scale,
+        guide_clump_residual_scale=config.guide_clump_residual_scale,
+        guide_curl_residual_scale=config.guide_curl_residual_scale,
+        guide_frizz_residual_scale=config.guide_frizz_residual_scale,
+        shape_curl_scale=getattr(config, "shape_curl_scale", 1.0),
+        shape_frizz_scale=getattr(config, "shape_frizz_scale", 1.0),
+        strand_shape_normal_mode=getattr(config, "strand_shape_normal_mode", "full"),
+    )
+    missing, unexpected = model.load_state_dict(state, strict=True)
+    if missing or unexpected:
+        raise RuntimeError(f"strict checkpoint load failed: missing={missing}, unexpected={unexpected}")
+
+    iteration = int(checkpoint.get("iteration", 0))
+    model.guide_residual_multiplier = guide_residual_multiplier_for_iteration(config, iteration)
+    model.guide_coverage_residual_multiplier = guide_coverage_residual_multiplier_for_iteration(config, iteration)
+    model.shape_detail_multiplier = shape_detail_multiplier_for_iteration(config, iteration)
+    model.eval()
+    return model
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Render selected full-resolution views from a White Tiger Stage1 checkpoint.")
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--view-ids", default="0 5 9 14 18 21 27 32")
+    parser.add_argument("--device", default="cuda")
+    args = parser.parse_args()
+
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for checkpoint view rendering")
+    device = torch.device(args.device)
+    checkpoint_path = resolve_project_path(args.checkpoint)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    config = stage1_config_from_checkpoint_mapping(checkpoint["config"])
+    model = build_model(checkpoint, config, device)
+
+    data_root = resolve_project_path(config.data_root)
+    mesh_path = resolve_project_path(config.mesh_path)
+    report = build_stage1_input_report(data_root, mesh_path, test_stride=config.test_stride)
+    if report.errors:
+        raise RuntimeError(f"input report errors: {report.errors}")
+    image_paths = list_images(Path(report.image_dir))
+    mask_paths = list_images(Path(report.mask_dir))
+    viewmats, ks = load_camera_tensors(data_root, device)
+    width, height = int(config.expected_width), int(config.expected_height)
+    view_ids = parse_view_ids(args.view_ids)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    mesh_depth_ctx = None
+    if config.mesh_depth_clipping or config.mesh_backing_compositing:
+        import nvdiffrast.torch as dr
+
+        mesh_depth_ctx = dr.RasterizeCudaContext(device=device)
+
+    mesh_color = sample_backing_color(config, device, train=False)
+    scene_bg = scene_background_color(config, device)
+    records = []
+    with torch.no_grad():
+        for idx in view_ids:
+            if idx < 0 or idx >= len(image_paths):
+                raise RuntimeError(f"view id out of range: {idx}, available={len(image_paths)}")
+            target = load_image(image_paths[idx], device)
+            mask = load_mask(mask_paths[idx], device)
+            mesh_depth = render_model_mesh_depth(model, viewmats[idx], ks[idx], width, height, device=device, ctx=mesh_depth_ctx)
+            backing = make_mesh_backing_image(mesh_depth, mesh_color, scene_bg)
+            pred, alpha, _, _, stats, _ = render_view(
+                model,
+                viewmats[idx],
+                ks[idx],
+                width,
+                height,
+                config,
+                background=mesh_color,
+                mesh_depth=mesh_depth,
+                backing_image=backing,
+            )
+            target_eval = composite_target(target, mask, backing)
+            raw_diff = torch.abs(pred - target) * 4.0
+            composite_diff = torch.abs(pred - target_eval) * 4.0
+            save_image(output_dir / f"view_{idx:02d}_pred.png", pred)
+            save_image(output_dir / f"view_{idx:02d}_gt.png", target)
+            save_image(output_dir / f"view_{idx:02d}_target_eval.png", target_eval)
+            save_image(output_dir / f"view_{idx:02d}_alpha.png", alpha)
+            save_image(output_dir / f"view_{idx:02d}_mesh_depth.png", depth_to_image(mesh_depth.depth))
+            save_image(output_dir / f"view_{idx:02d}_raw_diff_x4.png", raw_diff)
+            save_image(output_dir / f"view_{idx:02d}_composite_diff_x4.png", composite_diff)
+            raw_mse = torch.mean((pred - target).square()).clamp_min(1.0e-12)
+            comp_mse = torch.mean((pred - target_eval).square()).clamp_min(1.0e-12)
+            records.append(
+                {
+                    "view": int(idx),
+                    "pred": f"view_{idx:02d}_pred.png",
+                    "gt": f"view_{idx:02d}_gt.png",
+                    "raw_psnr": float((-10.0 * torch.log10(raw_mse)).detach().cpu()),
+                    "composite_psnr": float((-10.0 * torch.log10(comp_mse)).detach().cpu()),
+                    "stats": stats,
+                }
+            )
+            del target, mask, mesh_depth, backing, pred, alpha, target_eval, raw_diff, composite_diff
+            torch.cuda.empty_cache()
+
+    summary = {
+        "checkpoint": str(checkpoint_path),
+        "iteration": int(checkpoint.get("iteration", -1)),
+        "view_ids": view_ids,
+        "width": width,
+        "height": height,
+        "guide_residual_multiplier": float(model.guide_residual_multiplier),
+        "guide_coverage_residual_multiplier": float(model.guide_coverage_residual_multiplier),
+        "shape_detail_multiplier": float(model.shape_detail_multiplier),
+        "records": records,
+    }
+    (output_dir / "render_report.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()
