@@ -181,6 +181,31 @@ class SurfaceFieldInterpolator:
         self._vertex_distance = vertex_distance
         self._source_neighbors = source_neighbors
         self._source_neighbor_distances = source_neighbor_distances
+        self._support_vertices = torch.as_tensor(
+            vertices_np,
+            device=target_device,
+            dtype=torch.float64,
+        )
+        self._support_vertex_source = torch.as_tensor(
+            vertex_source,
+            device=target_device,
+            dtype=torch.long,
+        )
+        self._support_vertex_distance = torch.as_tensor(
+            vertex_distance,
+            device=target_device,
+            dtype=torch.float64,
+        )
+        self._support_source_neighbors = torch.as_tensor(
+            source_neighbors,
+            device=target_device,
+            dtype=torch.long,
+        )
+        self._support_source_neighbor_distances = torch.as_tensor(
+            source_neighbor_distances,
+            device=target_device,
+            dtype=torch.float64,
+        )
         self.report: dict[str, float | int] = {
             "source_count": int(source_points_np.shape[0]),
             "mesh_vertex_count": int(vertices_np.shape[0]),
@@ -288,6 +313,8 @@ class SurfaceFieldInterpolator:
         """Build fixed source IDs for query roots without cross-surface KNN."""
 
         started = perf_counter()
+        if isinstance(query_points, torch.Tensor) and self.vertices.device.type == "cuda":
+            return self._build_support_cuda(query_points, query_face_ids, started=started)
         query_points_np = np.asarray(
             query_points.detach().cpu().numpy()
             if isinstance(query_points, torch.Tensor)
@@ -413,6 +440,182 @@ class SurfaceFieldInterpolator:
                 "support_seconds": float(perf_counter() - started),
                 "support_bytes": int(indices.nbytes + vertex_paths.nbytes),
                 "fallback_query_count": int(len(fallback_queries)),
+            },
+        )
+
+    def _build_support_cuda(
+        self,
+        query_points: torch.Tensor,
+        query_face_ids: np.ndarray | torch.Tensor,
+        *,
+        started: float,
+    ) -> SurfaceSupport:
+        """CUDA implementation of the exact fixed-support selection contract."""
+
+        device = self.vertices.device
+        points = query_points.detach().to(device=device, dtype=torch.float64)
+        face_ids = torch.as_tensor(query_face_ids, device=device, dtype=torch.long).reshape(-1)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError("query_points must have shape [Q, 3]")
+        if int(face_ids.shape[0]) != int(points.shape[0]):
+            raise ValueError("query_face_ids must have one entry per query")
+
+        query_count = int(points.shape[0])
+        indices = torch.empty(
+            (query_count, self.neighbor_count),
+            device=device,
+            dtype=torch.long,
+        )
+        vertex_paths = torch.full(
+            (query_count, self.neighbor_count, 3),
+            torch.inf,
+            device=device,
+            dtype=self.vertices.dtype,
+        )
+        candidate_count = int(self._support_source_neighbors.shape[1])
+        flat_candidate_count = 3 * candidate_count
+        matrix_entries_per_query = flat_candidate_count * flat_candidate_count
+        chunk_size = max(
+            1,
+            min(query_count, 20_000_000 // max(matrix_entries_per_query, 1)),
+        )
+        fallback_batches: list[torch.Tensor] = []
+        for begin in range(0, query_count, chunk_size):
+            end = min(begin + chunk_size, query_count)
+            query_faces = self.faces[face_ids[begin:end]]
+            query_vertices = self._support_vertices[query_faces]
+            query_vertex_distances = torch.linalg.norm(
+                points[begin:end, None, :] - query_vertices,
+                dim=-1,
+            )
+            seeds = self._support_vertex_source[query_faces]
+            candidate_ids = self._support_source_neighbors[seeds]
+            candidate_paths = (
+                self._support_vertex_distance[query_faces, None]
+                + self._support_source_neighbor_distances[seeds]
+            )
+            candidate_scores = candidate_paths + query_vertex_distances[:, :, None]
+            batch_size = end - begin
+            flat_ids = candidate_ids.reshape(batch_size, flat_candidate_count)
+            flat_scores = candidate_scores.reshape(batch_size, flat_candidate_count)
+
+            equal_ids = flat_ids[:, :, None] == flat_ids[:, None, :]
+            repeated_from_earlier = torch.tril(equal_ids, diagonal=-1).any(dim=2)
+            aggregate_scores = torch.where(
+                equal_ids,
+                flat_scores[:, None, :],
+                torch.inf,
+            ).amin(dim=2)
+            aggregate_scores.masked_fill_(repeated_from_earlier, torch.inf)
+            order = torch.argsort(aggregate_scores, dim=1, stable=True)[
+                :, : self.neighbor_count
+            ]
+            chosen_ids = torch.gather(flat_ids, 1, order)
+            chosen_scores = torch.gather(aggregate_scores, 1, order)
+            normal = torch.isfinite(chosen_scores).all(dim=1)
+
+            batch_indices = indices[begin:end]
+            batch_indices[normal] = chosen_ids[normal]
+            normal_candidate_ids = candidate_ids[normal]
+            normal_chosen_ids = chosen_ids[normal]
+            matches = (
+                normal_candidate_ids[:, None, :, :]
+                == normal_chosen_ids[:, :, None, None]
+            )
+            selected_paths = torch.where(
+                matches,
+                candidate_paths[normal, None, :, :],
+                torch.inf,
+            ).amin(dim=3)
+            batch_vertex_paths = vertex_paths[begin:end]
+            batch_vertex_paths[normal] = selected_paths.to(dtype=self.vertices.dtype)
+            fallback_batches.append(
+                torch.arange(begin, end, device=device, dtype=torch.long)[~normal]
+            )
+
+        fallback_ids = torch.cat(fallback_batches).cpu().tolist() if fallback_batches else []
+        if fallback_ids:
+            query_points_np = np.asarray(points.cpu().numpy(), dtype=np.float64)
+            query_face_ids_np = np.asarray(face_ids.cpu().numpy(), dtype=np.int64)
+            for query_id in fallback_ids:
+                query_face = self._faces_np[query_face_ids_np[query_id]]
+                query_vertices = self._vertices_np[query_face]
+                query_vertex_distances = np.linalg.norm(
+                    query_points_np[query_id : query_id + 1] - query_vertices,
+                    axis=-1,
+                )
+                paths: dict[int, np.ndarray] = {}
+                for vertex_slot, vertex_id in enumerate(query_face.tolist()):
+                    seed = int(self._vertex_source[vertex_id])
+                    base = float(self._vertex_distance[vertex_id])
+                    for candidate_id, source_distance in zip(
+                        self._source_neighbors[seed].tolist(),
+                        self._source_neighbor_distances[seed].tolist(),
+                    ):
+                        values = paths.setdefault(
+                            int(candidate_id),
+                            np.full((3,), np.inf, dtype=np.float64),
+                        )
+                        values[vertex_slot] = min(
+                            values[vertex_slot],
+                            base + float(source_distance),
+                        )
+                if not paths:
+                    raise RuntimeError(
+                        f"query {query_id} has no topology-valid interpolation source"
+                    )
+                candidate_ids_np = np.fromiter(paths.keys(), dtype=np.int64)
+                candidate_paths_np = np.stack(
+                    [paths[int(candidate_id)] for candidate_id in candidate_ids_np]
+                )
+                score = np.min(
+                    candidate_paths_np + query_vertex_distances[None, :],
+                    axis=1,
+                )
+                fallback_order = np.argsort(score, kind="stable")
+                chosen_ids_np = candidate_ids_np[fallback_order[: self.neighbor_count]]
+                chosen_paths_np = candidate_paths_np[
+                    fallback_order[: self.neighbor_count]
+                ]
+                if chosen_ids_np.size < self.neighbor_count:
+                    pad = self.neighbor_count - int(chosen_ids_np.size)
+                    chosen_ids_np = np.pad(
+                        chosen_ids_np,
+                        (0, pad),
+                        constant_values=int(chosen_ids_np[0]),
+                    )
+                    chosen_paths_np = np.concatenate(
+                        [
+                            chosen_paths_np,
+                            np.repeat(chosen_paths_np[:1], pad, axis=0),
+                        ],
+                        axis=0,
+                    )
+                indices[query_id] = torch.as_tensor(
+                    chosen_ids_np,
+                    device=device,
+                    dtype=torch.long,
+                )
+                vertex_paths[query_id] = torch.as_tensor(
+                    chosen_paths_np,
+                    device=device,
+                    dtype=self.vertices.dtype,
+                )
+
+        torch.cuda.synchronize(device)
+        return SurfaceSupport(
+            indices=indices,
+            vertex_path_distances=vertex_paths,
+            report={
+                **self.report,
+                "query_count": query_count,
+                "support_seconds": float(perf_counter() - started),
+                "support_bytes": int(
+                    indices.numel() * indices.element_size()
+                    + vertex_paths.numel() * vertex_paths.element_size()
+                ),
+                "fallback_query_count": int(len(fallback_ids)),
+                "backend": "cuda_exact",
             },
         )
 
@@ -851,7 +1054,13 @@ def build_hierarchical_surface_edges(
     *,
     neighbor_count: int,
 ) -> torch.Tensor:
-    """Build dense-root edges only inside topology-valid guide neighborhoods."""
+    """Build exact dense-root KNN edges inside guide-support neighborhoods.
+
+    Each render root may only connect to roots whose primary guide belongs to
+    its own guide support. Candidate generation and KNN selection stay on the
+    input device; only the rare degenerate-support rows use the topology
+    expansion below on CPU.
+    """
 
     if points.ndim != 2 or points.shape[-1] != 3:
         raise ValueError("points must have shape [N, 3]")
@@ -861,114 +1070,144 @@ def build_hierarchical_surface_edges(
     if root_count < 2 or int(neighbor_count) <= 0:
         return torch.empty((0, 2), device=points.device, dtype=torch.long)
 
-    points_np = np.ascontiguousarray(points.detach().cpu().numpy(), dtype=np.float32)
-    support_np = np.ascontiguousarray(
-        guide_support_indices.detach().cpu().numpy(),
-        dtype=np.int64,
-    )
-    primary = support_np[:, 0]
+    points_work = points.detach().to(dtype=torch.float32)
+    support = guide_support_indices.detach().to(device=points.device, dtype=torch.long)
+    primary = support[:, 0]
     k = min(int(neighbor_count), root_count - 1)
-    support_width = int(support_np.shape[1])
-    guide_count = int(max(primary.max(initial=0), support_np.max(initial=0)) + 1)
+    support_width = int(support.shape[1])
+    guide_count = int(torch.maximum(primary.max(), support.max()).item()) + 1
 
-    bucket_order = np.argsort(primary, kind="stable")
-    bucket_counts = np.bincount(primary, minlength=guide_count)
-    bucket_offsets = np.concatenate([[0], np.cumsum(bucket_counts)])
-
-    flat_support = support_np.reshape(-1)
-    incidence_order = np.argsort(flat_support, kind="stable")
-    incidence_counts = np.bincount(flat_support, minlength=guide_count)
-    incidence_offsets = np.concatenate([[0], np.cumsum(incidence_counts)])
-    incidence_roots = incidence_order // support_width
-    incidence_slots = incidence_order % support_width
-
-    candidate_ids = np.full((root_count, support_width, k), -1, dtype=np.int64)
-    candidate_distances = np.full(
-        (root_count, support_width, k),
-        np.inf,
-        dtype=np.float32,
+    bucket_order = torch.argsort(primary, stable=True)
+    sorted_primary = primary[bucket_order]
+    bucket_counts = torch.bincount(primary, minlength=guide_count)
+    max_bucket_size = int(bucket_counts.max().item())
+    bucket_offsets = torch.cumsum(bucket_counts, dim=0) - bucket_counts
+    bucket_positions = torch.arange(root_count, device=points.device) - torch.repeat_interleave(
+        bucket_offsets,
+        bucket_counts,
     )
-    for guide_id in np.flatnonzero(incidence_counts).tolist():
-        bucket = bucket_order[bucket_offsets[guide_id] : bucket_offsets[guide_id + 1]]
-        incidence_slice = slice(incidence_offsets[guide_id], incidence_offsets[guide_id + 1])
-        query_roots = incidence_roots[incidence_slice]
-        query_slots = incidence_slots[incidence_slice]
-        if bucket.size == 0 or query_roots.size == 0:
-            continue
-        delta = points_np[query_roots, None, :] - points_np[bucket][None, :, :]
-        distance = np.linalg.norm(delta, axis=-1)
-        distance[bucket[None, :] == query_roots[:, None]] = np.inf
-        local_k = min(k, int(bucket.size))
-        order = np.argsort(distance, axis=1, kind="stable")[:, :local_k]
-        selected_ids = bucket[order]
-        selected_distances = np.take_along_axis(distance, order, axis=1)
-        valid = np.isfinite(selected_distances)
-        candidate_ids[query_roots, query_slots, :local_k] = np.where(
-            valid,
-            selected_ids,
-            -1,
-        )
-        candidate_distances[query_roots, query_slots, :local_k] = selected_distances
-
-    merged_ids = candidate_ids.reshape(root_count, -1)
-    merged_distances = candidate_distances.reshape(root_count, -1)
-    sorted_support = np.sort(support_np, axis=1)
-    duplicate_support = np.any(np.diff(sorted_support, axis=1) == 0, axis=1)
-    fallback = duplicate_support | (np.sum(merged_ids >= 0, axis=1) < k)
-    dst_out = np.empty((root_count, k), dtype=np.int64)
-    normal = ~fallback
-    if np.any(normal):
-        order = np.lexsort(
-            (merged_ids[normal], merged_distances[normal]),
-            axis=1,
-        )[:, :k]
-        dst_out[normal] = np.take_along_axis(merged_ids[normal], order, axis=1)
-
-    buckets = {
-        int(guide_id): bucket_order[bucket_offsets[guide_id] : bucket_offsets[guide_id + 1]]
-        for guide_id in np.flatnonzero(bucket_counts).tolist()
-    }
-    for root_id in np.flatnonzero(fallback).tolist():
-        candidates: set[int] = set()
-        for guide_id in support_np[root_id].tolist():
-            candidates.update(buckets.get(int(guide_id), ()))
-        candidates.discard(root_id)
-        if len(candidates) < k:
-            # A newly inserted guide can temporarily own fewer than K render roots.
-            # Expand through the same guide-support incidence graph instead of
-            # duplicating neighbors, lowering K, or crossing disconnected topology.
-            active_guides = np.unique(support_np[root_id])
-            while len(candidates) < k:
-                overlap = np.isin(support_np, active_guides).any(axis=1)
-                expanded_ids = np.flatnonzero(overlap)
-                previous_count = len(candidates)
-                candidates.update(expanded_ids.tolist())
-                candidates.discard(root_id)
-                if len(candidates) >= k:
-                    break
-                expanded_guides = np.unique(support_np[expanded_ids])
-                if expanded_guides.size == active_guides.size and np.array_equal(
-                    expanded_guides,
-                    active_guides,
-                ):
-                    break
-                active_guides = expanded_guides
-                if len(candidates) == previous_count:
-                    break
-        if len(candidates) < k:
-            raise RuntimeError(
-                f"render root {root_id} has only {len(candidates)} topology-valid "
-                f"neighbors for K={k}"
-            )
-        candidate_ids = np.asarray(sorted(candidates), dtype=np.int64)
-        distance = np.linalg.norm(
-            points_np[candidate_ids] - points_np[root_id : root_id + 1],
-            axis=-1,
-        )
-        dst_out[root_id] = candidate_ids[np.argsort(distance, kind="stable")[:k]]
-    src_out = np.repeat(np.arange(root_count, dtype=np.int64), k)
-    return torch.as_tensor(
-        np.stack([src_out, dst_out.reshape(-1)], axis=-1),
+    buckets = torch.full(
+        (guide_count, max_bucket_size),
+        -1,
         device=points.device,
         dtype=torch.long,
     )
+    buckets[sorted_primary, bucket_positions] = bucket_order
+
+    sorted_support = torch.sort(support, dim=1).values
+    duplicate_support = (sorted_support[:, 1:] == sorted_support[:, :-1]).any(dim=1)
+    candidate_counts = bucket_counts[support].sum(dim=1)
+    fallback = duplicate_support | (candidate_counts < k)
+    dst_out = torch.empty((root_count, k), device=points.device, dtype=torch.long)
+
+    candidate_width = support_width * max_bucket_size
+    # Bound temporary candidate coordinates independently of root count. This
+    # changes only execution chunking, never graph semantics.
+    chunk_size = max(1, min(root_count, 2_000_000 // max(candidate_width, 1)))
+    tie_rows: list[torch.Tensor] = []
+    if candidate_width >= k:
+        for begin in range(0, root_count, chunk_size):
+            end = min(begin + chunk_size, root_count)
+            query_ids = torch.arange(begin, end, device=points.device)
+            candidate_ids = buckets[support[begin:end]].reshape(end - begin, candidate_width)
+            valid = candidate_ids >= 0
+            safe_ids = candidate_ids.clamp_min(0)
+            delta = points_work[begin:end, None, :] - points_work[safe_ids]
+            distance_sq = (delta * delta).sum(dim=-1)
+            distance_sq.masked_fill_(~valid | (candidate_ids == query_ids[:, None]), torch.inf)
+
+            select_count = min(k + 1, candidate_width)
+            selected_distance, selected_slots = torch.topk(
+                distance_sq,
+                k=select_count,
+                dim=1,
+                largest=False,
+                sorted=True,
+            )
+            selected_ids = torch.gather(candidate_ids, 1, selected_slots)
+
+            # Make equal-distance ordering identical to the reference contract:
+            # distance first, then root ID.
+            selected_ids_k = selected_ids[:, :k]
+            selected_distance_k = selected_distance[:, :k]
+            id_order = torch.argsort(selected_ids_k, dim=1, stable=True)
+            selected_ids_k = torch.gather(selected_ids_k, 1, id_order)
+            selected_distance_k = torch.gather(selected_distance_k, 1, id_order)
+            distance_order = torch.argsort(selected_distance_k, dim=1, stable=True)
+            dst_out[begin:end] = torch.gather(selected_ids_k, 1, distance_order)
+
+            if select_count > k:
+                boundary_tie = selected_distance[:, k - 1] == selected_distance[:, k]
+                tie_rows.append(query_ids[boundary_tie])
+    else:
+        fallback.fill_(True)
+
+    if tie_rows:
+        fallback[torch.cat(tie_rows)] = True
+
+    fallback_ids = torch.nonzero(fallback, as_tuple=False).reshape(-1)
+    if fallback_ids.numel() > 0:
+        points_np = np.ascontiguousarray(points_work.cpu().numpy(), dtype=np.float32)
+        support_np = np.ascontiguousarray(support.cpu().numpy(), dtype=np.int64)
+        primary_np = support_np[:, 0]
+        bucket_order_np = np.argsort(primary_np, kind="stable")
+        bucket_counts_np = np.bincount(primary_np, minlength=guide_count)
+        bucket_offsets_np = np.concatenate([[0], np.cumsum(bucket_counts_np)])
+        bucket_lookup = {
+            int(guide_id): bucket_order_np[
+                bucket_offsets_np[guide_id] : bucket_offsets_np[guide_id + 1]
+            ]
+            for guide_id in np.flatnonzero(bucket_counts_np).tolist()
+        }
+        fallback_dst = np.empty((int(fallback_ids.numel()), k), dtype=np.int64)
+        for output_row, root_id in enumerate(fallback_ids.cpu().tolist()):
+            candidates: set[int] = set()
+            for guide_id in support_np[root_id].tolist():
+                candidates.update(bucket_lookup.get(int(guide_id), ()))
+            candidates.discard(root_id)
+            if len(candidates) < k:
+                # A newly inserted guide can temporarily own fewer than K render roots.
+                # Expand through the same guide-support incidence graph instead of
+                # duplicating neighbors, lowering K, or crossing disconnected topology.
+                active_guides = np.unique(support_np[root_id])
+                while len(candidates) < k:
+                    overlap = np.isin(support_np, active_guides).any(axis=1)
+                    expanded_ids = np.flatnonzero(overlap)
+                    previous_count = len(candidates)
+                    candidates.update(expanded_ids.tolist())
+                    candidates.discard(root_id)
+                    if len(candidates) >= k:
+                        break
+                    expanded_guides = np.unique(support_np[expanded_ids])
+                    if expanded_guides.size == active_guides.size and np.array_equal(
+                        expanded_guides,
+                        active_guides,
+                    ):
+                        break
+                    active_guides = expanded_guides
+                    if len(candidates) == previous_count:
+                        break
+            if len(candidates) < k:
+                raise RuntimeError(
+                    f"render root {root_id} has only {len(candidates)} topology-valid "
+                    f"neighbors for K={k}"
+                )
+            candidate_ids_np = np.asarray(sorted(candidates), dtype=np.int64)
+            distance = np.linalg.norm(
+                points_np[candidate_ids_np] - points_np[root_id : root_id + 1],
+                axis=-1,
+            )
+            fallback_dst[output_row] = candidate_ids_np[
+                np.argsort(distance, kind="stable")[:k]
+            ]
+        dst_out[fallback_ids] = torch.as_tensor(
+            fallback_dst,
+            device=points.device,
+            dtype=torch.long,
+        )
+
+    if bool((dst_out < 0).any()) or bool((dst_out == torch.arange(root_count, device=points.device)[:, None]).any()):
+        raise RuntimeError("hierarchical surface graph contains an invalid or self edge")
+
+    src_out = torch.arange(root_count, device=points.device).repeat_interleave(k)
+    return torch.stack([src_out, dst_out.reshape(-1)], dim=-1)

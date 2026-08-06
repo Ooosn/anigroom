@@ -6155,6 +6155,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             assert_model_parameters_finite(model, f"non-finite parameter after optimizer.step at iteration={iteration}, view_index={idx}")
 
             if should_densify or should_prune or should_guide_densify:
+                lifecycle_started = time.perf_counter()
+                lifecycle_timing: dict[str, float] = {}
                 if root_accum is None:
                     raise RuntimeError(
                         "lifecycle event requested without accumulated statistics"
@@ -6183,6 +6185,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     min_opacity=float(config.prune_min_opacity) if should_prune else 0.0,
                     max_prune_fraction=float(config.prune_max_fraction) if should_prune else 0.0,
                 )
+                selection_started = time.perf_counter()
                 update = propose_structure_update(
                     model.lifecycle_state(),
                     stats,
@@ -6190,6 +6193,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     prune_cfg,
                     vertices=model.vertices,
                     faces=model.faces,
+                )
+                lifecycle_timing["render_selection_seconds"] = float(
+                    time.perf_counter() - selection_started
                 )
                 if (
                     should_densify
@@ -6235,6 +6241,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 }
                 guide_changed = False
                 if should_guide_densify:
+                    guide_update_started = time.perf_counter()
                     guide_update, guide_record = propose_guide_densify_update(model, stats, config)
                     if guide_update is not None and guide_update.new_barycentric.numel() > 0:
                         guide_record["spatial_selected_parents"] = lifecycle_spatial_report(
@@ -6249,16 +6256,24 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         guide_record.update(guide_result)
                         guide_changed = True
                     lifecycle_record["guide_densify"] = guide_record
+                    lifecycle_timing["guide_update_seconds"] = float(
+                        time.perf_counter() - guide_update_started
+                    )
                 if changed:
                     render_optimizer_transition = optimizer_row_transition(
                         update,
                         old_count=root_count_before,
                     )
+                    render_update_started = time.perf_counter()
                     result = model.apply_structure_update(update)
+                    lifecycle_timing["render_update_seconds"] = float(
+                        time.perf_counter() - render_update_started
+                    )
                     lifecycle_record.update(result)
                 else:
                     lifecycle_record["root_count_after"] = root_count_before
                 if changed or guide_changed:
+                    graph_started = time.perf_counter()
                     graph_edges, graph_report = rebuild_graph_edges(
                         model,
                         mode=config.smooth_graph_mode,
@@ -6273,6 +6288,10 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         "render": graph_report,
                         "guide": guide_graph_report,
                     }
+                    lifecycle_timing["graph_update_seconds"] = float(
+                        time.perf_counter() - graph_started
+                    )
+                    optimizer_started = time.perf_counter()
                     optimizer, optimizer_migration = rebuild_stage1_optimizer_with_state(
                         model,
                         config,
@@ -6282,6 +6301,13 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         guide_transition=guide_optimizer_transition,
                     )
                     lifecycle_record["optimizer_state_migration"] = optimizer_migration
+                    lifecycle_timing["optimizer_update_seconds"] = float(
+                        time.perf_counter() - optimizer_started
+                    )
+                lifecycle_timing["total_seconds"] = float(
+                    time.perf_counter() - lifecycle_started
+                )
+                lifecycle_record["timing"] = lifecycle_timing
                 lifecycle_history.append(lifecycle_record)
                 log.write(json.dumps({"lifecycle": lifecycle_record}) + "\n")
                 log.flush()
