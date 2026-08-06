@@ -1083,11 +1083,10 @@ def root_graph_smoothness(
                 1.0
                 * weighted_mean(
                     (
-                        groom.brush_curve_strength[src]
-                        - groom.brush_curve_strength[dst]
+                        groom.brush_stiffness[src]
+                        - groom.brush_stiffness[dst]
                     ).square()
                 ),
-                1.0 * weighted_mean((groom.bend[src] - groom.bend[dst]).square()),
                 0.6 * weighted_mean((groom.curl_radius[src] - groom.curl_radius[dst]).square()),
                 0.35 * weighted_mean((groom.curl_frequency[src] - groom.curl_frequency[dst]).square()),
                 0.25
@@ -1161,7 +1160,6 @@ def render_geometry_residual_graph_smoothness(
                 - decoded.width_taper_log_ratio[dst]
             ).square()
         ),
-        weighted_mean((decoded.bend[src] - decoded.bend[dst]).square()),
         weighted_mean((decoded.curl_radius[src] - decoded.curl_radius[dst]).square()),
         weighted_mean((decoded.frizz[src] - decoded.frizz[dst]).square()),
         weighted_mean(
@@ -1213,10 +1211,9 @@ def guide_root_graph_smoothness(
     )
     guide_tip_ratio_coordinate = torch.asinh(model.guide_tip_width_ratio_raw)
     guide_taper_coordinate = torch.asinh(model.guide_width_taper_raw)
-    guide_brush_curve_strength = torch.sigmoid(
-        model.guide_brush_curve_strength_raw
+    guide_brush_stiffness = torch.sigmoid(
+        model.guide_brush_stiffness_raw
     )
-    guide_bend = model.guide_bend_raw
     guide_child_radius = decode_positive_asinh_ratio(
         model.guide_child_radius_raw,
         model.guide_child_radius_reference,
@@ -1257,8 +1254,7 @@ def guide_root_graph_smoothness(
         1.6 * mean_edge(torch.log(guide_width.clamp_min(1.0e-6))),
         0.8 * mean_edge(guide_tip_ratio_coordinate),
         0.4 * mean_edge(guide_taper_coordinate),
-        1.0 * mean_edge(guide_brush_curve_strength),
-        1.2 * mean_edge(guide_bend),
+        1.0 * mean_edge(guide_brush_stiffness),
         0.8 * mean_edge(torch.log(guide_child_radius.clamp_min(EPS))),
         0.8 * mean_edge(guide_clump),
     ]
@@ -1371,11 +1367,10 @@ def effective_groom_graph_smoothness(
         1.0
         * weighted_mean(
             (
-                groom.brush_curve_strength[src]
-                - groom.brush_curve_strength[dst]
+                groom.brush_stiffness[src]
+                - groom.brush_stiffness[dst]
             ).square()
         ),
-        0.8 * weighted_mean((groom.bend[src] - groom.bend[dst]).square()),
         1.8 * weighted_mean(normalized_diff(groom.curl_radius, ranges.curl_radius).square()),
         1.2 * weighted_mean(normalized_diff(groom.curl_frequency, ranges.curl_frequency).square()),
         1.6 * weighted_mean((curl_energy[src] - curl_energy[dst]).square()),
@@ -1441,9 +1436,7 @@ def groom_parameter_stats(field: GroomParameterField) -> dict[str, dict[str, flo
         "tip_width": summarize(groom.tip_width),
         "width_taper": summarize(groom.width_taper),
         "direction_local": summarize(groom.direction_local),
-        "brush_curve_strength": summarize(groom.brush_curve_strength),
-        "bend": summarize(groom.bend),
-        "bend_abs": summarize(torch.abs(groom.bend)),
+        "brush_stiffness": summarize(groom.brush_stiffness),
         "curl_radius": summarize(groom.curl_radius),
         "curl_frequency": summarize(groom.curl_frequency),
         "curl_energy_radius_x_frequency": summarize(groom.curl_radius * groom.curl_frequency),
@@ -1481,9 +1474,7 @@ def effective_groom_stats(model: WhiteTigerStage1Model) -> dict[str, dict[str, f
         "length": summarize(groom.length),
         "root_width": summarize(groom.root_width),
         "direction_local": summarize(groom.direction_local),
-        "brush_curve_strength": summarize(groom.brush_curve_strength),
-        "bend": summarize(groom.bend),
-        "bend_abs": summarize(torch.abs(groom.bend)),
+        "brush_stiffness": summarize(groom.brush_stiffness),
         "curl_radius": summarize(groom.curl_radius),
         "curl_frequency": summarize(groom.curl_frequency),
         "curl_energy_radius_x_frequency": summarize(groom.curl_radius * groom.curl_frequency),
@@ -1541,7 +1532,6 @@ def render_geometry_residual_stats(
 
     return {
         "length": summarize(length_coordinate),
-        "bend": summarize(residual.bend),
         "curl_radius": summarize(residual.curl_radius),
         "frizz": summarize(residual.frizz),
         "child_radius_log_ratio": summarize(residual.child_radius_log_ratio),
@@ -1769,7 +1759,6 @@ class Stage1Config:
     guide_interpolation_k: int = 8
     render_geometry_parameterization: str = "absolute_endpoint"
     guide_length_residual_scale: float = 0.0
-    guide_bend_residual_scale: float = 0.0
     guide_direction_residual_scale: float = 1.0
     guide_width_residual_scale: float = 1.0
     guide_child_radius_residual_scale: float = 1.0
@@ -1778,7 +1767,6 @@ class Stage1Config:
     guide_frizz_residual_scale: float = 1.0
     guide_prior_weight: float = 0.0
     guide_prior_direction_weight: float = 1.0
-    guide_prior_bend_weight: float = 0.20
     guide_prior_curl_weight: float = 0.08
     guide_prior_length_weight: float = 0.0
     guide_prior_width_weight: float = 0.0
@@ -1913,7 +1901,6 @@ class WhiteTigerStage1Model(torch.nn.Module):
         guide_interpolation_k: int = 8,
         render_geometry_parameterization: str = "absolute_endpoint",
         guide_length_residual_scale: float = 0.0,
-        guide_bend_residual_scale: float = 0.0,
         guide_direction_residual_scale: float = 1.0,
         guide_width_residual_scale: float = 1.0,
         guide_child_radius_residual_scale: float = 1.0,
@@ -1946,7 +1933,6 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 "zero_centered_asinh_log_length_residual"
             )
         self.guide_length_residual_scale = max(0.0, min(1.0, float(guide_length_residual_scale)))
-        self.guide_bend_residual_scale = max(0.0, min(1.0, float(guide_bend_residual_scale)))
         self.guide_direction_residual_scale = max(
             0.0,
             min(1.0, float(guide_direction_residual_scale)),
@@ -2050,8 +2036,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.guide_root_width_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_tip_width_ratio_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_width_taper_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
-            self.guide_brush_curve_strength_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
-            self.guide_bend_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
+            self.guide_brush_stiffness_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_curl_radius_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_frizz_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_child_radius_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
@@ -2077,8 +2062,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.register_parameter("guide_root_width_raw", None)
             self.register_parameter("guide_tip_width_ratio_raw", None)
             self.register_parameter("guide_width_taper_raw", None)
-            self.register_parameter("guide_brush_curve_strength_raw", None)
-            self.register_parameter("guide_bend_raw", None)
+            self.register_parameter("guide_brush_stiffness_raw", None)
             self.register_parameter("guide_curl_radius_raw", None)
             self.register_parameter("guide_frizz_raw", None)
             self.register_parameter("guide_child_radius_raw", None)
@@ -2122,8 +2106,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.groom.root_width_raw.zero_()
             set_unit_interval(self.groom.tip_width_ratio_raw, 0.070)
             set_positive_asinh(self.groom.width_taper_raw, 1.80)
-            self.groom.brush_curve_strength_raw.zero_()
-            self.groom.bend_raw.zero_()
+            self.groom.brush_stiffness_raw.zero_()
             self.groom.direction_local_raw.copy_(
                 self.groom.direction_local_raw.new_tensor([0.92 * 0.86, -0.12 * 0.86, 0.018])
             )
@@ -2148,9 +2131,8 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 self.guide_tip_width_ratio_raw.zero_()
                 self.guide_width_taper_reference.fill_(1.80)
                 self.guide_width_taper_raw.zero_()
-                self.guide_brush_curve_strength_raw.zero_()
+                self.guide_brush_stiffness_raw.zero_()
                 self.guide_child_radius_reference.fill_(0.0028)
-                self.guide_bend_raw.zero_()
                 set_range(self.guide_curl_radius_raw, 0.0030, ranges.curl_radius)
                 set_range(self.guide_frizz_raw, 0.0008, ranges.frizz)
                 self.guide_child_radius_raw.zero_()
@@ -2404,10 +2386,9 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 self.guide_width_taper_raw.detach(),
                 old_width_taper_reference,
             ),
-            "guide_brush_curve_strength_raw": torch.sigmoid(
-                self.guide_brush_curve_strength_raw.detach()
+            "guide_brush_stiffness_raw": torch.sigmoid(
+                self.guide_brush_stiffness_raw.detach()
             ),
-            "guide_bend_raw": self.guide_bend_raw.detach(),
             "guide_curl_radius_raw": GroomParameterField._decode_range(self.guide_curl_radius_raw.detach(), ranges.curl_radius),
             "guide_frizz_raw": GroomParameterField._decode_range(self.guide_frizz_raw.detach(), ranges.frizz),
             "guide_child_radius_raw": decode_positive_asinh_ratio(
@@ -2426,8 +2407,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "guide_root_width_raw": self.guide_root_width_raw.detach(),
             "guide_tip_width_ratio_raw": self.guide_tip_width_ratio_raw.detach(),
             "guide_width_taper_raw": self.guide_width_taper_raw.detach(),
-            "guide_brush_curve_strength_raw": self.guide_brush_curve_strength_raw.detach(),
-            "guide_bend_raw": self.guide_bend_raw.detach(),
+            "guide_brush_stiffness_raw": self.guide_brush_stiffness_raw.detach(),
             "guide_curl_radius_raw": self.guide_curl_radius_raw.detach(),
             "guide_frizz_raw": self.guide_frizz_raw.detach(),
             "guide_child_radius_raw": self.guide_child_radius_raw.detach(),
@@ -2440,10 +2420,8 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 if child_count
                 else source.new_empty((0, *source.shape[1:]))
             )
-            if name == "guide_brush_curve_strength_raw":
+            if name == "guide_brush_stiffness_raw":
                 child_raw = inv_sigmoid(child_physical)
-            elif name == "guide_bend_raw":
-                child_raw = child_physical
             elif name == "guide_length_raw":
                 child_raw = encode_positive_asinh_ratio(
                     child_physical,
@@ -2600,10 +2578,9 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.guide_root_width_raw = torch.nn.Parameter(new_params["guide_root_width_raw"].to(device=device))
         self.guide_tip_width_ratio_raw = torch.nn.Parameter(new_params["guide_tip_width_ratio_raw"].to(device=device))
         self.guide_width_taper_raw = torch.nn.Parameter(new_params["guide_width_taper_raw"].to(device=device))
-        self.guide_brush_curve_strength_raw = torch.nn.Parameter(
-            new_params["guide_brush_curve_strength_raw"].to(device=device)
+        self.guide_brush_stiffness_raw = torch.nn.Parameter(
+            new_params["guide_brush_stiffness_raw"].to(device=device)
         )
-        self.guide_bend_raw = torch.nn.Parameter(new_params["guide_bend_raw"].to(device=device))
         self.guide_curl_radius_raw = torch.nn.Parameter(new_params["guide_curl_radius_raw"].to(device=device))
         self.guide_frizz_raw = torch.nn.Parameter(new_params["guide_frizz_raw"].to(device=device))
         self.guide_child_radius_raw = torch.nn.Parameter(new_params["guide_child_radius_raw"].to(device=device))
@@ -2666,10 +2643,9 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 self.guide_width_taper_raw,
                 self.guide_width_taper_reference,
             ),
-            "brush_curve_strength": torch.sigmoid(
-                self.guide_brush_curve_strength_raw
+            "brush_stiffness": torch.sigmoid(
+                self.guide_brush_stiffness_raw
             ),
-            "bend": self.guide_bend_raw,
             "curl_radius": GroomParameterField._decode_range(self.guide_curl_radius_raw, ranges.curl_radius),
             "frizz": GroomParameterField._decode_range(self.guide_frizz_raw, ranges.frizz),
             "child_radius": decode_positive_asinh_ratio(
@@ -2849,12 +2825,6 @@ class WhiteTigerStage1Model(torch.nn.Module):
             )
             tip_ratio = groom.tip_width / groom.root_width.clamp_min(EPS)
             width_taper = groom.width_taper
-        bend = mix_scalar(
-            "bend",
-            groom.bend,
-            self.guide_bend_residual_scale,
-            None,
-        )
         curl_radius = mix_scalar(
             "curl_radius",
             groom.curl_radius,
@@ -2893,8 +2863,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "root_width": root_width,
             "tip_width": root_width * tip_ratio,
             "width_taper": width_taper,
-            "brush_curve_strength": guide_interp["brush_curve_strength"],
-            "bend": bend,
+            "brush_stiffness": guide_interp["brush_stiffness"],
             "curl_radius": curl_radius,
             "frizz": frizz,
             "child_radius": child_radius,
@@ -2939,7 +2908,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         return self.apply_shape_detail_gate(replace(groom, **kwargs))
 
     def apply_shape_detail_gate(self, groom):
-        """Stage1-A should render neutral bend/curl/frizz, not frozen nonzero values."""
+        """Stage1-A should render neutral curl/frizz, not frozen nonzero values."""
         multiplier = float(getattr(self, "shape_detail_multiplier", 1.0))
         curl_scale = float(getattr(self, "shape_curl_scale", 1.0))
         frizz_scale = float(getattr(self, "shape_frizz_scale", 1.0))
@@ -2948,7 +2917,6 @@ class WhiteTigerStage1Model(torch.nn.Module):
         m = max(0.0, multiplier)
         return replace(
             groom,
-            bend=groom.bend * m,
             curl_radius=groom.curl_radius * m * max(0.0, curl_scale),
             frizz=groom.frizz * m * max(0.0, frizz_scale),
         )
@@ -3185,8 +3153,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "root_width_raw": decoded.root_width.detach(),
             "tip_width_ratio_raw": tip_width_ratio.detach(),
             "width_taper_raw": decoded.width_taper.detach(),
-            "brush_curve_strength_raw": decoded.brush_curve_strength.detach(),
-            "bend_raw": decoded.bend.detach(),
+            "brush_stiffness_raw": decoded.brush_stiffness.detach(),
             "curl_radius_raw": decoded.curl_radius.detach(),
             "curl_frequency_raw": decoded.curl_frequency.detach(),
             "frizz_raw": decoded.frizz.detach(),
@@ -3206,10 +3173,8 @@ class WhiteTigerStage1Model(torch.nn.Module):
         child_raw: dict[str, torch.Tensor] = {}
         for name, source in physical_sources.items():
             child_value = interpolate_source(source)
-            if name == "brush_curve_strength_raw":
+            if name == "brush_stiffness_raw":
                 child_raw[name] = inv_sigmoid(child_value)
-            elif name == "bend_raw":
-                child_raw[name] = child_value
             elif name == "length_raw":
                 child_raw[name] = encode_positive_asinh_ratio(
                     child_value,
@@ -3300,10 +3265,6 @@ class WhiteTigerStage1Model(torch.nn.Module):
                     ).detach()
                     child_coordinate = interpolate_source(source)
                     child_raw_value = torch.sinh(child_coordinate)
-                elif name == "bend":
-                    child_raw_value = interpolate_source(
-                        old_geometry_residual[raw_name]
-                    )
                 else:
                     source = getattr(residual_decoded, name).detach()
                     child_value = interpolate_source(source)
@@ -4455,7 +4416,7 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
                 model.guide_root_width_raw,
                 model.guide_tip_width_ratio_raw,
                 model.guide_width_taper_raw,
-                model.guide_brush_curve_strength_raw,
+                model.guide_brush_stiffness_raw,
                 model.guide_child_radius_raw,
                 model.guide_clump_strength_raw,
                 model.guide_direction_local_raw,
@@ -4496,7 +4457,7 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
                 model.groom.root_width_raw,
                 model.groom.tip_width_ratio_raw,
                 model.groom.width_taper_raw,
-                model.groom.brush_curve_strength_raw,
+                model.groom.brush_stiffness_raw,
                 model.groom.direction_local_raw,
             ]
         )
@@ -4505,15 +4466,12 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
         color_params.append(model.child_color_delta_raw)
     high_frequency_params = []
     if model.guide_enabled():
-        high_frequency_params.append(model.guide_bend_raw)
         if float(config.shape_curl_scale) > 0.0:
             high_frequency_params.append(model.guide_curl_radius_raw)
         if float(config.shape_frizz_scale) > 0.0:
             high_frequency_params.append(model.guide_frizz_raw)
         if model.uses_zero_centered_geometry():
             residual = model.render_geometry_residual
-            if float(config.guide_bend_residual_scale) > 0.0:
-                high_frequency_params.append(residual.bend_raw)
             if float(config.guide_curl_residual_scale) > 0.0:
                 high_frequency_params.append(residual.curl_radius_raw)
             if float(config.guide_frizz_residual_scale) > 0.0:
@@ -4523,8 +4481,6 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
             if float(config.guide_clump_residual_scale) > 0.0:
                 high_frequency_params.append(residual.clump_strength_raw)
         else:
-            if float(config.guide_bend_residual_scale) > 0.0:
-                high_frequency_params.append(model.groom.bend_raw)
             if float(config.guide_curl_residual_scale) > 0.0:
                 high_frequency_params.extend([model.groom.curl_radius_raw, model.groom.curl_frequency_raw, model.groom.curl_phase])
             if float(config.guide_frizz_residual_scale) > 0.0:
@@ -4540,7 +4496,6 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
                 model.groom.frizz_raw,
                 model.groom.child_radius_raw,
                 model.groom.clump_strength_raw,
-                model.groom.bend_raw,
             ]
         )
     optimizer_groups = [
@@ -4569,7 +4524,7 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
                 "guide_root_width_raw",
                 "guide_tip_width_ratio_raw",
                 "guide_width_taper_raw",
-                "guide_brush_curve_strength_raw",
+                "guide_brush_stiffness_raw",
                 "guide_child_radius_raw",
                 "guide_clump_strength_raw",
                 "guide_direction_local_raw",
@@ -4609,7 +4564,7 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
                 "groom.root_width_raw",
                 "groom.tip_width_ratio_raw",
                 "groom.width_taper_raw",
-                "groom.brush_curve_strength_raw",
+                "groom.brush_stiffness_raw",
                 "groom.direction_local_raw",
             ]
         )
@@ -4618,14 +4573,11 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
         color_names.append("child_color_delta_raw")
     high_frequency_names = []
     if model.guide_enabled():
-        high_frequency_names.append("guide_bend_raw")
         if float(config.shape_curl_scale) > 0.0:
             high_frequency_names.append("guide_curl_radius_raw")
         if float(config.shape_frizz_scale) > 0.0:
             high_frequency_names.append("guide_frizz_raw")
         if model.uses_zero_centered_geometry():
-            if float(config.guide_bend_residual_scale) > 0.0:
-                high_frequency_names.append("render_geometry_residual.bend_raw")
             if float(config.guide_curl_residual_scale) > 0.0:
                 high_frequency_names.append("render_geometry_residual.curl_radius_raw")
             if float(config.guide_frizz_residual_scale) > 0.0:
@@ -4635,8 +4587,6 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
             if float(config.guide_clump_residual_scale) > 0.0:
                 high_frequency_names.append("render_geometry_residual.clump_strength_raw")
         else:
-            if float(config.guide_bend_residual_scale) > 0.0:
-                high_frequency_names.append("groom.bend_raw")
             if float(config.guide_curl_residual_scale) > 0.0:
                 high_frequency_names.extend(["groom.curl_radius_raw", "groom.curl_frequency_raw", "groom.curl_phase"])
             if float(config.guide_frizz_residual_scale) > 0.0:
@@ -4652,7 +4602,6 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
                 "groom.frizz_raw",
                 "groom.child_radius_raw",
                 "groom.clump_strength_raw",
-                "groom.bend_raw",
             ]
         )
     names = [
@@ -4920,11 +4869,10 @@ def render_parameter_finite_detail(
         "groom_length": finite_tensor_report("groom.length", groom.length),
         "groom_root_width": finite_tensor_report("groom.root_width", groom.root_width),
         "groom_direction_local": finite_tensor_report("groom.direction_local", groom.direction_local),
-        "groom_brush_curve_strength": finite_tensor_report(
-            "groom.brush_curve_strength",
-            groom.brush_curve_strength,
+        "groom_brush_stiffness": finite_tensor_report(
+            "groom.brush_stiffness",
+            groom.brush_stiffness,
         ),
-        "groom_bend": finite_tensor_report("groom.bend", groom.bend),
         "groom_curl_radius": finite_tensor_report("groom.curl_radius", groom.curl_radius),
         "groom_curl_frequency": finite_tensor_report("groom.curl_frequency", groom.curl_frequency),
         "groom_frizz": finite_tensor_report("groom.frizz", groom.frizz),
@@ -4955,8 +4903,7 @@ def zero_guide_gradients(model: WhiteTigerStage1Model) -> None:
         model.guide_root_width_raw,
         model.guide_tip_width_ratio_raw,
         model.guide_width_taper_raw,
-        model.guide_brush_curve_strength_raw,
-        model.guide_bend_raw,
+        model.guide_brush_stiffness_raw,
         model.guide_curl_radius_raw,
         model.guide_frizz_raw,
         model.guide_child_radius_raw,
@@ -4971,18 +4918,16 @@ def zero_guide_gradients(model: WhiteTigerStage1Model) -> None:
 
 def zero_shape_detail_gradients(model: WhiteTigerStage1Model) -> None:
     params = [
-        model.groom.bend_raw,
         model.groom.curl_radius_raw,
         model.groom.curl_frequency_raw,
         model.groom.curl_phase,
         model.groom.frizz_raw,
     ]
     if model.guide_enabled():
-        params.extend([model.guide_bend_raw, model.guide_curl_radius_raw, model.guide_frizz_raw])
+        params.extend([model.guide_curl_radius_raw, model.guide_frizz_raw])
     if model.render_geometry_residual is not None:
         params.extend(
             [
-                model.render_geometry_residual.bend_raw,
                 model.render_geometry_residual.curl_radius_raw,
                 model.render_geometry_residual.frizz_raw,
             ]
@@ -5421,10 +5366,6 @@ def guide_interpolation_regularization_losses(
             float(config.guide_prior_direction_weight),
         )
         add_residual(
-            residual.bend,
-            float(config.guide_prior_bend_weight),
-        )
-        add_residual(
             residual.curl_radius,
             float(config.guide_prior_curl_weight) if float(config.shape_curl_scale) > 0.0 else 0.0,
         )
@@ -5474,12 +5415,6 @@ def guide_interpolation_regularization_losses(
         terms.append(length_log_ratio.abs().mean())
         weights.append(float(config.guide_prior_length_weight))
     scalar_terms = [
-        (
-            "bend",
-            groom.bend,
-            None,
-            float(config.guide_prior_bend_weight),
-        ),
         (
             "curl_radius",
             groom.curl_radius,
@@ -5728,7 +5663,6 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         guide_interpolation_k=config.guide_interpolation_k,
         render_geometry_parameterization=config.render_geometry_parameterization,
         guide_length_residual_scale=config.guide_length_residual_scale,
-        guide_bend_residual_scale=config.guide_bend_residual_scale,
         guide_direction_residual_scale=config.guide_direction_residual_scale,
         guide_width_residual_scale=config.guide_width_residual_scale,
         guide_child_radius_residual_scale=config.guide_child_radius_residual_scale,
@@ -6733,7 +6667,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="absolute_endpoint",
     )
     parser.add_argument("--guide-length-residual-scale", type=float, default=0.0)
-    parser.add_argument("--guide-bend-residual-scale", type=float, default=0.0)
     parser.add_argument("--guide-direction-residual-scale", type=float, default=1.0)
     parser.add_argument("--guide-width-residual-scale", type=float, default=1.0)
     parser.add_argument("--guide-child-radius-residual-scale", type=float, default=1.0)
@@ -6742,7 +6675,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guide-frizz-residual-scale", type=float, default=1.0)
     parser.add_argument("--guide-prior-weight", type=float, default=0.0)
     parser.add_argument("--guide-prior-direction-weight", type=float, default=1.0)
-    parser.add_argument("--guide-prior-bend-weight", type=float, default=0.20)
     parser.add_argument("--guide-prior-curl-weight", type=float, default=0.08)
     parser.add_argument("--guide-prior-length-weight", type=float, default=0.0)
     parser.add_argument("--guide-prior-width-weight", type=float, default=0.0)
@@ -6924,7 +6856,6 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         guide_interpolation_k=args.guide_interpolation_k,
         render_geometry_parameterization=args.render_geometry_parameterization,
         guide_length_residual_scale=args.guide_length_residual_scale,
-        guide_bend_residual_scale=args.guide_bend_residual_scale,
         guide_direction_residual_scale=args.guide_direction_residual_scale,
         guide_width_residual_scale=args.guide_width_residual_scale,
         guide_child_radius_residual_scale=args.guide_child_radius_residual_scale,
@@ -6933,7 +6864,6 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         guide_frizz_residual_scale=args.guide_frizz_residual_scale,
         guide_prior_weight=args.guide_prior_weight,
         guide_prior_direction_weight=args.guide_prior_direction_weight,
-        guide_prior_bend_weight=args.guide_prior_bend_weight,
         guide_prior_curl_weight=args.guide_prior_curl_weight,
         guide_prior_length_weight=args.guide_prior_length_weight,
         guide_prior_width_weight=args.guide_prior_width_weight,

@@ -17,6 +17,7 @@ from anigroom.grooming import (  # noqa: E402
     GroomParameterField,
     GroomRanges,
     adaptive_resample_strands,
+    build_brush_centerline,
     build_strands,
     make_tangent_frames,
     strands_to_gaussians,
@@ -68,9 +69,9 @@ def field_with_pattern(name: str, root_count: int, roots: torch.Tensor, device: 
         )
         if name == "base":
             pass
-        elif name == "long_bent":
+        elif name == "long_brushed":
             field.length_raw.add_(1.65)
-            field.bend_raw.add_(1.4 * torch.sin(5.5 * x))
+            field.brush_stiffness_raw.add_(1.4)
             field.direction_local_raw[:, 0:1].add_(0.7)
             field.direction_local_raw[:, 2:3].add_(0.45)
         elif name == "root_tip_taper":
@@ -216,6 +217,171 @@ def make_sheet(image_paths: list[Path], labels: list[str], stats: dict[str, dict
     sheet.save(out_path)
 
 
+def _dashed_line(
+    draw: ImageDraw.ImageDraw,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    *,
+    fill: tuple[int, int, int],
+    width: int,
+    dash: float,
+) -> None:
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length <= 0.0:
+        return
+    ux, uy = dx / length, dy / length
+    position = 0.0
+    while position < length:
+        stop = min(position + dash, length)
+        draw.line(
+            (
+                start[0] + ux * position,
+                start[1] + uy * position,
+                start[0] + ux * stop,
+                start[1] + uy * stop,
+            ),
+            fill=fill,
+            width=width,
+        )
+        position += 2.0 * dash
+
+
+def render_brush_centerline_qa(
+    out_path: Path,
+    *,
+    width: int,
+    height: int,
+) -> dict[str, object]:
+    """Render one canonical diagram from the formal centerline function."""
+
+    scale = 2
+    canvas = Image.new("RGB", (width * scale, height * scale), (247, 247, 244))
+    draw = ImageDraw.Draw(canvas)
+    font_title = load_font(34 * scale)
+    font_body = load_font(21 * scale)
+    font_label = load_font(18 * scale)
+
+    roots = torch.zeros((1, 3), dtype=torch.float64)
+    normals = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float64)
+    directions = torch.nn.functional.normalize(
+        torch.tensor([[0.84, 0.0, 0.54]], dtype=torch.float64),
+        dim=-1,
+    )
+    lengths = torch.ones((1, 1), dtype=torch.float64)
+    stiffness_values = (0.0, 0.5, 1.0)
+    colors = ((45, 55, 65), (20, 126, 132), (207, 55, 91))
+
+    curves = [
+        build_brush_centerline(
+            roots,
+            normals,
+            directions,
+            lengths,
+            torch.tensor([[value]], dtype=torch.float64),
+            samples=129,
+        )[0]
+        for value in stiffness_values
+    ]
+    direction_difference = float(
+        torch.linalg.vector_norm(
+            directions
+            - (directions * normals).sum(dim=-1, keepdim=True) * normals,
+            dim=-1,
+        )[0]
+    )
+    tip = (roots + lengths * directions)[0]
+    corner = (
+        roots
+        + ((lengths * directions) * normals).sum(dim=-1, keepdim=True) * normals
+    )[0]
+
+    left, right = 260.0 * scale, (width - 180.0) * scale
+    top, bottom = 210.0 * scale, (height - 150.0) * scale
+    xmax = max(1.0, float(tip[0]) * 1.10)
+    zmax = max(1.0, float(tip[2]) * 1.45)
+
+    def project(point: torch.Tensor) -> tuple[float, float]:
+        x = left + float(point[0]) / xmax * (right - left)
+        y = bottom - float(point[2]) / zmax * (bottom - top)
+        return x, y
+
+    root_xy = project(roots[0])
+    tip_xy = project(tip)
+    corner_xy = project(corner)
+    normal_tip = project(torch.tensor([0.0, 0.0, zmax * 0.88], dtype=torch.float64))
+
+    draw.text((90 * scale, 42 * scale), "One-turn brush centerline", fill=(18, 23, 28), font=font_title)
+    draw.text(
+        (90 * scale, 102 * scale),
+        "effective stiffness = brush stiffness x normal/direction difference",
+        fill=(68, 74, 80),
+        font=font_body,
+    )
+    draw.text(
+        (90 * scale, 142 * scale),
+        f"direction difference = {direction_difference:.3f}; root and tip stay fixed",
+        fill=(68, 74, 80),
+        font=font_body,
+    )
+
+    _dashed_line(
+        draw,
+        root_xy,
+        corner_xy,
+        fill=(152, 156, 160),
+        width=3 * scale,
+        dash=12 * scale,
+    )
+    _dashed_line(
+        draw,
+        corner_xy,
+        tip_xy,
+        fill=(152, 156, 160),
+        width=3 * scale,
+        dash=12 * scale,
+    )
+    draw.line((*root_xy, *normal_tip), fill=(98, 103, 108), width=3 * scale)
+    draw.text((normal_tip[0] + 12 * scale, normal_tip[1]), "normal", fill=(75, 80, 85), font=font_label)
+    draw.text((corner_xy[0] - 10 * scale, corner_xy[1] - 38 * scale), "Q", fill=(105, 110, 115), font=font_label)
+    draw.text((tip_xy[0] + 14 * scale, tip_xy[1] - 10 * scale), "fixed 3D tip", fill=(40, 45, 50), font=font_label)
+
+    for stiffness, color, curve in zip(stiffness_values, colors, curves):
+        polyline = [project(point) for point in curve]
+        draw.line(polyline, fill=color, width=7 * scale, joint="curve")
+        effective = stiffness * direction_difference
+        legend_y = (height - 116 + 31 * stiffness_values.index(stiffness)) * scale
+        draw.line((90 * scale, legend_y, 145 * scale, legend_y), fill=color, width=7 * scale)
+        draw.text(
+            (160 * scale, legend_y - 13 * scale),
+            f"stiffness {stiffness:.1f}  effective {effective:.3f}",
+            fill=(34, 39, 44),
+            font=font_label,
+        )
+
+    radius = 9 * scale
+    for point, fill in ((root_xy, (22, 27, 32)), (tip_xy, (22, 27, 32)), (corner_xy, (140, 144, 148))):
+        draw.ellipse(
+            (point[0] - radius, point[1] - radius, point[0] + radius, point[1] + radius),
+            fill=fill,
+        )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.resize((width, height), Image.Resampling.LANCZOS).save(out_path)
+    report = {
+        "output": str(out_path.resolve()),
+        "direction_difference": direction_difference,
+        "stiffness": list(stiffness_values),
+        "effective_stiffness": [value * direction_difference for value in stiffness_values],
+        "root": roots[0].tolist(),
+        "tip": tip.tolist(),
+        "corner": corner.tolist(),
+    }
+    out_path.with_suffix(".json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report
+
+
 def gradient_report(device: torch.device) -> dict[str, float]:
     roots, normals = make_roots(device, rows=5, cols=7)
     field = field_with_pattern("curl", int(roots.shape[0]), roots, device)
@@ -228,7 +394,7 @@ def gradient_report(device: torch.device) -> dict[str, float]:
         "tip_width_ratio_raw",
         "width_taper_raw",
         "direction_local_raw",
-        "bend_raw",
+        "brush_stiffness_raw",
         "curl_radius_raw",
         "curl_frequency_raw",
         "curl_phase",
@@ -250,6 +416,7 @@ def gradient_report(device: torch.device) -> dict[str, float]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=("controls", "brush_centerline"), default="controls")
     parser.add_argument("--output-dir", type=Path, default=Path(r"D:\petsgaussianhair\_downloads\groom_parameter_controls_formal"))
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
@@ -261,13 +428,18 @@ def main() -> None:
     parser.add_argument("--segments-per-unit-complexity", type=float, default=23.771428571428572)
     args = parser.parse_args()
 
+    if args.mode == "brush_centerline":
+        output = args.output_dir / "brush_centerline_canonical.png"
+        print(json.dumps(render_brush_centerline_qa(output, width=args.width, height=args.height), indent=2))
+        return
+
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required; this validation must use gsplat, not a fake renderer")
     device = torch.device("cuda")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     roots, normals = make_roots(device)
-    labels = ["base", "long_bent", "root_tip_taper", "curl", "frizz", "root_tip_color_alpha"]
+    labels = ["base", "long_brushed", "root_tip_taper", "curl", "frizz", "root_tip_color_alpha"]
     image_paths: list[Path] = []
     stats: dict[str, dict[str, float | int]] = {}
     for label in labels:

@@ -1,12 +1,10 @@
 # AniGroom Module Map
 
-Current source of truth: `docs/current_route.md`. R038 is the active
-structural/lifecycle Stage 1 baseline; R036 remains the frozen higher-PSNR
-metric control. R034's absolute segment repair, R035's hierarchical width
-profile, and R036's hierarchical child spread are retained. R038 adds the
-guide-owned brush curve and finite 600-9000 render lifecycle. R034's direct
-render-root width learning and the unrun R037 schedule proposal remain rejected
-or deferred.
+Current source of truth: `docs/current_route.md`. R038 remains the last accepted
+structural/lifecycle result while R039 is the strict-schema representation
+candidate. R036 remains the frozen higher-PSNR metric control. R039 retains the
+accepted interpolation, hierarchy, and finite 600-9000 render lifecycle while
+replacing the centerline construction only.
 
 ## Flow Initialization
 
@@ -19,9 +17,10 @@ or deferred.
 - Code: `anigroom/grooming/strand_gaussians.py`.
 - It owns explicit groom decoding, strand construction, child expansion,
   adaptive segment counts, and strand-to-Gaussian conversion.
-- R038 constructs a smooth guide-owned normal-to-groom brush curve before
-  applying optional interior bend and allocating Gaussians from final-curve
-  arc/turn complexity.
+- R039 constructs one guide-owned quadratic normal-to-groom curve and allocates
+  Gaussians from its final arc/turn complexity. Curve strength is multiplied by
+  the continuous normal/direction difference. No second interior deformation
+  is present in the executable schema.
 - Guide/render length, width, and child-spread controls use reference-relative,
   positive-unbounded coordinates; opacity and tip-width ratio use semantic
   unit intervals, while width taper is positive-unbounded. Segment allocation is linear in absolute physical
@@ -38,6 +37,8 @@ or deferred.
   test composite PSNR `32.51677` at 29k.
 - Active config and lock: `configs/r038_brush_curve_0_30k.env` and
   `configs/r038_brush_curve.lock.json`.
+- R039 candidate config: `configs/r039_brush_centerline_0_30k.env`. It cannot
+  load an R038 checkpoint because the groom schema intentionally changed.
 - Frozen R036 metric-control lock: `configs/stage1_baseline.lock.json`.
 - Evidence: `docs/r038_brush_curve_and_9k_lifecycle.md` and
   `docs/accept_line_recovery_ledger.md`.

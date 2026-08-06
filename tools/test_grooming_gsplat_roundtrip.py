@@ -142,7 +142,7 @@ def apply_teacher_pattern(field: GroomParameterField, roots: torch.Tensor) -> No
         field.direction_local_raw[:, 0:1].add_(0.40 * torch.sin(7.0 * z))
         field.direction_local_raw[:, 1:2].add_(0.35 * torch.cos(6.0 * x))
         field.direction_local_raw[:, 2:3].add_(0.40 * head)
-        field.bend_raw.add_(0.60 * torch.sin(9.0 * z))
+        field.brush_stiffness_raw.add_(0.60 * torch.sin(9.0 * z))
         field.root_width_raw.add_(0.55 * stripe + 0.25 * head)
         field.tip_width_ratio_raw.add_(0.35 * torch.cos(6.0 * z))
         dark = stripe.expand(-1, 3)
@@ -267,10 +267,10 @@ def save_controlled_edit_panel(
         brushed.direction_local_raw[:, 0:1].add_(1.90)
         brushed.direction_local_raw[:, 1:2].add_(1.45)
         brushed.direction_local_raw[:, 2:3].add_(0.55)
-        brushed.bend_raw.add_(2.20)
+        brushed.brush_stiffness_raw.add_(2.20)
         brushed.length_raw.add_(1.25)
         brushed.opacity_raw.add_(0.45)
-    edit_specs.append(("edit_brushed_bent", brushed))
+    edit_specs.append(("edit_brushed_curve", brushed))
 
     dark = GroomParameterField(int(roots.shape[0]), device=roots.device)
     with torch.no_grad():

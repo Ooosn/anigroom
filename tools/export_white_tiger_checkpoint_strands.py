@@ -96,7 +96,6 @@ def main() -> None:
         guide_interpolation_k=config.guide_interpolation_k,
         render_geometry_parameterization=config.render_geometry_parameterization,
         guide_length_residual_scale=config.guide_length_residual_scale,
-        guide_bend_residual_scale=config.guide_bend_residual_scale,
         guide_direction_residual_scale=config.guide_direction_residual_scale,
         guide_width_residual_scale=config.guide_width_residual_scale,
         guide_child_radius_residual_scale=config.guide_child_radius_residual_scale,

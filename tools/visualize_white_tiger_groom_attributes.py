@@ -217,7 +217,7 @@ def _make_contact_sheet(paths: list[tuple[str, Path]], out_path: Path) -> None:
     sheet = Image.new("RGB", (width, height), (246, 246, 244))
     draw = ImageDraw.Draw(sheet)
     font_title, font_small = _fonts()
-    draw.text((pad, 18), "White tiger groom attributes: 3D direction, length, bend, curl", fill=(20, 20, 20), font=font_title)
+    draw.text((pad, 18), "White tiger groom attributes: 3D direction, length, brush curve, curl", fill=(20, 20, 20), font=font_title)
     draw.text((pad, 54), "Generated from checkpoint root parameters, projected onto view09 with mesh-depth visibility.", fill=(70, 70, 70), font=font_small)
     for idx, (label, path) in enumerate(paths):
         r, c = divmod(idx, cols)
@@ -288,9 +288,7 @@ def main() -> None:
 
     values = {
         "length": groom.length.reshape(-1)[ids].detach().cpu().numpy(),
-        "brush_curve_strength": groom.brush_curve_strength.reshape(-1)[ids].detach().cpu().numpy(),
-        "bend_signed": groom.bend.reshape(-1)[ids].detach().cpu().numpy(),
-        "bend_magnitude": torch.abs(groom.bend.reshape(-1)[ids]).detach().cpu().numpy(),
+        "brush_stiffness": groom.brush_stiffness.reshape(-1)[ids].detach().cpu().numpy(),
         "curl_radius": groom.curl_radius.reshape(-1)[ids].detach().cpu().numpy(),
         "curl_frequency": groom.curl_frequency.reshape(-1)[ids].detach().cpu().numpy(),
         "curl_amount_radius_x_frequency": (groom.curl_radius.reshape(-1)[ids] * groom.curl_frequency.reshape(-1)[ids]).detach().cpu().numpy(),
@@ -307,10 +305,9 @@ def main() -> None:
     outputs.append(("3D flow arrows", flow_path))
 
     for name, value in values.items():
-        signed = name == "bend_signed"
         path = output_dir / f"view{int(args.view):02d}_{name}.png"
         title = f"view{int(args.view):02d} {name.replace('_', ' ')}"
-        _overlay_points(base, xy_np, value, title=title, out_path=path, signed=signed)
+        _overlay_points(base, xy_np, value, title=title, out_path=path, signed=False)
         outputs.append((name.replace("_", " "), path))
 
     stats = {}

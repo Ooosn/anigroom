@@ -43,14 +43,14 @@ def test_opacity_uses_full_semantic_unit_interval_without_padding() -> None:
     assert 1.0 - 1.0e-6 < float(tip_ratio[1]) < 1.0
 
 
-def test_brush_curve_strength_uses_the_semantic_unit_interval() -> None:
+def test_brush_stiffness_uses_the_semantic_unit_interval() -> None:
     field = GroomParameterField(3, init_length=0.02)
     with torch.no_grad():
-        field.brush_curve_strength_raw.copy_(
+        field.brush_stiffness_raw.copy_(
             torch.tensor([[-14.0], [0.0], [14.0]])
         )
 
-    strength = field.decode().brush_curve_strength
+    strength = field.decode().brush_stiffness
     assert 0.0 < float(strength[0]) < 1.0e-6
     torch.testing.assert_close(strength[1], torch.tensor([0.5]))
     assert 1.0 - 1.0e-6 < float(strength[2]) < 1.0

@@ -7,7 +7,7 @@ ledger records measured experiments, but it does not define executable schema.
 
 ## Baseline Status
 
-R038 is the active structural/lifecycle Stage 1 baseline:
+R038 is the last accepted structural/lifecycle Stage 1 baseline:
 
 - final train/test composite PSNR: `33.03637 / 32.34588`
 - best test composite PSNR: `32.51677` at 29k
@@ -18,10 +18,11 @@ R038 is the active structural/lifecycle Stage 1 baseline:
 - canonical asset render:
   `D:/RTS/_tmp/r038_30k_final/r038_030000_asset_side_y_v11_protocol.png`
 
-The `stage1-r038` tag and `configs/r038_brush_curve.lock.json` freeze the
-executable source and formal evidence. R038 adds the guide-owned brush curve,
-uses the corrected non-periodic bend, and ends all render-lifecycle work after
-the final 9k event.
+The `stage1-r038` tag and `configs/r038_brush_curve.lock.json` freeze its
+executable source and formal evidence. R039 is the current strict-schema
+representation candidate: it removes the secondary interior deformation and
+replaces the base curve with one direction-aware quadratic centerline. No R039
+training result is accepted yet.
 
 R036 remains the immutable higher-PSNR metric control:
 
@@ -45,7 +46,8 @@ unchanged content.
 
 - training: `tools/train_white_tiger_stage1.py`
 - frozen R036 metric-control configuration: `configs/stage1_baseline.env`
-- active R038 baseline configuration: `configs/r038_brush_curve_0_30k.env`
+- frozen R038 configuration: `configs/r038_brush_curve_0_30k.env`
+- R039 candidate configuration: `configs/r039_brush_centerline_0_30k.env`
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
 - Gaussian export: `tools/export_white_tiger_checkpoint_gaussians_ply.py`
@@ -68,19 +70,19 @@ The active explicit groom fields are:
 - length
 - root and tip width plus taper
 - normalized local 3D direction
-- guide-owned brush curve strength
-- bend
+- guide-owned brush stiffness
 - curl radius, frequency, and phase
 - frizz
 - child radius and clump strength
 - root and tip color
 - root and tip opacity
 
-Brush curve strength controls a smooth normal-to-groom transition while
-preserving the root, tip, straight length, and 3D endpoint direction. Bend is
-an optional smooth interior deformation and no longer uses a fixed `tanh`
-interval. Curl and frizz remain legitimate optional shape controls but stay
-disabled in R038. Child expansion remains active.
+Brush stiffness controls one quadratic normal-to-groom transition while
+preserving the root, tip, straight length, and 3D endpoint direction. The
+effective value is brush stiffness multiplied by the continuous tangential
+difference between the normal and endpoint direction. There is no second
+interior deformation field. Curl and frizz remain separate optional shape
+controls but stay disabled in R039. Child expansion remains active.
 
 Render-root geometry is a zero-centered residual around the interpolated guide
 field. Direction residuals are local 3D vectors. Length uses the positive,
@@ -147,10 +149,11 @@ accepted mean absolute prior and adds the population-stable concentration term
 
 ## Representation Lineage
 
-The retired directional decomposition and the old gravity/sag/stiffness
-controls are no longer present in the executable representation. Bend,
-curl/frizz, and clump remain explicit grooming controls; curl/frizz simply have
-zero effective scale in this measured short-fur baseline.
+The retired directional decomposition and old gravity/sag controls are no
+longer present. R039 uses only length, normalized 3D endpoint direction, and
+guide-owned brush stiffness for the ordinary base centerline. Curl/frizz and
+clump remain separate explicit controls; curl/frizz have zero effective scale
+in this short-fur candidate.
 R035 keeps R034's accepted segment repair, positive unbounded guide length, and
 semantic opacity. It replaces direct render-root width learning with a complete
 guide/render width hierarchy and removes the absolute root-width range. R036
@@ -207,13 +210,15 @@ Numerical epsilon clamps, normalized directions, RGB/opacity domains, tip
 ratios, and clump interpolation weights are representation or semantic domains
 rather than animal-specific physical thresholds; they remain.
 
-The active R038 baseline implements the base design in
+The active candidate design is defined in
 [`brush_curve_representation.md`](brush_curve_representation.md): straight
-root-to-tip length, a smooth guide-owned normal-to-groom curve, final-curve
-Gaussian allocation, and an unbounded non-periodic bend. Curl/frizz redesign is
-deferred and disabled rather than mixed into this baseline. Its complete run,
-lifecycle audit, fixed-protocol QA, and acceptance decision are recorded in
-[`r038_brush_curve_and_9k_lifecycle.md`](r038_brush_curve_and_9k_lifecycle.md).
+root-to-tip length, one guide-owned direction-aware quadratic curve, and
+final-curve Gaussian allocation. R038's complete historical run remains
+recorded in
+[`r038_brush_curve_and_9k_lifecycle.md`](r038_brush_curve_and_9k_lifecycle.md),
+but its checkpoint schema is not an executable fallback for R039.
+R039's scoped implementation and pre-training evidence are recorded in
+[`r039_one_turn_brush_centerline.md`](r039_one_turn_brush_centerline.md).
 
 ## Execution Memory Contract
 

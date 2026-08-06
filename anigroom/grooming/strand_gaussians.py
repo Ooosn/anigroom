@@ -93,7 +93,7 @@ class DecodedGroom:
 
     All tensors are shaped ``[R, C]``.  These are explicit editor-like controls:
     length, tapering width, a normalized 3D direction in the root frame, brush
-    curve strength, bend, curl, frizz, child layout, color, and opacity. Extra
+    stiffness, curl, frizz, child layout, color, and opacity. Extra
     growth gates and color-darkening shortcuts are intentionally outside this
     core parameter set.
     """
@@ -103,8 +103,7 @@ class DecodedGroom:
     tip_width: torch.Tensor
     width_taper: torch.Tensor
     direction_local: torch.Tensor
-    brush_curve_strength: torch.Tensor
-    bend: torch.Tensor
+    brush_stiffness: torch.Tensor
     curl_radius: torch.Tensor
     curl_frequency: torch.Tensor
     curl_phase: torch.Tensor
@@ -200,8 +199,7 @@ class GroomParameterField(nn.Module):
         self.direction_local_raw = nn.Parameter(
             torch.tensor([[0.55, 0.04, 0.22]], dtype=torch.float32, device=dev).repeat(self.root_count, 1)
         )
-        self.brush_curve_strength_raw = repeated(0.0)
-        self.bend_raw = repeated(0.0)
+        self.brush_stiffness_raw = repeated(0.0)
         self.curl_radius_raw = repeated(raw_from_range(0.001, self.ranges.curl_radius))
         self.curl_frequency_raw = repeated(raw_from_range(0.35, self.ranges.curl_frequency))
         self.curl_phase = nn.Parameter(torch.zeros((self.root_count, 1), dtype=torch.float32, device=dev))
@@ -243,8 +241,7 @@ class GroomParameterField(nn.Module):
             tip_width=root_width * tip_ratio,
             width_taper=decode_positive_asinh(self.width_taper_raw),
             direction_local=_normalize(self.direction_local_raw),
-            brush_curve_strength=torch.sigmoid(self.brush_curve_strength_raw),
-            bend=self.bend_raw,
+            brush_stiffness=torch.sigmoid(self.brush_stiffness_raw),
             curl_radius=self._decode_range(self.curl_radius_raw, ranges.curl_radius),
             curl_frequency=self._decode_range(self.curl_frequency_raw, ranges.curl_frequency),
             curl_phase=self.curl_phase,
@@ -283,16 +280,18 @@ def build_brush_centerline(
     normals: torch.Tensor,
     directions: torch.Tensor,
     lengths: torch.Tensor,
-    brush_curve_strength: torch.Tensor,
+    brush_stiffness: torch.Tensor,
     samples: int,
 ) -> torch.Tensor:
-    """Build a smooth normal-to-groom curve with fixed root and tip.
+    """Build one smooth turn from the root normal toward a fixed 3D endpoint.
 
-    ``directions`` and ``lengths`` retain their direct editor meaning:
-    ``tip = root + length * direction``.  A strength of zero reproduces that
-    exact straight segment.  Increasing strength accumulates the endpoint's
-    normal displacement earlier and its tangent displacement later without
-    changing either endpoint.
+    ``tip = root + length * direction`` remains the exact editor contract. The
+    conceptual guide is the one-corner polyline from the root, along the normal
+    to the tip's normal height, and then to the tip. A quadratic Bezier smooths
+    that corner. Its control point moves away from the straight-line midpoint
+    by ``brush_stiffness * direction_difference``. Consequently a zero
+    strength is exactly straight, and directions close to the normal suppress
+    curvature continuously without an angle branch or threshold.
     """
 
     if samples < 2:
@@ -301,14 +300,29 @@ def build_brush_centerline(
         raise ValueError("roots, normals, and directions must all have shape [R, 3]")
     if lengths.shape != (roots.shape[0], 1):
         raise ValueError("lengths must have shape [R, 1]")
-    if brush_curve_strength.shape != (roots.shape[0], 1):
-        raise ValueError("brush_curve_strength must have shape [R, 1]")
+    if brush_stiffness.shape != (roots.shape[0], 1):
+        raise ValueError("brush_stiffness must have shape [R, 1]")
 
     normals = _normalize(normals)
     directions = _normalize(directions)
     delta = lengths * directions
     normal_delta = (delta * normals).sum(dim=-1, keepdim=True) * normals
-    tangent_delta = delta - normal_delta
+    direction_tangent = directions - (
+        directions * normals
+    ).sum(dim=-1, keepdim=True) * normals
+    direction_difference = torch.linalg.vector_norm(
+        direction_tangent,
+        dim=-1,
+        keepdim=True,
+    )
+    effective_stiffness = brush_stiffness * direction_difference
+
+    tips = roots + delta
+    straight_control = 0.5 * (roots + tips)
+    corner_control = roots + normal_delta
+    control = straight_control + effective_stiffness * (
+        corner_control - straight_control
+    )
 
     t = torch.linspace(
         0.0,
@@ -317,14 +331,11 @@ def build_brush_centerline(
         device=roots.device,
         dtype=roots.dtype,
     ).view(1, samples, 1)
-    strength = brush_curve_strength.clamp(0.0, 1.0)[:, None]
-    transition = t * (1.0 - t)
-    normal_progress = t + strength * transition
-    tangent_progress = t - strength * transition
+    one_minus_t = 1.0 - t
     return (
-        roots[:, None]
-        + normal_progress * normal_delta[:, None]
-        + tangent_progress * tangent_delta[:, None]
+        one_minus_t.square() * roots[:, None]
+        + 2.0 * one_minus_t * t * control[:, None]
+        + t.square() * tips[:, None]
     )
 
 
@@ -373,17 +384,9 @@ def build_strands(
         normals,
         groom_direction,
         groom.length,
-        groom.brush_curve_strength,
+        groom.brush_stiffness,
         samples,
     )
-    bend_envelope = 16.0 * t.square() * (1.0 - t).square()
-    bend_offset = (
-        groom.length[:, None]
-        * groom.bend[:, None]
-        * bend_envelope
-        * side[:, None]
-    )
-    points = points + bend_offset
     phase = 2.0 * torch.pi * groom.curl_frequency[:, None] * t + groom.curl_phase[:, None]
     curl_envelope = torch.sin(0.5 * torch.pi * t).clamp(0.0, 1.0)
     curl_side = torch.sin(phase)

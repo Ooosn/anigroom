@@ -79,7 +79,6 @@ required_config=(
   GUIDE_INTERPOLATION_K
   RENDER_GEOMETRY_PARAMETERIZATION
   GUIDE_LENGTH_RESIDUAL_SCALE
-  GUIDE_BEND_RESIDUAL_SCALE
   GUIDE_DIRECTION_RESIDUAL_SCALE
   GUIDE_WIDTH_RESIDUAL_SCALE
   GUIDE_CHILD_RADIUS_RESIDUAL_SCALE
@@ -88,7 +87,6 @@ required_config=(
   GUIDE_FRIZZ_RESIDUAL_SCALE
   GUIDE_PRIOR_WEIGHT
   GUIDE_PRIOR_DIRECTION_WEIGHT
-  GUIDE_PRIOR_BEND_WEIGHT
   GUIDE_PRIOR_CURL_WEIGHT
   GUIDE_PRIOR_LENGTH_WEIGHT
   GUIDE_PRIOR_WIDTH_WEIGHT
@@ -240,7 +238,6 @@ cmd=(
   --guide-interpolation-k "$GUIDE_INTERPOLATION_K"
   --render-geometry-parameterization "$RENDER_GEOMETRY_PARAMETERIZATION"
   --guide-length-residual-scale "$GUIDE_LENGTH_RESIDUAL_SCALE"
-  --guide-bend-residual-scale "$GUIDE_BEND_RESIDUAL_SCALE"
   --guide-direction-residual-scale "$GUIDE_DIRECTION_RESIDUAL_SCALE"
   --guide-width-residual-scale "$GUIDE_WIDTH_RESIDUAL_SCALE"
   --guide-child-radius-residual-scale "$GUIDE_CHILD_RADIUS_RESIDUAL_SCALE"
@@ -249,7 +246,6 @@ cmd=(
   --guide-frizz-residual-scale "$GUIDE_FRIZZ_RESIDUAL_SCALE"
   --guide-prior-weight "$GUIDE_PRIOR_WEIGHT"
   --guide-prior-direction-weight "$GUIDE_PRIOR_DIRECTION_WEIGHT"
-  --guide-prior-bend-weight "$GUIDE_PRIOR_BEND_WEIGHT"
   --guide-prior-curl-weight "$GUIDE_PRIOR_CURL_WEIGHT"
   --guide-prior-length-weight "$GUIDE_PRIOR_LENGTH_WEIGHT"
   --guide-prior-width-weight "$GUIDE_PRIOR_WIDTH_WEIGHT"

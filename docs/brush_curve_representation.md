@@ -1,189 +1,122 @@
-# Brush Curve Representation
+# Brush Centerline Representation
 
-Status: the base brush curve and non-periodic bend are implemented and accepted
-by R038. This document is the representation contract; the formal result is
-recorded in `docs/r038_brush_curve_and_9k_lifecycle.md`.
+Status: R039 strict-schema candidate. The geometry and schema are implemented;
+formal asset visualization and from-zero training are not yet accepted.
 
 ## Purpose
 
-The current straight-strand plus legacy lateral-bend construction does not
-explicitly represent the normal-to-groom transition seen in brushed fur. The
-replacement must preserve a simple, editable length meaning while producing a
-smooth root-to-tip curve and removing the remaining animal-scale decoder
-ranges.
+Ordinary brushed fur needs one natural transition from the surface normal to a
+learned 3D endpoint. A straight strand is already a valid baseline. The brush
+control may curve that same strand once, but it must not add a second interior
+deformation, change the endpoint, or hide image-driven geometry in an
+uninterpretable field.
 
-The representation separates:
+The executable base centerline therefore contains only:
 
-- the root-to-tip displacement and low-frequency brushed profile;
-- optional non-periodic bend, periodic curl, and high-frequency frizz;
-- guide-owned material/groom controls from image-driven local appearance;
-- continuous differentiable strand geometry from discrete Gaussian sampling.
+- straight root-to-tip length;
+- normalized local 3D endpoint direction;
+- guide-owned brush stiffness.
+
+Curl and frizz remain separate optional controls and are disabled in the R039
+white-tiger candidate. There is no additional low-frequency interior shape
+field in the model, render residual, optimizer, lifecycle state, checkpoint,
+CLI, or configuration.
 
 ## Geometric Contract
 
-For root position `P0`, outward unit surface normal `n`, normalized learned 3D
-groom direction `d`, and learned straight length `L`:
+For root `P0`, outward unit normal `n`, normalized learned direction `d`, and
+positive straight length `L`:
 
-`P1 = P0 + L d`
+```text
+P2 = P0 + L d
+```
 
-`L` is the straight root-to-tip distance, not the final curve arc length. This
-keeps the control and its optimization simple. The endpoint displacement is
-decomposed into a normal and tangent component:
+`P2` is fixed for every stiffness value. The conceptual one-corner polyline is
 
-`delta = P1 - P0`
+```text
+Q = P0 + dot(P2 - P0, n) n
+P0 -> Q -> P2
+```
 
-`h = dot(delta, n)`
+where `Q` is the point on the root-normal ray at the tip's normal height. The
+actual centerline is one quadratic Bezier, not that hard corner.
 
-`t = delta - h n`
+The normal/direction disagreement is an explicit continuous coefficient:
 
-The base strand is then
+```text
+d_tangent = d - dot(d, n) n
+direction_difference = ||d_tangent||
+effective_stiffness = brush_stiffness * direction_difference
+```
 
-`P(s) = P0 + h F_n(s, c) n + F_t(s, c) t`, for `s in [0, 1]`.
+No angular threshold or special aligned-direction branch is used. A direction
+close to the normal continuously reduces the effective stiffness. An exactly
+normal-aligned direction gives zero effective stiffness through the same
+formula used by every other strand.
 
-The transition functions must satisfy:
+Let the straight quadratic control point be
 
-- `F_n(0, c) = F_t(0, c) = 0`;
-- `F_n(1, c) = F_t(1, c) = 1`;
-- position and tangent are continuous for every valid `c`;
-- both functions equal `s` when `c = 0`, giving the exact straight segment;
-- as `c` approaches `1`, normal height is accumulated earlier and tangential
-  displacement later, giving a smooth normal-emergence/laydown curve;
-- the root and endpoint remain unchanged for every value of `c`.
+```text
+M = (P0 + P2) / 2
+```
 
-The canonical internal control is `brush_curve_strength c in [0, 1]`:
+and define
 
-- `c = 0`: straight root-to-tip line;
-- `c = 1`: strongest smooth normal-to-groom transition supported by the base
-  profile.
+```text
+C = M + effective_stiffness (Q - M)
+B(t) = (1-t)^2 P0 + 2(1-t)t C + t^2 P2,  t in [0,1]
+```
 
-If the public editor exposes the conventional material term `stiffness`, use
-`brush_curve_strength = 1 - stiffness`, so high stiffness means straighter
-hair. The implementation must not use the name `stiffness` with the opposite
-meaning.
+This has the required behavior:
 
-The normal height `h` is derived from the learned endpoint. It is not an
-independent lift parameter and has no separate physical range.
+- `brush_stiffness = 0` is the exact straight segment;
+- increasing stiffness approaches the smooth version of `P0 -> Q -> P2`;
+- root and tip never move;
+- the centerline is one quadratic turn and has no second bend or inflection;
+- normal/direction agreement suppresses curvature continuously;
+- length, direction, and stiffness remain differentiable.
 
-## Parameter Ownership
+## Ownership And Interpolation
 
-`brush_curve_strength` is a guide-root material/groom field. Render roots
-obtain it through the same intrinsic surface interpolation and smoothing used
-for other guide fields. It has no render-root residual: local RGB evidence
-must not independently change material stiffness at every render root.
+`brush_stiffness` is a guide-root field in the semantic interval `[0,1]`.
+Render roots obtain it through the same intrinsic surface interpolation used by
+the other guide controls. It has no render-root residual. Its graph smoothness,
+guide lifecycle interpolation, optimizer ownership, checkpoint identity, and
+diagnostic output all use the same field name and schema.
 
-The base guide representation is therefore:
-
-- straight length;
-- normalized local 3D direction;
-- brush curve strength (or conventional stiffness through its complement).
-
-Visible geometric fields such as length, direction, and width may retain the
-already accepted guide/render hierarchy. Gaussian RGB residuals remain the
-outlet for shadows, highlights, and other high-frequency photometric evidence.
-
-## Bend, Curl, And Frizz
-
-These controls are complementary only when their geometric roles are
-identifiable:
-
-- brush curve strength: the base normal-to-groom transition;
-- bend: optional low-frequency, non-periodic centerline deformation;
-- curl: coherent periodic or helical deformation;
-- frizz: zero-mean high-frequency irregular deformation.
-
-The legacy one-axis bend must not be reused as the base brushed profile. A
-future bend must alter the curve interior without duplicating the endpoint 3D
-direction. Curl and frizz must not use fixed animal-scale amplitude or
-frequency endpoints.
-
-Brush curve strength belongs to the base guide geometry. Optional bend, curl,
-and frizz shape detail may unlock after 20k through the single shared shape
-detail ramp. They must not introduce separate per-attribute schedules. For the
-white-tiger checkpoint they should be allowed to remain near zero; their
-representation must nevertheless support genuinely bent, curly, and frizzy
-fur on other subjects.
+This ownership prevents local RGB evidence from independently changing the
+material curve at every render root. Render-root length and direction residuals
+remain separate visible-geometry controls under their existing schedule.
 
 ## Gaussian Sampling
 
-The final centerline is constructed first, including every enabled shape
-component. Gaussian allocation then uses the resulting curve, not only the raw
-straight length:
+The final enabled centerline is built before discrete segment allocation.
+Absolute straight length provides the base count; final arc length and turning
+complexity add samples where the curve requires them. There is a representation
+minimum but no animal-specific maximum segment count.
 
-- straight length contributes the base representation count;
-- final arc length and local turning/approximation error add samples where the
-  curve needs them;
-- no maximum segment count or animal-specific physical threshold is applied;
-- a minimum segment count and numerical tolerances are representation
-  requirements, not learned-attribute clamps.
+Segment counts are detached integer topology decisions. Generated Gaussian
+positions remain differentiable with respect to length, 3D direction, and
+brush stiffness.
 
-The current renderer deterministically rebuilds strands, segment budgets, and
-derived Gaussian tensors on every render call. Segment counts are detached
-integer topology decisions; Gaussian positions and attributes remain
-differentiable with respect to the groom fields. The brush curve adds only
-vectorized curve evaluation, so the initial implementation keeps this
-per-iteration rebuild. Caching is justified only by profiling, not by changing
-the model contract.
+## Strict Schema
 
-Any future persistent Gaussian RGB residual must use stable semantic identity,
-such as render-root identity plus normalized strand coordinate, rather than a
-transient flattened Gaussian array index.
+R039 intentionally cannot load an R038 checkpoint. The removed field is not
+ignored, zeroed, migrated, or retained for compatibility. Frozen R036/R038
+configs and documents remain only as immutable experimental evidence; the R039
+launcher config is `configs/r039_brush_centerline_0_30k.env`.
 
-## Hard-Range Replacement
+## Acceptance Checks
 
-The complete future design closes the physical decoder-range audit only if old
-definitions are removed rather than disabled:
+Before any from-zero training, the representation must pass:
 
-- remove the legacy `tanh` bend interval;
-- remove fixed curl radius and frequency intervals;
-- remove the fixed frizz amplitude interval;
-- remove any remaining independent lift field or lift range;
-- retain the already accepted positive-unbounded length, width, taper, and
-  child-spread representations;
-- retain only semantic domains such as normalized direction, opacity/color,
-  tip ratio, clump weight, and brush curve strength.
+1. exact straight behavior at zero stiffness;
+2. fixed root and tip for every stiffness;
+3. explicit direction-difference scaling;
+4. natural straight behavior for normal-aligned directions without a branch;
+5. one quadratic turn with no second curvature event;
+6. finite nonzero gradients to length, direction, and stiffness;
+7. strict absence of the removed field from executable schemas;
+8. one canonical large centerline visualization using this exact function.
 
-R038 implements only the base brush curve and the unbounded non-periodic bend.
-Curl and frizz remain disabled and deferred so their future representation is
-not mixed into this baseline. Their inactive legacy ranges therefore do not
-count as R038 acceptance failures.
-
-Positive shape amplitudes may use positive unbounded coordinates and relative
-soft priors. Stability must come from guide ownership, intrinsic interpolation,
-smoothness, shared staged optimization, and image evidence, not post-decode
-physical clipping.
-
-### Current audit state
-
-The completed R-series has already removed active physical endpoints from
-length, root width, width taper, and child spread. Root/tip color and opacity,
-tip/root width ratio, clump weight, normalized direction, and the future brush
-curve strength retain semantic domains and are not hard-coded animal scales.
-
-R038 removed the legacy `tanh` bend interval from the executable model. The
-remaining definitions to redesign are inactive curl radius/frequency and frizz
-amplitude. They have zero effective scale in the current white-tiger config and
-did not affect the accepted result, but they still matter to the general
-representation and must be addressed in a separate candidate. There is no
-independent lift or legacy stiffness field in the model; brush strength is the
-single guide-owned base-curve control.
-
-## Acceptance Evidence
-
-R038 passes the scoped base-curve criteria:
-
-1. `c = 0` reproduces the exact straight strand and endpoint.
-2. Increasing `c` preserves both endpoints and produces a continuous,
-   monotonic normal-to-groom transition without a kink or loop.
-3. Direction, length, brush strength, and bend have finite differentiable
-   gradients in focused tests.
-4. Guide interpolation and lifecycle insertion preserve brush strength across
-   mesh faces.
-5. Final-curve Gaussian allocation responds to physical arc/turn complexity
-   and has no maximum cap.
-6. The old bend interval and independent lift/stiffness paths are absent;
-   curl/frizz remain disabled.
-7. The strict 0-30k run and fixed 9k/30k canonical assets show controlled
-   curvature, zero backward segments, and no loop, foldback, or sparse spike.
-
-Curly and frizzy stress cases belong to the future curl/frizz candidate. They
-are not silently claimed as evidence for R038.
+Only after those checks pass may R039 start a strict from-zero Stage 1 run.

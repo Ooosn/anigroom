@@ -87,7 +87,7 @@ def apply_regional_teacher(field: GroomParameterField, roots: torch.Tensor) -> t
         field.direction_local_raw[:, 0:1].add_(1.1 * demand)
         field.direction_local_raw[:, 1:2].add_(0.9 * demand)
         field.direction_local_raw[:, 2:3].add_(0.3 * demand)
-        field.bend_raw.add_(1.5 * demand)
+        field.brush_stiffness_raw.add_(1.5 * demand)
         field.root_color_raw.add_(-2.0 * demand * stripe.expand(-1, 3))
         field.tip_color_raw.add_(-1.8 * demand * stripe.expand(-1, 3))
     return demand.detach()

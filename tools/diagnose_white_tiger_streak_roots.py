@@ -182,7 +182,6 @@ def load_checkpoint_model(checkpoint_path: Path, device: torch.device):
             "absolute_endpoint",
         ),
         guide_length_residual_scale=getattr(config, "guide_length_residual_scale", 0.0),
-        guide_bend_residual_scale=getattr(config, "guide_bend_residual_scale", 0.0),
         guide_direction_residual_scale=config.guide_direction_residual_scale,
         guide_width_residual_scale=getattr(config, "guide_width_residual_scale", 1.0),
         guide_child_radius_residual_scale=getattr(config, "guide_child_radius_residual_scale", 1.0),

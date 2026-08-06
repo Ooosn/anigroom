@@ -1,12 +1,9 @@
-from dataclasses import replace
-
 import torch
 import torch.nn.functional as F
 
 from anigroom.grooming import (
     GroomParameterField,
     build_brush_centerline,
-    build_strands,
     strand_segment_budgets,
 )
 
@@ -22,6 +19,16 @@ def brush_inputs() -> tuple[torch.Tensor, ...]:
     return roots, normals, directions, lengths
 
 
+def straight_samples(
+    roots: torch.Tensor,
+    directions: torch.Tensor,
+    lengths: torch.Tensor,
+    samples: int,
+) -> torch.Tensor:
+    t = torch.linspace(0.0, 1.0, samples, dtype=roots.dtype).view(1, samples, 1)
+    return roots[:, None] + t * (lengths * F.normalize(directions, dim=-1))[:, None]
+
+
 def test_zero_brush_strength_is_the_exact_root_to_tip_segment() -> None:
     roots, normals, directions, lengths = brush_inputs()
     points = build_brush_centerline(
@@ -32,93 +39,123 @@ def test_zero_brush_strength_is_the_exact_root_to_tip_segment() -> None:
         torch.zeros((1, 1), dtype=torch.float64),
         samples=17,
     )
-    t = torch.linspace(0.0, 1.0, 17, dtype=torch.float64).view(1, 17, 1)
-    expected = roots[:, None] + t * (lengths * directions)[:, None]
+    torch.testing.assert_close(
+        points,
+        straight_samples(roots, directions, lengths, 17),
+        atol=1.0e-12,
+        rtol=1.0e-12,
+    )
+
+
+def test_direction_difference_explicitly_scales_stiffness() -> None:
+    roots, normals, directions, lengths = brush_inputs()
+    stiffness = torch.tensor([[0.7]], dtype=torch.float64)
+    points = build_brush_centerline(
+        roots, normals, directions, lengths, stiffness, samples=9
+    )
+
+    directions = F.normalize(directions, dim=-1)
+    delta = lengths * directions
+    normal_delta = (delta * normals).sum(dim=-1, keepdim=True) * normals
+    direction_tangent = directions - (
+        directions * normals
+    ).sum(dim=-1, keepdim=True) * normals
+    direction_difference = torch.linalg.vector_norm(
+        direction_tangent, dim=-1, keepdim=True
+    )
+    effective_stiffness = stiffness * direction_difference
+    tip = roots + delta
+    straight_control = 0.5 * (roots + tip)
+    corner_control = roots + normal_delta
+    control = straight_control + effective_stiffness * (
+        corner_control - straight_control
+    )
+    t = torch.linspace(0.0, 1.0, 9, dtype=roots.dtype).view(1, 9, 1)
+    expected = (
+        (1.0 - t).square() * roots[:, None]
+        + 2.0 * (1.0 - t) * t * control[:, None]
+        + t.square() * tip[:, None]
+    )
     torch.testing.assert_close(points, expected, atol=1.0e-12, rtol=1.0e-12)
 
 
-def test_brush_strength_preserves_endpoints_and_delays_tangent_motion() -> None:
+def test_normal_aligned_direction_is_naturally_straight_without_a_branch() -> None:
+    roots, normals, _, lengths = brush_inputs()
+    points = build_brush_centerline(
+        roots,
+        normals,
+        normals,
+        lengths,
+        torch.ones((1, 1), dtype=torch.float64),
+        samples=17,
+    )
+    torch.testing.assert_close(
+        points,
+        straight_samples(roots, normals, lengths, 17),
+        atol=1.0e-12,
+        rtol=1.0e-12,
+    )
+
+
+def test_direction_closer_to_normal_has_less_curve_at_equal_stiffness() -> None:
+    roots, normals, _, lengths = brush_inputs()
+    near = F.normalize(torch.tensor([[0.12, 0.0, 1.0]], dtype=torch.float64), dim=-1)
+    far = F.normalize(torch.tensor([[1.0, 0.0, 0.35]], dtype=torch.float64), dim=-1)
+    stiffness = torch.ones((1, 1), dtype=torch.float64)
+    near_curve = build_brush_centerline(roots, normals, near, lengths, stiffness, 33)
+    far_curve = build_brush_centerline(roots, normals, far, lengths, stiffness, 33)
+    near_error = torch.linalg.vector_norm(
+        near_curve - straight_samples(roots, near, lengths, 33), dim=-1
+    ).max()
+    far_error = torch.linalg.vector_norm(
+        far_curve - straight_samples(roots, far, lengths, 33), dim=-1
+    ).max()
+    assert float(near_error) < float(far_error)
+
+
+def test_brush_curve_is_one_quadratic_turn_with_fixed_endpoints() -> None:
     roots, normals, directions, lengths = brush_inputs()
-    straight = build_brush_centerline(
-        roots, normals, directions, lengths, torch.zeros((1, 1), dtype=torch.float64), 9
+    points = build_brush_centerline(
+        roots,
+        normals,
+        directions,
+        lengths,
+        torch.ones((1, 1), dtype=torch.float64),
+        samples=65,
     )
-    brushed = build_brush_centerline(
-        roots, normals, directions, lengths, torch.ones((1, 1), dtype=torch.float64), 9
+    torch.testing.assert_close(points[:, 0], roots, atol=1.0e-12, rtol=0.0)
+    torch.testing.assert_close(
+        points[:, -1], roots + lengths * directions, atol=1.0e-12, rtol=0.0
     )
-    tip = roots + lengths * directions
-    torch.testing.assert_close(brushed[:, 0], roots)
-    torch.testing.assert_close(brushed[:, -1], tip)
-    assert float(brushed[0, 1, 2]) > float(straight[0, 1, 2])
-    assert float(brushed[0, 1, 0]) < float(straight[0, 1, 0])
+    second_difference = points[:, 2:] - 2.0 * points[:, 1:-1] + points[:, :-2]
+    torch.testing.assert_close(
+        second_difference,
+        second_difference[:, :1].expand_as(second_difference),
+        atol=2.0e-12,
+        rtol=2.0e-10,
+    )
 
 
-def test_brush_curve_gradients_reach_length_direction_and_strength() -> None:
+def test_brush_curve_gradients_reach_length_direction_and_stiffness() -> None:
     roots, normals, directions, lengths = brush_inputs()
     directions = directions.detach().requires_grad_(True)
     lengths = lengths.detach().requires_grad_(True)
-    strength = torch.tensor([[0.4]], dtype=torch.float64, requires_grad=True)
+    stiffness = torch.tensor([[0.4]], dtype=torch.float64, requires_grad=True)
     points = build_brush_centerline(
-        roots, normals, directions, lengths, strength, samples=13
+        roots, normals, directions, lengths, stiffness, samples=13
     )
     weights = torch.linspace(0.2, 1.3, points.numel(), dtype=points.dtype).reshape_as(points)
     (points * weights).sum().backward()
-    for value in (directions.grad, lengths.grad, strength.grad):
+    for value in (directions.grad, lengths.grad, stiffness.grad):
         assert value is not None
         assert bool(torch.isfinite(value).all())
         assert bool((value.abs() > 0.0).any())
 
 
-def test_bend_is_a_smooth_interior_deformation_with_fixed_endpoints() -> None:
-    roots, normals, directions, lengths = brush_inputs()
-    tangents = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64)
-    bitangents = torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float64)
-    field = GroomParameterField(1, init_length=2.0).to(dtype=torch.float64)
-    groom = replace(
-        field.decode(),
-        length=lengths,
-        direction_local=directions,
-        brush_curve_strength=torch.tensor([[0.6]], dtype=torch.float64),
-        curl_radius=torch.zeros((1, 1), dtype=torch.float64),
-        frizz=torch.zeros((1, 1), dtype=torch.float64),
-    )
-    straight, *_ = build_strands(
-        roots,
-        normals,
-        tangents,
-        bitangents,
-        replace(groom, bend=torch.zeros((1, 1), dtype=torch.float64)),
-        samples=1001,
-    )
-    bent, *_ = build_strands(
-        roots,
-        normals,
-        tangents,
-        bitangents,
-        replace(groom, bend=torch.tensor([[0.7]], dtype=torch.float64)),
-        samples=1001,
-    )
-    torch.testing.assert_close(bent[:, 0], straight[:, 0], atol=1.0e-12, rtol=0.0)
-    torch.testing.assert_close(bent[:, -1], straight[:, -1], atol=1.0e-12, rtol=0.0)
-    assert float((bent - straight)[0, 500, 1]) > 0.0
-    torch.testing.assert_close(
-        F.normalize(bent[:, 1] - bent[:, 0], dim=-1),
-        F.normalize(straight[:, 1] - straight[:, 0], dim=-1),
-        atol=2.0e-2,
-        rtol=2.0e-2,
-    )
-    torch.testing.assert_close(
-        F.normalize(bent[:, -1] - bent[:, -2], dim=-1),
-        F.normalize(straight[:, -1] - straight[:, -2], dim=-1),
-        atol=2.0e-2,
-        rtol=2.0e-2,
-    )
-
-
-def test_bend_is_not_saturated_by_a_legacy_tanh_domain() -> None:
+def test_legacy_bend_is_absent_from_the_groom_schema() -> None:
     field = GroomParameterField(2, init_length=0.02)
-    with torch.no_grad():
-        field.bend_raw.copy_(torch.tensor([[-3.0], [4.0]]))
-    torch.testing.assert_close(field.decode().bend, field.bend_raw)
+    assert not hasattr(field, "bend_raw")
+    assert "bend" not in field.decode().__dataclass_fields__
 
 
 def test_final_brush_curve_drives_adaptive_segment_allocation() -> None:
