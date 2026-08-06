@@ -89,7 +89,60 @@ R039 is a strict from-zero, single-variable comparison against R038:
 - all other training, loss, lifecycle, resolution, and evaluation settings are
   identical to frozen R038.
 
+## Final Absolute-Threshold Audit
+
+The executable R039 source, its frozen environment, and the actual 30k
+checkpoint configuration were audited together at commit
+`bf8ab2d2b7328894410eb1ad47bfe9b5a407599d`.
+
+- physical length uses a positive, unbounded data-relative asinh/log-ratio
+  decoder; there is no absolute minimum, maximum, hinge, or overlength loss;
+- root width, width taper, and child radius are likewise positive and
+  unbounded in physical units;
+- direction is normalized without an angular threshold, and lift is not a
+  separately optimized field;
+- brush stiffness, opacity, color, tip/root ratio, and clump strength retain
+  intrinsic semantic domains rather than animal-specific physical bounds;
+- the active render-length prior is a continuous zero-centered residual prior
+  with the threshold-free `tail_concentration_handoff` reduction. It does not
+  prescribe or clamp physical hair length;
+- guide, render, effective-field, and strand-shape smoothness penalize local
+  differences continuously. None activates after an attribute crosses a
+  fixed value;
+- the clean-flow 5%-95% data quantiles and confidence cutoffs are initialization
+  evidence rules only;
+- densification evidence thresholds, split spacing, and adaptive Gaussian
+  segment allocation govern lifecycle or representation capacity only. They
+  do not constrain a learned groom attribute;
+- curl and frizz physical ranges remain defined for their future semantic
+  controls, but both paths are disabled in R039; opacity pruning is also
+  disabled.
+
+The focused domain, zero-centered residual, and lock tests pass locally:
+`45 passed`. This closes the absolute-attribute-threshold removal task for the
+current ordinary-fur training line.
+
+## Formal Result
+
+The strict from-zero H100 run completed 30k iterations without an OOM, NaN, or
+training error:
+
+- output:
+  `/home/wangyy/anigroom-r039-one-turn-runtime-20260806/outputs/r039_one_turn_from_zero_h100_20260806`;
+- final train/test composite PSNR: `32.8886 / 32.2164`;
+- best test composite PSNR: `32.4111` at iteration `29000`;
+- final render roots / generated Gaussians: `208976 / 9387620`;
+- peak allocated CUDA memory: `16647.75 MB`.
+
+Canonical 30k asset renders:
+
+- `D:/RTS/_tmp/r039_30k_final/r039_030000_asset_side_y_v11_protocol.png`;
+- `D:/RTS/_tmp/r039_30k_final/r039_030000_asset_side_y_pos_v11_protocol.png`;
+- `D:/RTS/_tmp/r039_30k_final/r039_030000_asset_front_z_v11_protocol.png`.
+
 ## Next Gate
 
-Run the strict 30k from-zero experiment and apply the same fixed 9k/30k asset
-protocol as R038. Do not resume the retired `tip-tangent` attempt.
+Keep confidence-based completion for later asset extraction. The next training
+question is the remaining direction-field discontinuity in sufficiently
+observed regions; diagnose guide direction, interpolated render direction,
+render residual, and final effective direction before changing a loss.
