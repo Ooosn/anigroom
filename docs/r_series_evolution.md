@@ -1,6 +1,6 @@
 # R-Series Evolution
 
-Status date: 2026-08-06. Active structural/lifecycle baseline: R038. Frozen
+Status date: 2026-08-07. Active structural/lifecycle baseline: R042. Frozen
 higher-PSNR metric control: R036.
 
 This document is the compact decision history. Detailed measurements and
@@ -21,6 +21,10 @@ individual R-series documents.
 | R032 | Made guide-length smoothing invariant to guide density. |
 | R036 | Completed the current positive guide/render hierarchy for length, width profile, and child spread. |
 | R038 | Added the explicit normal-to-groom brush curve and a finite 600-9000 render lifecycle. |
+| R039 | Replaced the ambiguous interior deformation with one direction-aware quadratic centerline. |
+| R040 | Replaced four deterministic children with 400k independent render roots and `child_count=1`. |
+| R041 | Made the dense surface graph exact and practical by removing redundant rebuild work. |
+| R042 | Completed exact lifecycle-selection acceleration and passed the formal from-zero 30k gate. |
 
 ## Recovery And Interpolation: R000-R007
 
@@ -119,6 +123,21 @@ It is accepted because fixed-protocol structure remains coherent while root,
 Gaussian, memory, and runtime cost fall substantially. R036 stays frozen for
 metric comparisons.
 
+## Independent Dense Roots And Exact Execution: R039-R042
+
+| Run | Test | Decision and lasting result |
+| --- | --- | --- |
+| R039 | One-turn direction-aware centerline | Completed: final/best test `32.2164/32.4111`; frozen as the direct structural parent. |
+| R040 | 400k independent roots, `child_count=1` | Representation and memory gates passed. Exact graph rebuild cost `18.3-18.6 s` per lifecycle event blocked a formal run. |
+| R041 | Exact dense surface-graph acceleration | Preserved selected roots and ordered edges while reducing graph rebuild from `18.5848 s` to `0.1988 s`. |
+| R042 | Exact lifecycle-selection acceleration plus formal 30k | Selection fell from `8.9911 s` to `5.1573 s` with identical parent/child counts. Formal 30k completed at final/best test `32.51543/32.71918`, `469737` roots, `5.319M` Gaussians, and `13.188 GB` peak allocation. Accepted as active structural/lifecycle baseline. |
+
+R042 improves final/best test composite over R038 by
+`+0.16955/+0.20241 dB`, uses about `44.0%` fewer Gaussians, and trains about
+`8.8%` faster. It remains `0.14779 dB` below R036 at the final test metric, so
+R036 remains the metric control rather than being rewritten by the structural
+decision.
+
 ## Effective Findings
 
 The strongest reusable findings are:
@@ -141,6 +160,9 @@ The strongest reusable findings are:
 
 ## Current Boundary
 
-R038 contains the base brush curve but does not redesign or enable curl/frizz,
-and it does not add Gaussian-level RGB appearance residuals. Those remain
-separate future candidates and must not be described as part of this baseline.
+R042 contains the base brush curve, independent render roots, and an exact
+finite render-root lifecycle. It does not redesign or enable curl/frizz, and it
+does not add Gaussian-level RGB appearance residuals. Those remain separate
+future candidates and must not be described as part of this baseline. The
+sparse long/sharp tail in the 100k-strand audit is recorded for later asset
+cleanup; it is not hidden by a sample-specific length cap in R042.

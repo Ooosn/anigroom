@@ -1,0 +1,64 @@
+{
+  "baseline_id": "stage1-r042",
+  "source_ref": "stage1-r042",
+  "source_commit": "d4e22668b365541ec0741f969ec249e65f59f500",
+  "frozen_at": "2026-08-07",
+  "behavior_config": "configs/r040_child1_dense_render_0_30k.env",
+  "formal_run": {
+    "output": "/home/wangyy/anigroom-r042-selection-runtime-20260807/outputs/r042_exact_full_0_30k_h100_20260807",
+    "checkpoint": {
+      "path": "checkpoint_030000.pt",
+      "bytes": 201752650,
+      "sha256": "5d05bf9a7b5e8f95f46498f97ce2c89d5f233a5f65830002a3ae42378b9dbdf9"
+    },
+    "config_bytes": 4330,
+    "config_sha256": "5361cf2f9734f73f50a5e73132b53cf124b7675c558799ba9aae3397de6c88e5",
+    "launcher_bytes": 1784,
+    "launcher_sha256": "906bb1679c8f2342792d460d23b31573f76acd7db7a7dfb0a0fc10964d94f21e",
+    "saved_config_bytes": 5819,
+    "saved_config_sha256": "16c5a0b57f1fc1f0deea6dd606d9b63b8fce30dd449a3e8964019041cfe09f05",
+    "metrics_bytes": 1197787,
+    "metrics_sha256": "d6ef5230498c2ec0326f8b4817c7682094545645a8aa435e0f93adbb8980359e",
+    "final_train_composite_psnr": 33.48264694213867,
+    "final_test_composite_psnr": 32.51542663574219,
+    "best_test_composite_psnr": 32.71917724609375,
+    "best_test_iteration": 29000,
+    "render_roots": 469737,
+    "training_metric_gaussians": 5319498,
+    "checkpoint_postprocess_gaussians": 5319408,
+    "elapsed_seconds": 11263.974,
+    "max_allocated_memory_mb": 13187.99,
+    "lifecycle_event_count": 85,
+    "lifecycle_last_iteration": 9000
+  },
+  "postprocess": {
+    "local_root": "D:/RTS/_tmp/r042_30k_final",
+    "manifest_files": 72,
+    "manifest_sha256": "d2669bada4ac1e7d56ec34895602ef30fa424972a28842c65d07c1895ed0dbcb",
+    "strand_export": {
+      "path": "strands/r042_030000_child1_100k_samples32.npz",
+      "bytes": 56439136,
+      "sha256": "b4b5619964143dad5d915e5fd573d1d204d49c625b31b848ab9e2d495c65a983"
+    },
+    "asset_side_y_sha256": "c9b1b7629a8fd263e7d9f830e881b018bb903415e5b0e44b84f7805eb342e2f0",
+    "asset_side_y_pos_sha256": "721885965bec855addcf7afc54e07d9bd485329d55f8ac9ff2d5da31b02f5713",
+    "asset_front_z_sha256": "fc101496cc6b127c654524afb04ae0d34f1b31ba6bffac57ab5d578d536e6b9e"
+  },
+  "local_files": {
+    "configs/r040_child1_dense_render_0_30k.env": "5361cf2f9734f73f50a5e73132b53cf124b7675c558799ba9aae3397de6c88e5",
+    "baseline_inputs/v4_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz": "60a33b360bb415cb47cd38173d6e0cf4504448203ef277a5861641b40fdb3141",
+    "anigroom/roots/__init__.py": "5a3b06a87bb5c7d11ddc06d53ec79870aea9a8f84c6af4a9aa61b846913422c2",
+    "anigroom/roots/lifecycle.py": "5486f124b2b7f6ca36d9eb12e078ed35997c324679f67496b707a3b4024a6489",
+    "anigroom/roots/statistics.py": "5c66bfb55581392c018ed0970f85396da61db8de2412480e729d158ed69d8416",
+    "anigroom/surface_interpolation.py": "c5d90ac253ad109006cd41586ac0352103c4511b446b38d0edfb8f04d1a86cf5",
+    "anigroom/grooming/__init__.py": "6e7f2928692fd4e325dd443b3d5dd9eee2f07f8fac25f82cfe653e4ed2f8306f",
+    "anigroom/grooming/strand_gaussians.py": "2bd3979f0545a9190f5e517e8e3db0f8fc12ce49e39993a8e414057a36658330",
+    "tools/train_white_tiger_stage1.py": "572516a87c6ea5f932a385259573f06beb9baf31318eac7ed16e89a727463d25",
+    "scripts/server/run_white_tiger_stage1.sh": "d1fff35c0c798bf622de23319a122e42bae9a26457a132e0d928b0c492f126a6",
+    "tools/export_white_tiger_checkpoint_strands.py": "92de7f73234b61673f603fe399bd4285ac2a78a5bd8e0f1b45f78beb770677b2",
+    "tools/export_white_tiger_checkpoint_gaussians_ply.py": "727cf5af37df578f3a4c2e31c7418add3d2179e46239bf3f2c10a23fa6dfaab1",
+    "tools/render_white_tiger_stage1_checkpoint_views.py": "1fc8a894e81bcc6656da06580535e04c0c80d650534ebb85ed74a987562f9021",
+    "tools/visualize_white_tiger_groom_attributes.py": "bd0aa183f9397dab2b7ea29fd9652ccb35ded4d0f5759f1a12d986292f796941",
+    "tools/blender_render_strand_npz.py": "2aac9ac60d507e1081467c5df1511cc2e7a566b13e679f1a69ec2c022cbd66a7"
+  }
+}

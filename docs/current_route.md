@@ -1,28 +1,29 @@
 # Current Route
 
-Status date: 2026-08-06.
+Status date: 2026-08-07.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
 
 ## Baseline Status
 
-R038 is the last accepted structural/lifecycle Stage 1 baseline:
+R042 is the active structural/lifecycle Stage 1 baseline:
 
-- final train/test composite PSNR: `33.03637 / 32.34588`
-- best test composite PSNR: `32.51677` at 29k
-- final render roots/Gaussians: `209220 / 9496145`
-- elapsed H100 training time: `12345.53 s`
+- final train/test composite PSNR: `33.48265 / 32.51543`
+- best test composite PSNR: `32.71918` at 29k
+- final render roots/training-metric Gaussians: `469737 / 5319498`
+- elapsed H100 training time: `11263.974 s`
+- peak allocated CUDA memory: `13187.99 MB`
 - formal checkpoint SHA-256:
-  `994578210640f7e586f3c2cbdfb0eced6b962680945ea8ca1b82c6444e1cdf41`
+  `5d05bf9a7b5e8f95f46498f97ce2c89d5f233a5f65830002a3ae42378b9dbdf9`
 - canonical asset render:
-  `D:/RTS/_tmp/r038_30k_final/r038_030000_asset_side_y_v11_protocol.png`
+  `D:/RTS/_tmp/r042_30k_final/r042_030000_asset_side_y_v11_protocol.png`
 
-The `stage1-r038` tag and `configs/r038_brush_curve.lock.json` freeze its
-executable source and formal evidence. R039 is the current strict-schema
-representation candidate: it removes the secondary interior deformation and
-replaces the base curve with one direction-aware quadratic centerline. No R039
-training result is accepted yet.
+The `stage1-r042` tag and
+`configs/r042_exact_lifecycle_selection.lock.json` freeze the exact source,
+unchanged R040 behavior configuration, formal metrics, checkpoint, and
+postprocess evidence. R042 uses 400k initial independent render roots with
+`child_count=1`; no deterministic child expansion is part of the active route.
 
 R036 remains the immutable higher-PSNR metric control:
 
@@ -35,19 +36,22 @@ R036 remains the immutable higher-PSNR metric control:
   `D:/RTS/_tmp/r036_30k_final/r036_030000_asset_side_y_v11_protocol.png`
 
 The `stage1-r036` Git tag is byte-identical to its formal runtime snapshot, and
-`configs/stage1_baseline.lock.json` continues to verify that control. R038 is
-`0.31734 dB` lower at the final test metric but uses `34.0%` fewer render roots,
-`33.2%` fewer Gaussians, and `43.2%` less H100 training time. It is accepted
-for the representation and finite-lifecycle result, not reported as a PSNR
-gain. The exact v4 target remains tracked under `baseline_inputs/` with
+`configs/stage1_baseline.lock.json` continues to verify that control. R042 is
+`0.14779 dB` lower at the final test metric and `0.12059 dB` lower at the best
+test metric, while using about `62.6%` fewer generated Gaussians. It is
+accepted for independent-root structure, exact finite lifecycle, lower
+capacity cost, and coherent fixed-protocol assets, not reported as a PSNR gain
+over R036. The exact v4 target remains tracked under `baseline_inputs/` with
 unchanged content.
 
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
 - frozen R036 metric-control configuration: `configs/stage1_baseline.env`
-- frozen R038 configuration: `configs/r038_brush_curve_0_30k.env`
-- R039 candidate configuration: `configs/r039_brush_centerline_0_30k.env`
+- active R042 behavior configuration:
+  `configs/r040_child1_dense_render_0_30k.env`
+- active R042 lock: `configs/r042_exact_lifecycle_selection.lock.json`
+- historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
 - Gaussian export: `tools/export_white_tiger_checkpoint_gaussians_ply.py`
@@ -82,7 +86,9 @@ preserving the root, tip, straight length, and 3D endpoint direction. The
 effective value is brush stiffness multiplied by the continuous tangential
 difference between the normal and endpoint direction. There is no second
 interior deformation field. Curl and frizz remain separate optional shape
-controls but stay disabled in R039. Child expansion remains active.
+controls but stay disabled in R042. The active route has one strand per render
+root (`child_count=1`); density comes from independent render roots and their
+finite lifecycle, not deterministic child expansion.
 
 Render-root geometry is a zero-centered residual around the interpolated guide
 field. Direction residuals are local 3D vectors. Length uses the positive,
@@ -123,9 +129,9 @@ parameterization is stored beside the normalized 3D vector.
 ## Training Contract
 
 - full resolution: `1920x1080`
-- initial guide/render roots: `4500 / 100000`
+- initial guide/render roots: `4500 / 400000`
 - render-root lifecycle: every 100 iterations from 600 through 9k
-- guide-root lifecycle: disabled in R038
+- guide-root lifecycle: disabled in R042
 - guide fields unlock after 9k; render-root geometry residuals ramp 10k to 20k
 - render child-spread coverage unlock: 1k to 7k
 - shape detail freeze: through 14k, then shared gradual unlock
@@ -150,10 +156,10 @@ accepted mean absolute prior and adds the population-stable concentration term
 ## Representation Lineage
 
 The retired directional decomposition and old gravity/sag controls are no
-longer present. R039 uses only length, normalized 3D endpoint direction, and
+longer present. R042 uses only length, normalized 3D endpoint direction, and
 guide-owned brush stiffness for the ordinary base centerline. Curl/frizz and
 clump remain separate explicit controls; curl/frizz have zero effective scale
-in this short-fur candidate.
+in this short-fur baseline.
 R035 keeps R034's accepted segment repair, positive unbounded guide length, and
 semantic opacity. It replaces direct render-root width learning with a complete
 guide/render width hierarchy and removes the absolute root-width range. R036
@@ -210,15 +216,18 @@ Numerical epsilon clamps, normalized directions, RGB/opacity domains, tip
 ratios, and clump interpolation weights are representation or semantic domains
 rather than animal-specific physical thresholds; they remain.
 
-The active candidate design is defined in
+The active representation design is defined in
 [`brush_curve_representation.md`](brush_curve_representation.md): straight
 root-to-tip length, one guide-owned direction-aware quadratic curve, and
-final-curve Gaussian allocation. R038's complete historical run remains
-recorded in
+final-curve Gaussian allocation. R038 and R039 remain historical structural
+evidence in
 [`r038_brush_curve_and_9k_lifecycle.md`](r038_brush_curve_and_9k_lifecycle.md),
-but its checkpoint schema is not an executable fallback for R039.
-R039's scoped implementation and pre-training evidence are recorded in
+and
 [`r039_one_turn_brush_centerline.md`](r039_one_turn_brush_centerline.md).
+R040 establishes independent dense render roots, R041 accelerates their exact
+surface graph, and R042 accelerates exact lifecycle selection. Their accepted
+result is recorded in
+[`r042_exact_lifecycle_selection_acceleration.md`](r042_exact_lifecycle_selection_acceleration.md).
 
 ## Execution Memory Contract
 
@@ -235,8 +244,8 @@ PyTorch. This prevents incompatible cached blocks from growing until WDDM
 pages CUDA memory into system RAM. The memory guard also checks total device
 usage because per-process `nvidia-smi` accounting is unavailable under WDDM.
 
-Measured locally at the 30k population (`322,222` render roots, `14.21M`
-preclip Gaussians):
+The original memory repair was measured locally at a historical 30k population
+(`322,222` render roots, `14.21M` preclip Gaussians):
 
 - old second-step backward: `216.22 s`; full card usage: about `31.99 GB`;
 - repaired 30-step multi-view steady state: `1.638 s/iteration`;
@@ -254,3 +263,8 @@ from `18.45` to `12.34 GB`.
 
 No image resolution, root/strand/Gaussian count, segment budget, renderer
 setting, loss, or optimization schedule was reduced for this repair.
+
+The formal R042 H100 run validates the same execution contract at `469737`
+independent render roots. It completes in `11263.974 s` with `5319498`
+training-metric Gaussians and `13187.99 MB` peak allocated CUDA memory, without
+OOM, restart, fallback, or use of a second GPU.

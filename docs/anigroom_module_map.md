@@ -1,10 +1,10 @@
 # AniGroom Module Map
 
-Current source of truth: `docs/current_route.md`. R038 remains the last accepted
-structural/lifecycle result while R039 is the strict-schema representation
-candidate. R036 remains the frozen higher-PSNR metric control. R039 retains the
-accepted interpolation, hierarchy, and finite 600-9000 render lifecycle while
-replacing the centerline construction only.
+Current source of truth: `docs/current_route.md`. R042 is the active
+structural/lifecycle result; R036 remains the frozen higher-PSNR metric
+control. R042 retains the accepted flow, interpolation, hierarchy, one-turn
+centerline, and finite 600-9000 render lifecycle while using 400k independent
+render roots and exact accelerated graph/lifecycle selection.
 
 ## Flow Initialization
 
@@ -15,12 +15,14 @@ replacing the centerline construction only.
 ## Strand-To-Gaussian Representation
 
 - Code: `anigroom/grooming/strand_gaussians.py`.
-- It owns explicit groom decoding, strand construction, child expansion,
-  adaptive segment counts, and strand-to-Gaussian conversion.
-- R039 constructs one guide-owned quadratic normal-to-groom curve and allocates
+- It owns explicit groom decoding, strand construction, adaptive segment
+  counts, and strand-to-Gaussian conversion.
+- R042 constructs one guide-owned quadratic normal-to-groom curve and allocates
   Gaussians from its final arc/turn complexity. Curve strength is multiplied by
   the continuous normal/direction difference. No second interior deformation
   is present in the executable schema.
+- The active route uses `child_count=1`. Every render root owns one independent
+  strand; deterministic tangent-offset child expansion is not active.
 - Guide/render length, width, and child-spread controls use reference-relative,
   positive-unbounded coordinates; opacity and tip-width ratio use semantic
   unit intervals, while width taper is positive-unbounded. Segment allocation is linear in absolute physical
@@ -33,14 +35,14 @@ replacing the centerline construction only.
 - Generic runner: `scripts/server/run_white_tiger_stage1.sh`; `CONFIG_PATH` is
   mandatory and has no fallback.
 - Frozen R036 metric-control config: `configs/stage1_baseline.env`.
-- Active R038 result: train/test composite PSNR `33.03637 / 32.34588`; best
-  test composite PSNR `32.51677` at 29k.
-- Active config and lock: `configs/r038_brush_curve_0_30k.env` and
-  `configs/r038_brush_curve.lock.json`.
-- R039 candidate config: `configs/r039_brush_centerline_0_30k.env`. It cannot
-  load an R038 checkpoint because the groom schema intentionally changed.
+- Active R042 result: train/test composite PSNR `33.48265 / 32.51543`; best
+  test composite PSNR `32.71918` at 29k.
+- Active behavior config and lock:
+  `configs/r040_child1_dense_render_0_30k.env` and
+  `configs/r042_exact_lifecycle_selection.lock.json`.
+- R038/R039 configs remain historical evidence and are not launcher fallbacks.
 - Frozen R036 metric-control lock: `configs/stage1_baseline.lock.json`.
-- Evidence: `docs/r038_brush_curve_and_9k_lifecycle.md` and
+- Evidence: `docs/r042_exact_lifecycle_selection_acceleration.md` and
   `docs/accept_line_recovery_ledger.md`.
 
 The active schema is strict and has no historical checkpoint migration.
@@ -60,8 +62,9 @@ The active schema is strict and has no historical checkpoint migration.
 - The formal render-root lifecycle has one path only: `pixel_to_root` evidence,
   intrinsic local maxima, and topology-local split/delete placement. It runs
   every 100 iterations from 600 through 9000 with no event budget, then stops
-  both updates and lifecycle-only statistics. Old target-directed placement
-  branches are no longer present.
+  both updates and lifecycle-only statistics. Exact surface graphs and fixed
+  mesh adjacency are reused without changing K, selected roots, or ordering.
+  Old target-directed placement branches are no longer present.
 - Densification and pruning remain part of the multi-level training method,
   not standalone synthetic replacements.
 
