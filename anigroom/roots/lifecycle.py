@@ -8,7 +8,8 @@ for rebuilding optimizers after insertion/pruning.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 import torch
 
@@ -112,6 +113,12 @@ class RootStructureUpdate:
     new_barycentric: torch.Tensor
     prune_mask: torch.Tensor
     scores: dict[str, torch.Tensor]
+    timing: dict[str, float] = field(default_factory=dict)
+
+
+def _synchronize_for_timing(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
 
 
 def normalized_root_need(stats: RootStats, score_mode: str = "raw") -> dict[str, torch.Tensor]:
@@ -480,6 +487,7 @@ def propose_split_children(
     candidate_rings: int = 3,
     candidate_face_count: int = 32,
     min_child_distance: float = 0.0,
+    timing: dict[str, float] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Place split children by choosing locally emptier surface candidates.
 
@@ -492,6 +500,15 @@ def propose_split_children(
 
     state.validate()
     if parent_indices.numel() == 0:
+        if timing is not None:
+            timing.update(
+                {
+                    "candidate_generation_seconds": 0.0,
+                    "candidate_knn_seconds": 0.0,
+                    "candidate_selection_seconds": 0.0,
+                    "candidate_count": 0.0,
+                }
+            )
         return (
             state.face_ids.new_empty((0,)),
             state.face_ids.new_empty((0,)),
@@ -503,6 +520,9 @@ def propose_split_children(
     all_parents = []
     if vertices is None or faces is None:
         raise ValueError("vertices and faces are required for formal root split; no fallback child placement is allowed")
+    if timing is not None:
+        _synchronize_for_timing(state.points.device)
+        stage_started = time.perf_counter()
     candidate_faces, candidate_bary, candidate_points = _multi_face_child_candidates(
         state,
         parent_indices,
@@ -511,6 +531,9 @@ def propose_split_children(
         candidate_face_count=int(candidate_face_count),
         candidate_rings=int(candidate_rings),
     )
+    if timing is not None:
+        _synchronize_for_timing(state.points.device)
+        timing["candidate_generation_seconds"] = float(time.perf_counter() - stage_started)
     nearest_count = max(1, min(int(neighbor_count), int(state.points.shape[0])))
     flat_candidates = candidate_points.reshape(-1, 3)
     local_distance_flat = torch.empty((flat_candidates.shape[0],), device=state.points.device, dtype=state.points.dtype)
@@ -518,6 +541,8 @@ def propose_split_children(
     # A full candidate-to-root distance matrix can reach multiple GB during
     # densification, so compute the kNN distance in chunks.
     candidate_chunk = 1024
+    if timing is not None:
+        stage_started = time.perf_counter()
     for begin in range(0, int(flat_candidates.shape[0]), candidate_chunk):
         end = min(begin + candidate_chunk, int(flat_candidates.shape[0]))
         dist = torch.cdist(flat_candidates[begin:end], state.points)
@@ -532,6 +557,11 @@ def propose_split_children(
             closest_flat[begin:end] = torch.min(dist, dim=-1).values
         too_close = closest_flat.view(candidate_points.shape[0], candidate_points.shape[1]) < float(min_child_distance)
         local_distance = local_distance.masked_fill(too_close, -torch.inf)
+    if timing is not None:
+        _synchronize_for_timing(state.points.device)
+        timing["candidate_knn_seconds"] = float(time.perf_counter() - stage_started)
+        timing["candidate_count"] = float(flat_candidates.shape[0])
+        stage_started = time.perf_counter()
     selected_ids = torch.topk(local_distance, k=min(children_per_parent, candidate_bary.shape[1]), largest=True, dim=-1).indices
     selected = torch.gather(candidate_bary, 1, selected_ids[:, :, None].expand(-1, -1, 3))
     selected_faces = torch.gather(candidate_faces, 1, selected_ids)
@@ -539,6 +569,9 @@ def propose_split_children(
         all_bary.append(selected[:, child_idx])
         all_faces.append(selected_faces[:, child_idx])
         all_parents.append(parent_indices)
+    if timing is not None:
+        _synchronize_for_timing(state.points.device)
+        timing["candidate_selection_seconds"] = float(time.perf_counter() - stage_started)
     return torch.cat(all_parents, dim=0), torch.cat(all_faces, dim=0), torch.cat(all_bary, dim=0)
 
 
@@ -573,12 +606,20 @@ def propose_structure_update(
     vertices: torch.Tensor | None = None,
     faces: torch.Tensor | None = None,
 ) -> RootStructureUpdate:
+    lifecycle_timing: dict[str, float] = {}
+    _synchronize_for_timing(state.points.device)
+    total_started = time.perf_counter()
+    stage_started = time.perf_counter()
     if str(densify.parent_selection_mode) == "score":
         parents, scores = select_densify_parents(stats, densify)
     elif str(densify.parent_selection_mode) == "evidence_local_max":
         parents, scores = select_local_max_densify_parents(state, stats, densify, faces)
     else:
         raise ValueError(f"unknown densify parent_selection_mode: {densify.parent_selection_mode}")
+    _synchronize_for_timing(state.points.device)
+    lifecycle_timing["parent_selection_seconds"] = float(time.perf_counter() - stage_started)
+    child_timing: dict[str, float] = {}
+    stage_started = time.perf_counter()
     child_parent_indices, new_face_ids, new_barycentric = propose_split_children(
         state,
         parents,
@@ -590,11 +631,19 @@ def propose_structure_update(
         candidate_rings=densify.candidate_rings,
         candidate_face_count=densify.candidate_face_count,
         min_child_distance=densify.min_child_distance,
+        timing=child_timing,
     )
+    _synchronize_for_timing(state.points.device)
+    lifecycle_timing["child_placement_seconds"] = float(time.perf_counter() - stage_started)
+    lifecycle_timing.update(child_timing)
+    stage_started = time.perf_counter()
     prune_mask = select_prune_mask(stats, prune)
     if densify.replace_parent and parents.numel() > 0:
         prune_mask = prune_mask.clone()
         prune_mask[parents] = True
+    _synchronize_for_timing(state.points.device)
+    lifecycle_timing["prune_selection_seconds"] = float(time.perf_counter() - stage_started)
+    lifecycle_timing["selection_total_seconds"] = float(time.perf_counter() - total_started)
     return RootStructureUpdate(
         parent_indices=parents,
         child_parent_indices=child_parent_indices,
@@ -602,6 +651,7 @@ def propose_structure_update(
         new_barycentric=new_barycentric,
         prune_mask=prune_mask,
         scores=scores,
+        timing=lifecycle_timing,
     )
 
 

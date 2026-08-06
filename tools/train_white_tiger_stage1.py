@@ -6225,6 +6225,12 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 lifecycle_timing["render_selection_seconds"] = float(
                     time.perf_counter() - selection_started
                 )
+                lifecycle_timing.update(
+                    {
+                        f"render_{name}": float(value)
+                        for name, value in update.timing.items()
+                    }
+                )
                 if (
                     should_densify
                     and float(config.densify_min_contribution) > 0.0
