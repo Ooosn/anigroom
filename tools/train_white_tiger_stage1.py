@@ -1388,29 +1388,6 @@ def effective_groom_graph_smoothness(
     return torch.stack(terms).sum()
 
 
-def strand_shape_consistency_loss(
-    strands: torch.Tensor,
-    edges: torch.Tensor,
-    observation_confidence: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Local NeuralFur-style shape consistency on neighboring guide strands."""
-    if edges.numel() == 0 or strands.shape[0] < 2 or strands.shape[1] < 4:
-        return strands.new_tensor(0.0)
-    src, dst = edges[:, 0], edges[:, 1]
-    dirs = F.normalize(strands[:, 1:] - strands[:, :-1], dim=-1, eps=1.0e-8)
-    curvature = dirs[:, 1:] - dirs[:, :-1]
-    if observation_confidence is None:
-        edge_weight = strands.new_ones((edges.shape[0], 1, 1))
-    else:
-        conf = observation_confidence.detach().reshape(-1).clamp(0.0, 1.0)
-        edge_weight = (0.35 + (1.0 - torch.minimum(conf[src], conf[dst]))).view(-1, 1, 1)
-    direction_diff = (dirs[src] - dirs[dst]).square()
-    curvature_diff = (curvature[src] - curvature[dst]).square()
-    direction_term = (direction_diff * edge_weight).sum() / (edge_weight.sum().clamp_min(1.0) * direction_diff.shape[1] * direction_diff.shape[2])
-    curvature_term = (curvature_diff * edge_weight).sum() / (edge_weight.sum().clamp_min(1.0) * curvature_diff.shape[1] * curvature_diff.shape[2])
-    return 0.65 * direction_term + 0.35 * curvature_term
-
-
 @torch.no_grad()
 def groom_parameter_stats(field: GroomParameterField) -> dict[str, dict[str, float]]:
     groom = field.decode()
@@ -1815,7 +1792,6 @@ class Stage1Config:
     smooth_graph_k: int = 8
     smooth_field_metric: str = "ambient"
     smooth_weight: float = 0.04
-    strand_shape_smooth_weight: float = 0.0
     effective_smooth_weight: float = 0.0
     root_move_reg_weight: float = 0.003
     compute_lpips: bool = False
@@ -3062,21 +3038,6 @@ class WhiteTigerStage1Model(torch.nn.Module):
             delta = torch.tanh(self.child_color_delta_raw[root_ids, child_ids]) * float(self.local_child_color_scale)
             colors = (colors + delta[:, None, :]).clamp(0.0, 1.0)
         return colors, opacities
-
-    def guide_strands_for_loss(self, samples: int) -> torch.Tensor:
-        roots, normals, roots_local = self.roots_and_normals()
-        tangents, bitangents = self.tangent_frames(normals)
-        groom = self.apply_guide_controls(self.groom.decode(), roots_local)
-        strands, _, _, _ = build_strands(
-            roots,
-            normals,
-            tangents,
-            bitangents,
-            groom,
-            samples=max(int(samples), 4),
-            shape_normal_mode=self.strand_shape_normal_mode,
-        )
-        return strands
 
     def lifecycle_state(self) -> RootLifecycleState:
         _, _, roots_local = self.roots_and_normals()
@@ -6094,24 +6055,6 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 model.root_observation_confidence,
                 smooth_field_metric=config.smooth_field_metric,
             )
-            strand_shape_samples = min(config.samples, 32)
-            if memory_constrained_activation_checkpointing(model.groom.length_raw.device):
-                strand_shape_loss = activation_checkpoint(
-                    lambda _anchor: strand_shape_consistency_loss(
-                        model.guide_strands_for_loss(strand_shape_samples),
-                        graph_edges,
-                        model.root_observation_confidence,
-                    ),
-                    model.groom.length_raw,
-                    use_reentrant=False,
-                    preserve_rng_state=False,
-                )
-            else:
-                strand_shape_loss = strand_shape_consistency_loss(
-                    model.guide_strands_for_loss(strand_shape_samples),
-                    graph_edges,
-                    model.root_observation_confidence,
-                )
             guide_prior_loss = guide_interpolation_regularization_losses(model, config)
             clean_pred_direction = groom_direction_3d(effective_groom_now, normals_now, tangents_now, bitangents_now)
             clean_flow_smooth_loss = clean_flow_smoothness_loss(
@@ -6145,7 +6088,6 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.smooth_weight * smooth_loss
                 + config.guide_smooth_weight * guide_smooth_loss
                 + config.effective_smooth_weight * effective_smooth_loss
-                + config.strand_shape_smooth_weight * strand_shape_loss
                 + config.guide_prior_weight * guide_prior_loss
                 + config.clean_flow_guide_anchor_weight * guide_clean_flow_loss
                 + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
@@ -6381,7 +6323,6 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "geometry_residual_smooth_loss": float(geometry_residual_smooth_loss.detach().cpu()),
                     "guide_smooth_loss": float(guide_smooth_loss.detach().cpu()),
                     "effective_smooth_loss": float(effective_smooth_loss.detach().cpu()),
-                    "strand_shape_smooth_loss": float(strand_shape_loss.detach().cpu()),
                     "guide_prior_loss": float(guide_prior_loss.detach().cpu()),
                     "clean_flow_guide_anchor_loss": float(guide_clean_flow_loss.detach().cpu()),
                     "clean_flow_3d_smooth_loss": float(clean_flow_smooth_loss.detach().cpu()),
@@ -6752,7 +6693,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="ambient",
     )
     parser.add_argument("--smooth-weight", type=float, default=0.04)
-    parser.add_argument("--strand-shape-smooth-weight", type=float, default=0.0)
     parser.add_argument("--effective-smooth-weight", type=float, default=0.0)
     parser.add_argument("--root-move-reg-weight", type=float, default=0.003)
     parser.add_argument("--compute-lpips", action="store_true")
@@ -6912,7 +6852,6 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         smooth_graph_k=args.smooth_graph_k,
         smooth_field_metric=args.smooth_field_metric,
         smooth_weight=args.smooth_weight,
-        strand_shape_smooth_weight=args.strand_shape_smooth_weight,
         effective_smooth_weight=args.effective_smooth_weight,
         root_move_reg_weight=args.root_move_reg_weight,
         compute_lpips=args.compute_lpips,

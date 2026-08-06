@@ -135,7 +135,6 @@ required_config=(
   SMOOTH_GRAPH_K
   SMOOTH_FIELD_METRIC
   SMOOTH_WEIGHT
-  STRAND_SHAPE_SMOOTH_WEIGHT
   EFFECTIVE_SMOOTH_WEIGHT
   ROOT_MOVE_REG_WEIGHT
   RANDOM_BACKING_COLOR
@@ -294,7 +293,6 @@ cmd=(
   --smooth-graph-k "$SMOOTH_GRAPH_K"
   --smooth-field-metric "$SMOOTH_FIELD_METRIC"
   --smooth-weight "$SMOOTH_WEIGHT"
-  --strand-shape-smooth-weight "$STRAND_SHAPE_SMOOTH_WEIGHT"
   --effective-smooth-weight "$EFFECTIVE_SMOOTH_WEIGHT"
   --root-move-reg-weight "$ROOT_MOVE_REG_WEIGHT"
   --backing-color-min "$BACKING_COLOR_MIN"
