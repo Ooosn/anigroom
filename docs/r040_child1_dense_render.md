@@ -3,8 +3,10 @@
 ## Status
 
 R040 is an isolated candidate derived from the completed R039 route. R039 is
-unchanged and remains the direct comparison. R040 is not accepted until the
-full-resolution memory gate and structural validation pass.
+unchanged and remains the direct comparison. R040 has passed the
+full-resolution correctness, memory, and first-lifecycle gates. It is not an
+accepted baseline because long-run structure, quality, and runtime have not
+been measured.
 
 ## Question
 
@@ -94,3 +96,80 @@ Only after this gate passes may R040 proceed to a measured training interval.
 The next decision is based on fixed-protocol pure-fur structure, speed, memory,
 and composite PSNR together. A denser secondary residual-guide layer is not
 part of this first experiment.
+
+## Full-Resolution Preflight
+
+The exact R040 configuration completed a 1920x1080 H100 forward, backward, and
+evaluation batch without fallback:
+
+- source commit: `573e833b9d19b48f9273e306b4a2bab8731ac081`;
+- render roots / child count: `400000 / 1`;
+- initial render graph: `3200000` directed edges, built in `18.666 s`;
+- generated Gaussians: `4236979`;
+- peak allocated CUDA memory: `8946.78 MB`;
+- `nvidia-smi` process memory: `9724 MB`;
+- post-evaluation allocated / reserved memory: `1134.66 / 1710 MB`;
+- process exit status: zero.
+
+The preflight output is:
+`/home/wangyy/anigroom-r040-child1-runtime-20260806/outputs/r040_child1_preflight_h100_20260806_batch_preflight`.
+
+## 700-Iteration Lifecycle Gate
+
+A separate from-zero gate used the exact R040 model and training values, with
+only the terminal iteration, evaluation interval, and checkpoint iterations
+shortened to expose the first two lifecycle events. It completed normally and
+saved both 600- and 700-iteration checkpoints:
+
+- output:
+  `/home/wangyy/anigroom-r040-child1-runtime-20260806/outputs/r040_child1_from_zero_700_h100_20260806`;
+- final train/test composite PSNR: `20.59137 / 20.77921`;
+- final roots: `402252`;
+- generated Gaussians before the 700 event: `4246569`;
+- peak allocated CUDA memory: `9831.82 MB`;
+- peak reserved CUDA memory: `11638 MB`;
+- highest sampled `nvidia-smi` process memory: `11312 MB`;
+- elapsed time including evaluation every 100 iterations and two graph
+  rebuilds: `359.321 s`;
+- exit status: zero.
+
+The uncapped absolute threshold does not cause global growth in this gate:
+
+| Iteration | Roots before | Above threshold | Local maxima / parents | Children | Deleted parents | Roots after |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 600 | 400000 | 26513 | 901 | 1802 | 901 | 400901 |
+| 700 | 400901 | 30601 | 1351 | 2702 | 1351 | 402252 |
+
+R039 selects `1269` and `1663` parents at the same two events, so R040 is not
+silently densifying more roots merely because it starts with four times as
+many independent roots. The threshold-pass fraction is also lower in R040.
+
+## Measured Bottleneck
+
+The remaining concern is runtime, not memory. R040 rebuilds a roughly `3.2M`
+edge render graph after each lifecycle event:
+
+- iteration 600: `18.289 s`;
+- iteration 700: `18.585 s`.
+
+The matched R039 events rebuild roughly `0.81M` edges in `1.568-1.601 s`.
+Therefore R040 passes the minimal gate but cannot proceed directly to a 30k
+acceptance run. The next experiment must preserve the parameter-field
+semantics while avoiding repeated full reconstruction of the dense render
+graph. Raising K or restoring sample-level strand smoothing is explicitly not
+the response to this bottleneck.
+
+## Gate Decision
+
+R040 is a valid candidate representation:
+
+- no hidden child expansion remains;
+- the full-resolution differentiable path is intact;
+- memory is safely below the 25 GiB guard;
+- uncapped evidence/local-maximum densification remains sparse;
+- optimizer state migrates for all 21 state-bearing parameters;
+- checkpoints at both lifecycle boundaries are loadable artifacts.
+
+It is not yet the baseline. R039 remains frozen while R040 advances only after
+the dense-graph runtime issue is addressed and measured without changing the
+grooming objective.
