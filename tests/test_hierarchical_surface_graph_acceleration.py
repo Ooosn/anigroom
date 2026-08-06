@@ -118,6 +118,27 @@ def test_accelerated_graph_preserves_duplicate_support_expansion() -> None:
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+def test_accelerated_graph_expands_when_direct_candidates_include_self() -> None:
+    points = torch.tensor(
+        [[float(index), float(index % 2), 0.0] for index in range(6)],
+        dtype=torch.float32,
+    )
+    support = torch.tensor(
+        [
+            [0, 1],
+            [0, 2],
+            [1, 2],
+            [2, 3],
+            [3, 4],
+            [4, 0],
+        ],
+        dtype=torch.long,
+    )
+    actual = build_hierarchical_surface_edges(points, support, neighbor_count=3)
+    expected = _reference_edges(points, support, neighbor_count=3)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_cuda_support_matches_cpu_reference_exactly() -> None:
     vertices = np.asarray(

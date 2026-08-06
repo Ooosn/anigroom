@@ -1096,7 +1096,7 @@ def build_hierarchical_surface_edges(
 
     sorted_support = torch.sort(support, dim=1).values
     duplicate_support = (sorted_support[:, 1:] == sorted_support[:, :-1]).any(dim=1)
-    candidate_counts = bucket_counts[support].sum(dim=1)
+    candidate_counts = bucket_counts[support].sum(dim=1) - 1
     fallback = duplicate_support | (candidate_counts < k)
     dst_out = torch.empty((root_count, k), device=points.device, dtype=torch.long)
 
