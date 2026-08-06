@@ -2070,6 +2070,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         )
         self._guide_smooth_graph_k = -1
         self._guide_surface_interpolator: SurfaceFieldInterpolator | None = None
+        self._guide_support_report: dict[str, float | int] = {}
         self.initialize_default_groom()
         self.rebuild_guide_surface_interpolation()
 
@@ -2138,20 +2139,26 @@ class WhiteTigerStage1Model(torch.nn.Module):
         return self.guide_length_raw is not None and self.guide_points_local.numel() > 0
 
     def invalidate_guide_interpolation_cache(self) -> None:
+        self.invalidate_guide_surface_support_cache()
         device = self.vertices.device
-        self.guide_interp_ids_cache = torch.empty((0, 0), device=device, dtype=torch.long)
-        self.guide_interp_vertex_paths_cache = torch.empty((0, 0, 3), device=device)
         self.guide_smooth_edges_cache = torch.empty((0, 2), device=device, dtype=torch.long)
         self.guide_smooth_distances_cache = torch.empty((0,), device=device)
         self.guide_smooth_area_cache = torch.empty((0,), device=device)
         self._guide_smooth_graph_k = -1
 
     @torch.no_grad()
-    def rebuild_guide_surface_interpolation(self) -> None:
+    def invalidate_guide_surface_support_cache(self) -> None:
+        device = self.vertices.device
+        self.guide_interp_ids_cache = torch.empty((0, 0), device=device, dtype=torch.long)
+        self.guide_interp_vertex_paths_cache = torch.empty((0, 0, 3), device=device)
+        self._guide_support_report = {}
+
+    @torch.no_grad()
+    def rebuild_guide_surface_interpolation(self) -> dict[str, float | int]:
         self.invalidate_guide_interpolation_cache()
         if not self.guide_enabled():
             self._guide_surface_interpolator = None
-            return
+            return {}
         self._guide_surface_interpolator = SurfaceFieldInterpolator(
             vertices=self.vertices,
             faces=self.faces,
@@ -2160,9 +2167,22 @@ class WhiteTigerStage1Model(torch.nn.Module):
             neighbor_count=self.guide_interpolation_k,
             device=self.vertices.device,
         )
+        return self.rebuild_guide_surface_support()
+
+    @torch.no_grad()
+    def rebuild_guide_surface_support(self) -> dict[str, float | int]:
+        """Recompute exact render-to-guide support without rebuilding guide topology."""
+
+        self.invalidate_guide_surface_support_cache()
+        if not self.guide_enabled():
+            return {}
+        if self._guide_surface_interpolator is None:
+            raise RuntimeError("guide surface interpolator is unavailable")
         support = self._guide_surface_interpolator.build_support(self.anchor_local, self.face_ids)
         self.guide_interp_ids_cache = support.indices.detach()
         self.guide_interp_vertex_paths_cache = support.vertex_path_distances.detach()
+        self._guide_support_report = dict(support.report)
+        return dict(self._guide_support_report)
 
     @torch.no_grad()
     def guide_interpolation_support(self) -> SurfaceSupport:
@@ -2173,11 +2193,15 @@ class WhiteTigerStage1Model(torch.nn.Module):
             min(int(self.guide_interpolation_k), int(self.guide_points_local.shape[0])),
         )
         if tuple(self.guide_interp_ids_cache.shape) != expected:
-            self.rebuild_guide_surface_interpolation()
+            if self._guide_surface_interpolator is None:
+                self.rebuild_guide_surface_interpolation()
+            else:
+                self.rebuild_guide_surface_support()
         return SurfaceSupport(
             indices=self.guide_interp_ids_cache,
             vertex_path_distances=self.guide_interp_vertex_paths_cache,
             report={
+                **self._guide_support_report,
                 "query_count": int(self.guide_interp_ids_cache.shape[0]),
                 "neighbor_count": int(self.guide_interp_ids_cache.shape[1]),
             },
@@ -3374,8 +3398,12 @@ class WhiteTigerStage1Model(torch.nn.Module):
             child_length_conf = old_length_conf.new_empty((0,))
         self.clean_flow_length_target = apply_attribute_update(old_length_target, update, child_length_target).detach().clamp_min(0.0)
         self.clean_flow_length_confidence = apply_attribute_update(old_length_conf, update, child_length_conf).detach().clamp(0.0, 1.0)
-        self.rebuild_guide_surface_interpolation()
-        return {"old_root_count": old_count, "root_count_after": new_count}
+        support_report = self.rebuild_guide_surface_support()
+        return {
+            "old_root_count": old_count,
+            "root_count_after": new_count,
+            "guide_support_rebuild": support_report,
+        }
 
 
 @torch.no_grad()
