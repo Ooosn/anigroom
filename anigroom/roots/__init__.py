@@ -2,6 +2,7 @@
 
 from .lifecycle import (
     DensifyConfig,
+    FaceAdjacencyIndex,
     PruneConfig,
     RootLifecycleState,
     RootStats,
@@ -15,6 +16,7 @@ from .statistics import RootStatsSummary, RootStatsWindow
 
 __all__ = [
     "DensifyConfig",
+    "FaceAdjacencyIndex",
     "PruneConfig",
     "RootLifecycleState",
     "RootStats",

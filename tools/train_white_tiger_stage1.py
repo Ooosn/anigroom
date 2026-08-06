@@ -105,6 +105,7 @@ from anigroom.projection import (  # noqa: E402
 )
 from anigroom.roots.lifecycle import (  # noqa: E402
     DensifyConfig,
+    FaceAdjacencyIndex,
     PruneConfig,
     RootLifecycleState,
     RootStructureUpdate,
@@ -5107,6 +5108,7 @@ def propose_guide_densify_update(
     model: WhiteTigerStage1Model,
     stats,
     config: Stage1Config,
+    face_adjacency_index: FaceAdjacencyIndex,
 ) -> tuple[RootStructureUpdate | None, dict[str, float | int | str | dict[str, object]]]:
     if not model.guide_enabled():
         return None, {"enabled": 0, "reason": "guide_disabled"}
@@ -5179,6 +5181,7 @@ def propose_guide_densify_update(
         candidate_rings=int(config.guide_densify_candidate_rings),
         candidate_face_count=int(config.guide_densify_candidate_face_count),
         min_child_distance=float(config.guide_densify_min_child_distance),
+        face_adjacency_index=face_adjacency_index,
     )
     prune_mask = torch.zeros((guide_count,), device=roots_local.device, dtype=torch.bool)
     update = RootStructureUpdate(
@@ -5764,6 +5767,13 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         k=config.smooth_graph_k,
     )
     setup_progress("guide_graph_done", **guide_graph_report)
+    face_adjacency_started = time.perf_counter()
+    face_adjacency_index = FaceAdjacencyIndex.from_faces(model.faces)
+    setup_progress(
+        "lifecycle_face_adjacency_done",
+        face_count=int(face_adjacency_index.face_count),
+        build_seconds=float(time.perf_counter() - face_adjacency_started),
+    )
     (output_dir / "root_graph.json").write_text(
         json.dumps(
             {"render": graph_report, "guide": guide_graph_report},
@@ -6221,6 +6231,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     prune_cfg,
                     vertices=model.vertices,
                     faces=model.faces,
+                    face_adjacency_index=face_adjacency_index,
                 )
                 lifecycle_timing["render_selection_seconds"] = float(
                     time.perf_counter() - selection_started
@@ -6276,7 +6287,12 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 guide_changed = False
                 if should_guide_densify:
                     guide_update_started = time.perf_counter()
-                    guide_update, guide_record = propose_guide_densify_update(model, stats, config)
+                    guide_update, guide_record = propose_guide_densify_update(
+                        model,
+                        stats,
+                        config,
+                        face_adjacency_index,
+                    )
                     if guide_update is not None and guide_update.new_barycentric.numel() > 0:
                         guide_record["spatial_selected_parents"] = lifecycle_spatial_report(
                             model.guide_lifecycle_state(),

@@ -243,6 +243,7 @@ def select_local_max_densify_parents(
     stats: RootStats,
     config: DensifyConfig,
     faces: torch.Tensor | None,
+    face_adjacency_index: FaceAdjacencyIndex | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Select evidence roots after topology-local non-maximum suppression.
 
@@ -294,6 +295,7 @@ def select_local_max_densify_parents(
         faces,
         candidate_rings=int(config.candidate_rings),
         candidate_face_count=max(1, int(config.candidate_face_count)),
+        face_adjacency_index=face_adjacency_index,
     ).to(device=need.device, dtype=torch.long)
     local_face_max = face_max[face_neighborhoods].amax(dim=1)
     local_keep = need[candidates] >= (local_face_max[inverse] - 1.0e-12)
@@ -374,7 +376,7 @@ def _surface_barycentric_templates(device: torch.device, dtype: torch.dtype, can
     return torch.cat([center, coarse, fine], dim=0)
 
 
-def _build_face_adjacency(faces: torch.Tensor) -> list[list[int]]:
+def _build_face_adjacency(faces: torch.Tensor) -> tuple[tuple[int, ...], ...]:
     """Build triangle face adjacency through shared edges.
 
     This is used only at structure-update time.  It deliberately follows mesh
@@ -398,7 +400,30 @@ def _build_face_adjacency(faces: torch.Tensor) -> list[list[int]]:
             for dst in linked_faces:
                 if src != dst:
                     adjacency[src].add(dst)
-    return [sorted(items) for items in adjacency]
+    return tuple(tuple(sorted(items)) for items in adjacency)
+
+
+@dataclass(frozen=True)
+class FaceAdjacencyIndex:
+    """Immutable mesh-face adjacency shared by lifecycle operations."""
+
+    neighbors: tuple[tuple[int, ...], ...]
+
+    @classmethod
+    def from_faces(cls, faces: torch.Tensor) -> FaceAdjacencyIndex:
+        if faces.ndim != 2 or faces.shape[-1] != 3:
+            raise ValueError("faces must have shape [F, 3]")
+        return cls(neighbors=_build_face_adjacency(faces))
+
+    @property
+    def face_count(self) -> int:
+        return len(self.neighbors)
+
+    def validate_faces(self, faces: torch.Tensor) -> None:
+        if faces.ndim != 2 or faces.shape[-1] != 3:
+            raise ValueError("faces must have shape [F, 3]")
+        if int(faces.shape[0]) != self.face_count:
+            raise ValueError("face adjacency index does not match mesh face count")
 
 
 def _topology_face_neighborhoods(
@@ -407,12 +432,17 @@ def _topology_face_neighborhoods(
     *,
     candidate_rings: int,
     candidate_face_count: int,
+    face_adjacency_index: FaceAdjacencyIndex | None = None,
 ) -> torch.Tensor:
     """Return padded topology-ring face neighborhoods for parent faces."""
 
     if parent_faces.numel() == 0:
         return parent_faces.new_empty((0, 0))
-    adjacency = _build_face_adjacency(faces)
+    if face_adjacency_index is None:
+        adjacency = _build_face_adjacency(faces)
+    else:
+        face_adjacency_index.validate_faces(faces)
+        adjacency = face_adjacency_index.neighbors
     limit = max(1, int(candidate_face_count))
     max_ring = max(0, int(candidate_rings))
     rows: list[list[int]] = []
@@ -450,6 +480,7 @@ def _multi_face_child_candidates(
     *,
     candidate_face_count: int,
     candidate_rings: int,
+    face_adjacency_index: FaceAdjacencyIndex | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate nearby cross-face child candidates around each parent root."""
 
@@ -466,6 +497,7 @@ def _multi_face_child_candidates(
         faces,
         candidate_rings=int(candidate_rings),
         candidate_face_count=max(1, int(candidate_face_count)),
+        face_adjacency_index=face_adjacency_index,
     )
     tri = vertices[faces[face_ids]]
     candidate_points = (tri[:, :, None] * templates[None, None, :, :, None]).sum(dim=3)
@@ -487,6 +519,7 @@ def propose_split_children(
     candidate_rings: int = 3,
     candidate_face_count: int = 32,
     min_child_distance: float = 0.0,
+    face_adjacency_index: FaceAdjacencyIndex | None = None,
     timing: dict[str, float] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Place split children by choosing locally emptier surface candidates.
@@ -530,6 +563,7 @@ def propose_split_children(
         faces,
         candidate_face_count=int(candidate_face_count),
         candidate_rings=int(candidate_rings),
+        face_adjacency_index=face_adjacency_index,
     )
     if timing is not None:
         _synchronize_for_timing(state.points.device)
@@ -537,6 +571,7 @@ def propose_split_children(
     nearest_count = max(1, min(int(neighbor_count), int(state.points.shape[0])))
     flat_candidates = candidate_points.reshape(-1, 3)
     local_distance_flat = torch.empty((flat_candidates.shape[0],), device=state.points.device, dtype=state.points.dtype)
+    closest_flat = torch.empty_like(local_distance_flat) if float(min_child_distance) > 0.0 else None
     # Candidate count is parent_count * candidate_face_count * template_count.
     # A full candidate-to-root distance matrix can reach multiple GB during
     # densification, so compute the kNN distance in chunks.
@@ -548,13 +583,10 @@ def propose_split_children(
         dist = torch.cdist(flat_candidates[begin:end], state.points)
         nearest_values = torch.topk(dist, k=nearest_count, largest=False, dim=-1).values
         local_distance_flat[begin:end] = nearest_values[:, -1]
+        if closest_flat is not None:
+            closest_flat[begin:end] = nearest_values[:, 0]
     local_distance = local_distance_flat.view(candidate_points.shape[0], candidate_points.shape[1])
-    if float(min_child_distance) > 0.0:
-        closest_flat = torch.empty((flat_candidates.shape[0],), device=state.points.device, dtype=state.points.dtype)
-        for begin in range(0, int(flat_candidates.shape[0]), candidate_chunk):
-            end = min(begin + candidate_chunk, int(flat_candidates.shape[0]))
-            dist = torch.cdist(flat_candidates[begin:end], state.points)
-            closest_flat[begin:end] = torch.min(dist, dim=-1).values
+    if closest_flat is not None:
         too_close = closest_flat.view(candidate_points.shape[0], candidate_points.shape[1]) < float(min_child_distance)
         local_distance = local_distance.masked_fill(too_close, -torch.inf)
     if timing is not None:
@@ -605,6 +637,7 @@ def propose_structure_update(
     *,
     vertices: torch.Tensor | None = None,
     faces: torch.Tensor | None = None,
+    face_adjacency_index: FaceAdjacencyIndex | None = None,
 ) -> RootStructureUpdate:
     lifecycle_timing: dict[str, float] = {}
     _synchronize_for_timing(state.points.device)
@@ -613,7 +646,13 @@ def propose_structure_update(
     if str(densify.parent_selection_mode) == "score":
         parents, scores = select_densify_parents(stats, densify)
     elif str(densify.parent_selection_mode) == "evidence_local_max":
-        parents, scores = select_local_max_densify_parents(state, stats, densify, faces)
+        parents, scores = select_local_max_densify_parents(
+            state,
+            stats,
+            densify,
+            faces,
+            face_adjacency_index=face_adjacency_index,
+        )
     else:
         raise ValueError(f"unknown densify parent_selection_mode: {densify.parent_selection_mode}")
     _synchronize_for_timing(state.points.device)
@@ -631,6 +670,7 @@ def propose_structure_update(
         candidate_rings=densify.candidate_rings,
         candidate_face_count=densify.candidate_face_count,
         min_child_distance=densify.min_child_distance,
+        face_adjacency_index=face_adjacency_index,
         timing=child_timing,
     )
     _synchronize_for_timing(state.points.device)
