@@ -81,3 +81,82 @@ The current placement assigns four or five G1 roots to every primary guide,
 while the primary-cell area proxy varies from 17 to 140 dense candidates. This
 8.24x variation is a concrete local-density risk even though the global count
 is 20k; it must be measured rather than hidden by adding more roots.
+
+## Fixed-Count Representation Audit
+
+The follow-up audit held the G1 population at exactly 20,000 and solved the
+least-squares upper bound for reproducing R043's 16k render-root residual field.
+It compared the checkpoint topology against an area-proportional topology. The
+latter retained every primary-guide anchor, allocated the remaining roots from
+surface-area samples according to each primary guide's surface cell, and used
+local FPS inside each cell. No training configuration or accepted baseline was
+changed.
+
+Reports:
+
+```text
+/home/wangyy/anigroom-r048-regularized-vector-transport-runtime-20260808/audits/r043_16k_into_20k_k4_k8.json
+/home/wangyy/anigroom-r048-regularized-vector-transport-runtime-20260808/audits/r043_16k_into_20k_area_proportional_k4_k8.json
+/home/wangyy/anigroom-r048-regularized-vector-transport-runtime-20260808/audits/r043_16k_into_20k_checkpoint_k1_k2.json
+```
+
+| Placement | Interpolation K | Length explained variance | Direction explained energy |
+| --- | ---: | ---: | ---: |
+| checkpoint | 1 | 17.006% | 28.494% |
+| checkpoint | 2 | 18.837% | 30.746% |
+| checkpoint | 4 | 19.298% | 31.495% |
+| checkpoint | 8 | 18.781% | 30.934% |
+| area proportional | 4 | 19.370% | 31.554% |
+| area proportional | 8 | 18.832% | 31.001% |
+
+Area-proportional placement changed the per-primary population from fixed 4-5
+to 2-8, but improved the K4 upper bound by only 0.072 percentage points for
+length and 0.059 percentage points for direction. Its render-root nearest-node
+distance P95 changed only from 0.008554 to 0.008491, and all 20,000 nodes had
+nonzero interpolation mass in both placements. Placement imbalance is therefore
+not the cause of the observed PSNR gap. K1 and K2 also performed worse than K4,
+so four-node interpolation is not erasing capacity through an unnecessarily
+wide blend.
+
+## Matched 16k Structure Check
+
+R043 and R048 were exported at the same 16k iteration with 100,000 strands, 32
+samples per strand, one child, one uniform material, and the same Blender camera,
+mesh, width, and render settings. The independent full-resolution files are at:
+
+```text
+D:\RTS\_tmp\r043_r048_16k_structure_compare
+```
+
+The selected eight-view composite mean was 32.4775 dB for R043 and 31.6195 dB
+for R048. The pure-strand structure, however, was smoother under R048. Four-root
+Euclidean-neighbor diagnostics on the same 100k exports measured:
+
+| Statistic | R043 render-root residual | R048 20k G1 residual |
+| --- | ---: | ---: |
+| neighbor arc-length difference P50 | 0.001021 | 0.000224 |
+| neighbor arc-length difference P95 | 0.006150 | 0.002222 |
+| neighbor arc-length difference P99 | 0.010121 | 0.004957 |
+| neighbor direction difference P95 | 11.297 deg | 11.291 deg |
+| strand tortuosity P95 | 1.01251 | 1.00954 |
+
+R043 therefore gains RGB fidelity mainly by allowing high-frequency strand-level
+length variation: its median local length jump is 4.55x R048 and its P95 jump is
+2.77x R048, while local direction continuity is effectively unchanged. This is
+also visible in the matched asset renders: R048 keeps comparable coverage and
+global flow but removes local length patchiness.
+
+## Final Diagnosis
+
+The 20k G1 population is not sparse for its intended role as a smooth structural
+residual field. The missing R043 residual energy is predominantly variation at
+or below the per-strand scale, where 469k independent render-root residuals can
+fit RGB texture and stripe-edge evidence through geometry. Reproducing that
+field by increasing G1 count would weaken the intended geometry/appearance
+separation rather than fix an inactive-node, placement, or interpolation bug.
+
+Keep 20k as the current structural basis. The next method-level improvement
+should route high-frequency RGB evidence through an appearance representation
+instead of asking the structural G1 field to recover R043's per-strand length
+noise. R043 remains the accepted baseline and R048 remains a diagnosed,
+non-promoted experiment.
