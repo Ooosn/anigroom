@@ -184,6 +184,7 @@ for name in "${required_config[@]}"; do
 done
 
 GEOMETRY_RESIDUAL_DOMAIN="${GEOMETRY_RESIDUAL_DOMAIN:-render}"
+GEOMETRY_RESIDUAL_SMOOTH_SCALE="${GEOMETRY_RESIDUAL_SMOOTH_SCALE:-1.0}"
 if [[ "$GEOMETRY_RESIDUAL_DOMAIN" == "secondary_guide" ]]; then
   for name in \
     SECONDARY_GUIDE_ROOT_COUNT \
@@ -314,6 +315,7 @@ cmd=(
   --smooth-graph-k "$SMOOTH_GRAPH_K"
   --smooth-field-metric "$SMOOTH_FIELD_METRIC"
   --smooth-weight "$SMOOTH_WEIGHT"
+  --geometry-residual-smooth-scale "$GEOMETRY_RESIDUAL_SMOOTH_SCALE"
   --effective-smooth-weight "$EFFECTIVE_SMOOTH_WEIGHT"
   --root-move-reg-weight "$ROOT_MOVE_REG_WEIGHT"
   --backing-color-min "$BACKING_COLOR_MIN"

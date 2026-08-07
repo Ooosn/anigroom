@@ -1809,6 +1809,7 @@ class Stage1Config:
     smooth_graph_k: int = 8
     smooth_field_metric: str = "ambient"
     smooth_weight: float = 0.04
+    geometry_residual_smooth_scale: float = 1.0
     effective_smooth_weight: float = 0.0
     root_move_reg_weight: float = 0.003
     compute_lpips: bool = False
@@ -6118,6 +6119,8 @@ def parse_index_override(text: str, default: list[int]) -> list[int]:
 def train_white_tiger_stage1(config: Stage1Config) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("White Tiger Stage 1 requires CUDA")
+    if float(config.geometry_residual_smooth_scale) < 0.0:
+        raise ValueError("geometry residual smooth scale must be non-negative")
     device = torch.device("cuda")
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
@@ -6864,7 +6867,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 geometry_bitangents,
                 geometry_confidence,
             )
-            smooth_loss = smooth_loss + geometry_residual_smooth_loss
+            smooth_loss = (
+                smooth_loss
+                + float(config.geometry_residual_smooth_scale)
+                * geometry_residual_smooth_loss
+            )
             guide_smooth_loss = guide_root_graph_smoothness(
                 model,
                 guide_graph_edges,
@@ -7579,6 +7586,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="ambient",
     )
     parser.add_argument("--smooth-weight", type=float, default=0.04)
+    parser.add_argument("--geometry-residual-smooth-scale", type=float, default=1.0)
     parser.add_argument("--effective-smooth-weight", type=float, default=0.0)
     parser.add_argument("--root-move-reg-weight", type=float, default=0.003)
     parser.add_argument("--compute-lpips", action="store_true")
@@ -7743,6 +7751,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         smooth_graph_k=args.smooth_graph_k,
         smooth_field_metric=args.smooth_field_metric,
         smooth_weight=args.smooth_weight,
+        geometry_residual_smooth_scale=args.geometry_residual_smooth_scale,
         effective_smooth_weight=args.effective_smooth_weight,
         root_move_reg_weight=args.root_move_reg_weight,
         compute_lpips=args.compute_lpips,

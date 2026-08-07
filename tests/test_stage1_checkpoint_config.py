@@ -41,6 +41,15 @@ def test_current_checkpoint_config_loads_without_migration() -> None:
     assert config.init_mesh_translation == (0.0, 0.32, 0.02)
 
 
+def test_old_checkpoint_defaults_geometry_residual_smooth_scale_to_one() -> None:
+    data = checkpoint_config()
+    del data["geometry_residual_smooth_scale"]
+
+    config = stage1_config_from_checkpoint_mapping(data)
+
+    assert config.geometry_residual_smooth_scale == 1.0
+
+
 def test_unknown_checkpoint_field_is_rejected() -> None:
     with pytest.raises(TypeError, match="unsupported"):
         stage1_config_from_checkpoint_mapping(
