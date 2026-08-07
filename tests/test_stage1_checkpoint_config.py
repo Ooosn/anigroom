@@ -50,6 +50,28 @@ def test_old_checkpoint_defaults_geometry_residual_smooth_scale_to_one() -> None
     assert config.geometry_residual_smooth_scale == 1.0
 
 
+def test_pre_r050_checkpoint_defaults_gaussian_rgb_residual_off() -> None:
+    data = checkpoint_config()
+    for name in (
+        "gaussian_rgb_residual_support",
+        "gaussian_rgb_residual_control_points",
+        "gaussian_rgb_residual_scale",
+        "gaussian_rgb_residual_unlock_start",
+        "gaussian_rgb_residual_unlock_end",
+        "gaussian_rgb_residual_initial_multiplier",
+    ):
+        del data[name]
+
+    config = stage1_config_from_checkpoint_mapping(data)
+
+    assert config.gaussian_rgb_residual_support is False
+    assert config.gaussian_rgb_residual_control_points == 36
+    assert config.gaussian_rgb_residual_scale == 0.20
+    assert config.gaussian_rgb_residual_unlock_start == 10_000
+    assert config.gaussian_rgb_residual_unlock_end == 20_000
+    assert config.gaussian_rgb_residual_initial_multiplier == 0.0
+
+
 def test_unknown_checkpoint_field_is_rejected() -> None:
     with pytest.raises(TypeError, match="unsupported"):
         stage1_config_from_checkpoint_mapping(

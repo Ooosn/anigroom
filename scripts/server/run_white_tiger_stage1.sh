@@ -183,6 +183,24 @@ for name in "${required_config[@]}"; do
   require_var "$name"
 done
 
+GAUSSIAN_RGB_RESIDUAL_SUPPORT="${GAUSSIAN_RGB_RESIDUAL_SUPPORT:-0}"
+if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
+  for name in \
+    GAUSSIAN_RGB_RESIDUAL_CONTROL_POINTS \
+    GAUSSIAN_RGB_RESIDUAL_SCALE \
+    GAUSSIAN_RGB_RESIDUAL_UNLOCK_START \
+    GAUSSIAN_RGB_RESIDUAL_UNLOCK_END \
+    GAUSSIAN_RGB_RESIDUAL_INITIAL_MULTIPLIER; do
+    require_var "$name"
+  done
+else
+  GAUSSIAN_RGB_RESIDUAL_CONTROL_POINTS=36
+  GAUSSIAN_RGB_RESIDUAL_SCALE=0.20
+  GAUSSIAN_RGB_RESIDUAL_UNLOCK_START=10000
+  GAUSSIAN_RGB_RESIDUAL_UNLOCK_END=20000
+  GAUSSIAN_RGB_RESIDUAL_INITIAL_MULTIPLIER=0.0
+fi
+
 GEOMETRY_RESIDUAL_DOMAIN="${GEOMETRY_RESIDUAL_DOMAIN:-render}"
 GEOMETRY_RESIDUAL_SMOOTH_SCALE="${GEOMETRY_RESIDUAL_SMOOTH_SCALE:-1.0}"
 if [[ "$GEOMETRY_RESIDUAL_DOMAIN" == "secondary_guide" ]]; then
@@ -302,6 +320,11 @@ cmd=(
   --lr-high-frequency-shape-scale "$LR_HIGH_FREQUENCY_SHAPE_SCALE"
   --lr-color "$LR_COLOR"
   --color-freeze-until "$COLOR_FREEZE_UNTIL"
+  --gaussian-rgb-residual-control-points "$GAUSSIAN_RGB_RESIDUAL_CONTROL_POINTS"
+  --gaussian-rgb-residual-scale "$GAUSSIAN_RGB_RESIDUAL_SCALE"
+  --gaussian-rgb-residual-unlock-start "$GAUSSIAN_RGB_RESIDUAL_UNLOCK_START"
+  --gaussian-rgb-residual-unlock-end "$GAUSSIAN_RGB_RESIDUAL_UNLOCK_END"
+  --gaussian-rgb-residual-initial-multiplier "$GAUSSIAN_RGB_RESIDUAL_INITIAL_MULTIPLIER"
   --lr-root "$LR_ROOT"
   --lr-calibration "$LR_CALIBRATION"
   --rgb-weight "$RGB_WEIGHT"
@@ -386,6 +409,9 @@ if [[ "$MESH_BACKING_COMPOSITING" == "0" ]]; then
 fi
 if [[ "$LOCAL_CHILD_COLOR_SUPPORT" == "1" ]]; then
   cmd+=(--local-child-color-support)
+fi
+if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
+  cmd+=(--gaussian-rgb-residual-support)
 fi
 if [[ -n "${TRAIN_VIEWS:-}" ]]; then
   cmd+=(--train-views "$TRAIN_VIEWS")

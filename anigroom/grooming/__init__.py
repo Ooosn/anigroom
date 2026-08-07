@@ -16,6 +16,7 @@ from .geometry_residuals import (
     tail_concentration_residual_loss,
     vector_to_local_components,
 )
+from .gaussian_rgb_residual import GaussianRGBResidualField
 
 from .strand_gaussians import (
     build_brush_centerline,
@@ -43,6 +44,7 @@ __all__ = [
     "DecodedGroom",
     "GroomParameterField",
     "GroomRanges",
+    "GaussianRGBResidualField",
     "RenderGeometryResidualField",
     "ResampledStrands",
     "StrandGaussianOutput",

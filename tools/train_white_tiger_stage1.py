@@ -63,6 +63,7 @@ from anigroom.flow.direction_geometry import (  # noqa: E402
     parallel_transport_vectors,
 )
 from anigroom.grooming import (  # noqa: E402
+    GaussianRGBResidualField,
     GroomParameterField,
     GroomRanges,
     RenderGeometryResidualField,
@@ -1798,6 +1799,12 @@ class Stage1Config:
     lr_high_frequency_shape_scale: float = 1.0
     lr_color: float = 2.0e-2
     color_freeze_until: int = 0
+    gaussian_rgb_residual_support: bool = False
+    gaussian_rgb_residual_control_points: int = 36
+    gaussian_rgb_residual_scale: float = 0.20
+    gaussian_rgb_residual_unlock_start: int = 10000
+    gaussian_rgb_residual_unlock_end: int = 20000
+    gaussian_rgb_residual_initial_multiplier: float = 0.0
     lr_root: float = 7.5e-4
     lr_calibration: float = 5.0e-4
     rgb_weight: float = 1.0
@@ -1891,6 +1898,9 @@ class WhiteTigerStage1Model(torch.nn.Module):
         max_child_count: int = 8,
         local_child_color_support: bool = False,
         local_child_color_scale: float = 0.20,
+        gaussian_rgb_residual_support: bool = False,
+        gaussian_rgb_residual_control_points: int = 36,
+        gaussian_rgb_residual_scale: float = 0.20,
         guide_face_ids: np.ndarray | None = None,
         guide_barycentric: np.ndarray | None = None,
         guide_region_ids: np.ndarray | None = None,
@@ -1918,6 +1928,12 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.strand_shape_normal_mode = strand_shape_normal_mode
         self.max_child_count = max(1, int(max_child_count))
         self.local_child_color_scale = float(local_child_color_scale)
+        self.gaussian_rgb_residual_multiplier = 1.0
+        if bool(gaussian_rgb_residual_support) and self.max_child_count != 1:
+            raise ValueError(
+                "Gaussian RGB residual currently requires child_count=1 so every "
+                "profile row has one persistent render-root owner"
+            )
         self.guide_interpolation_k = max(1, int(guide_interpolation_k))
         self.geometry_residual_domain = str(geometry_residual_domain)
         if self.geometry_residual_domain not in {"render", "secondary_guide"}:
@@ -1998,6 +2014,16 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.child_color_delta_raw = torch.nn.Parameter(torch.zeros((int(face_ids.shape[0]), self.max_child_count, 3), device=device))
         else:
             self.register_parameter("child_color_delta_raw", None)
+        self.gaussian_rgb_residual = (
+            GaussianRGBResidualField(
+                int(face_ids.shape[0]),
+                int(gaussian_rgb_residual_control_points),
+                float(gaussian_rgb_residual_scale),
+                device=device,
+            )
+            if bool(gaussian_rgb_residual_support)
+            else None
+        )
         if guide_face_ids is not None and guide_barycentric is not None:
             self.register_buffer("guide_face_ids", torch.from_numpy(guide_face_ids).to(device=device, dtype=torch.long))
             self.register_buffer("guide_barycentric", torch.from_numpy(guide_barycentric).to(device=device))
@@ -3432,6 +3458,22 @@ class WhiteTigerStage1Model(torch.nn.Module):
             strand_root_indices=root_ids,
             length_overlap=float(length_overlap),
         )
+        if self.gaussian_rgb_residual is not None:
+            if int(child_count) != 1:
+                raise RuntimeError(
+                    "Gaussian RGB residual requires child_count=1; child expansion "
+                    "has no persistent per-Gaussian ownership contract"
+                )
+            gaussians = replace(
+                gaussians,
+                colors=self.gaussian_rgb_residual.apply_to_colors(
+                    gaussians.colors,
+                    gaussians.root_indices,
+                    gaussians.segment_indices,
+                    resampled.segment_counts,
+                    multiplier=self.gaussian_rgb_residual_multiplier,
+                ),
+            )
         unique_gaussian_roots = int(torch.unique(gaussians.root_indices.detach()).numel()) if gaussians.root_indices.numel() else 0
         min_expected_roots = max(1, int(0.99 * int(roots.shape[0])))
         if unique_gaussian_roots < min_expected_roots:
@@ -3456,6 +3498,9 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "gaussian_unique_root_count": unique_gaussian_roots,
             "scale": float(torch.exp(self.log_scale.detach()).cpu()),
             "translation_norm": float(torch.linalg.norm(self.translation.detach()).cpu()),
+            "gaussian_rgb_residual_multiplier": float(
+                self.gaussian_rgb_residual_multiplier
+            ),
         }
         return gaussians, roots, roots_local, stats
 
@@ -3509,6 +3554,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
             else None
         )
         old_child_color_delta = self.child_color_delta_raw.detach() if self.child_color_delta_raw is not None else None
+        old_gaussian_rgb_residual = (
+            self.gaussian_rgb_residual.raw.detach()
+            if self.gaussian_rgb_residual is not None
+            else None
+        )
         child_count = int(update.new_barycentric.shape[0])
         child_points = (
             (
@@ -3784,6 +3834,24 @@ class WhiteTigerStage1Model(torch.nn.Module):
         if old_child_color_delta is not None:
             child_delta = interpolate_source(old_child_color_delta)
             self.child_color_delta_raw = torch.nn.Parameter(apply_attribute_update(old_child_color_delta, update, child_delta))
+        if old_gaussian_rgb_residual is not None:
+            new_rgb_residual = GaussianRGBResidualField(
+                new_count,
+                self.gaussian_rgb_residual.control_points,
+                self.gaussian_rgb_residual.scale,
+                device=device,
+            )
+            zero_child_residual = old_gaussian_rgb_residual.new_zeros(
+                (child_count, *old_gaussian_rgb_residual.shape[1:])
+            )
+            updated_residual = apply_attribute_update(
+                old_gaussian_rgb_residual,
+                update,
+                zero_child_residual,
+            )
+            with torch.no_grad():
+                new_rgb_residual.raw.copy_(updated_residual)
+            self.gaussian_rgb_residual = new_rgb_residual
         old_conf = self.root_observation_confidence.detach()
         child_conf = (
             interpolate_source(old_conf[:, None]).reshape(-1)
@@ -4880,6 +4948,8 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
     color_params = [model.groom.root_color_raw, model.groom.tip_color_raw]
     if model.child_color_delta_raw is not None:
         color_params.append(model.child_color_delta_raw)
+    if model.gaussian_rgb_residual is not None:
+        color_params.append(model.gaussian_rgb_residual.raw)
     high_frequency_params = []
     if model.guide_enabled():
         if float(config.shape_curl_scale) > 0.0:
@@ -4990,6 +5060,8 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
     color_names = ["groom.root_color_raw", "groom.tip_color_raw"]
     if model.child_color_delta_raw is not None:
         color_names.append("child_color_delta_raw")
+    if model.gaussian_rgb_residual is not None:
+        color_names.append("gaussian_rgb_residual.raw")
     high_frequency_names = []
     if model.guide_enabled():
         if float(config.shape_curl_scale) > 0.0:
@@ -5074,6 +5146,7 @@ def _optimizer_parameter_domain(name: str) -> str | None:
     if (
         name == "bary_logits"
         or name == "child_color_delta_raw"
+        or name.startswith("gaussian_rgb_residual.")
         or name.startswith("groom.")
         or name.startswith("render_geometry_residual.")
     ):
@@ -5312,6 +5385,8 @@ def zero_color_gradients(model: WhiteTigerStage1Model) -> None:
     params = [model.groom.root_color_raw, model.groom.tip_color_raw]
     if model.child_color_delta_raw is not None:
         params.append(model.child_color_delta_raw)
+    if model.gaussian_rgb_residual is not None:
+        params.append(model.gaussian_rgb_residual.raw)
     for param in params:
         if param.grad is not None:
             param.grad.zero_()
@@ -5665,10 +5740,16 @@ def effective_groom_for_current_roots(model: WhiteTigerStage1Model):
     return model.apply_guide_controls(model.groom.decode(), roots_local)
 
 
-def guide_residual_multiplier_for_iteration(config: Stage1Config, iteration: int) -> float:
-    initial = max(0.0, min(1.0, float(config.guide_residual_initial_multiplier)))
-    start = int(config.guide_residual_unlock_start)
-    end = int(config.guide_residual_unlock_end)
+def scheduled_multiplier(
+    iteration: int,
+    *,
+    initial: float,
+    start: int,
+    end: int,
+) -> float:
+    initial = max(0.0, min(1.0, float(initial)))
+    start = int(start)
+    end = int(end)
     if end <= start:
         return 1.0
     if iteration <= start:
@@ -5679,30 +5760,53 @@ def guide_residual_multiplier_for_iteration(config: Stage1Config, iteration: int
     return initial + (1.0 - initial) * t
 
 
+def guide_residual_multiplier_for_iteration(config: Stage1Config, iteration: int) -> float:
+    return scheduled_multiplier(
+        iteration,
+        initial=config.guide_residual_initial_multiplier,
+        start=config.guide_residual_unlock_start,
+        end=config.guide_residual_unlock_end,
+    )
+
+
 def guide_coverage_residual_multiplier_for_iteration(config: Stage1Config, iteration: int) -> float:
-    initial = max(0.0, min(1.0, float(config.guide_coverage_residual_initial_multiplier)))
     start = int(config.guide_coverage_residual_unlock_start)
     end = int(config.guide_coverage_residual_unlock_end)
     if end <= start:
         return guide_residual_multiplier_for_iteration(config, iteration)
-    if iteration <= start:
-        return initial
-    if iteration >= end:
-        return 1.0
-    t = float(iteration - start) / float(max(1, end - start))
-    return initial + (1.0 - initial) * t
+    return scheduled_multiplier(
+        iteration,
+        initial=config.guide_coverage_residual_initial_multiplier,
+        start=start,
+        end=end,
+    )
 
 
 def shape_detail_multiplier_for_iteration(config: Stage1Config, iteration: int) -> float:
     freeze_until = int(config.shape_detail_freeze_until)
     if freeze_until <= 0:
         return 1.0
-    if iteration <= freeze_until:
-        return 0.0
     ramp_end = max(freeze_until + 1, int(config.guide_residual_unlock_end))
-    if iteration >= ramp_end:
-        return 1.0
-    return float(iteration - freeze_until) / float(max(1, ramp_end - freeze_until))
+    return scheduled_multiplier(
+        iteration,
+        initial=0.0,
+        start=freeze_until,
+        end=ramp_end,
+    )
+
+
+def gaussian_rgb_residual_multiplier_for_iteration(
+    config: Stage1Config,
+    iteration: int,
+) -> float:
+    if not config.gaussian_rgb_residual_support:
+        return 0.0
+    return scheduled_multiplier(
+        iteration,
+        initial=config.gaussian_rgb_residual_initial_multiplier,
+        start=config.gaussian_rgb_residual_unlock_start,
+        end=config.gaussian_rgb_residual_unlock_end,
+    )
 
 
 def build_stage1_model_from_checkpoint(
@@ -5838,6 +5942,9 @@ def build_stage1_model_from_checkpoint(
         max_child_count=config.child_count,
         local_child_color_support=config.local_child_color_support,
         local_child_color_scale=config.local_child_color_scale,
+        gaussian_rgb_residual_support=config.gaussian_rgb_residual_support,
+        gaussian_rgb_residual_control_points=config.gaussian_rgb_residual_control_points,
+        gaussian_rgb_residual_scale=config.gaussian_rgb_residual_scale,
         guide_face_ids=guide_face_ids,
         guide_barycentric=guide_barycentric,
         guide_region_ids=guide_region_ids,
@@ -5878,6 +5985,9 @@ def build_stage1_model_from_checkpoint(
     model.shape_detail_multiplier = shape_detail_multiplier_for_iteration(
         config,
         iteration,
+    )
+    model.gaussian_rgb_residual_multiplier = (
+        gaussian_rgb_residual_multiplier_for_iteration(config, iteration)
     )
     model.eval()
     return model
@@ -6351,6 +6461,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         max_child_count=config.child_count,
         local_child_color_support=config.local_child_color_support,
         local_child_color_scale=config.local_child_color_scale,
+        gaussian_rgb_residual_support=config.gaussian_rgb_residual_support,
+        gaussian_rgb_residual_control_points=config.gaussian_rgb_residual_control_points,
+        gaussian_rgb_residual_scale=config.gaussian_rgb_residual_scale,
         guide_face_ids=guide_surface_roots.face_ids if guide_surface_roots is not None else None,
         guide_barycentric=guide_surface_roots.barycentric if guide_surface_roots is not None else None,
         guide_region_ids=guide_region_ids,
@@ -6648,6 +6761,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             model.guide_residual_multiplier = guide_residual_multiplier_for_iteration(config, iteration)
             model.guide_coverage_residual_multiplier = guide_coverage_residual_multiplier_for_iteration(config, iteration)
             model.shape_detail_multiplier = shape_detail_multiplier_for_iteration(config, iteration)
+            model.gaussian_rgb_residual_multiplier = (
+                gaussian_rgb_residual_multiplier_for_iteration(config, iteration)
+            )
             should_densify = (
                 iteration >= config.densify_warmup
                 and iteration <= config.densify_until
@@ -7215,6 +7331,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "guide_residual_multiplier": float(model.guide_residual_multiplier),
                     "guide_coverage_residual_multiplier": float(model.guide_coverage_residual_multiplier),
                     "shape_detail_multiplier": float(model.shape_detail_multiplier),
+                    "gaussian_rgb_residual_multiplier": float(
+                        model.gaussian_rgb_residual_multiplier
+                    ),
                     "guide_frozen": bool(int(config.guide_freeze_until) > 0 and iteration <= int(config.guide_freeze_until)),
                     "shape_detail_frozen": bool(shape_detail_frozen),
                     "lifecycle_statistics_active": bool(lifecycle_stats_active),
@@ -7225,6 +7344,13 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "groom": groom_parameter_stats(model.groom),
                     "effective_groom": effective_groom_stats(model),
                     "geometry_residual": render_geometry_residual_stats(model),
+                    "gaussian_rgb_residual": (
+                        model.gaussian_rgb_residual.stats(
+                            multiplier=model.gaussian_rgb_residual_multiplier
+                        )
+                        if model.gaussian_rgb_residual is not None
+                        else None
+                    ),
                     "rgb_flow": rgb_flow_stats,
                     "loss_mask": {
                         "edge_kernel": int(config.loss_mask_edge_kernel),
@@ -7423,6 +7549,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         "guide_residual_multiplier": float(model.guide_residual_multiplier),
                         "guide_coverage_residual_multiplier": float(model.guide_coverage_residual_multiplier),
                         "shape_detail_multiplier": float(model.shape_detail_multiplier),
+                        "gaussian_rgb_residual_multiplier": float(
+                            model.gaussian_rgb_residual_multiplier
+                        ),
                         "lifecycle_history": lifecycle_history,
                         "save_reason": save_reason,
                     },
@@ -7566,6 +7695,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr-high-frequency-shape-scale", type=float, default=0.35)
     parser.add_argument("--lr-color", type=float, default=2.0e-2)
     parser.add_argument("--color-freeze-until", type=int, default=0)
+    parser.add_argument("--gaussian-rgb-residual-support", action="store_true")
+    parser.add_argument("--gaussian-rgb-residual-control-points", type=int, default=36)
+    parser.add_argument("--gaussian-rgb-residual-scale", type=float, default=0.20)
+    parser.add_argument("--gaussian-rgb-residual-unlock-start", type=int, default=10000)
+    parser.add_argument("--gaussian-rgb-residual-unlock-end", type=int, default=20000)
+    parser.add_argument(
+        "--gaussian-rgb-residual-initial-multiplier",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument("--lr-root", type=float, default=7.5e-4)
     parser.add_argument("--lr-calibration", type=float, default=5.0e-4)
     parser.add_argument("--rgb-weight", type=float, default=1.0)
@@ -7739,6 +7878,14 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         lr_high_frequency_shape_scale=args.lr_high_frequency_shape_scale,
         lr_color=args.lr_color,
         color_freeze_until=args.color_freeze_until,
+        gaussian_rgb_residual_support=args.gaussian_rgb_residual_support,
+        gaussian_rgb_residual_control_points=args.gaussian_rgb_residual_control_points,
+        gaussian_rgb_residual_scale=args.gaussian_rgb_residual_scale,
+        gaussian_rgb_residual_unlock_start=args.gaussian_rgb_residual_unlock_start,
+        gaussian_rgb_residual_unlock_end=args.gaussian_rgb_residual_unlock_end,
+        gaussian_rgb_residual_initial_multiplier=(
+            args.gaussian_rgb_residual_initial_multiplier
+        ),
         lr_root=args.lr_root,
         lr_calibration=args.lr_calibration,
         rgb_weight=args.rgb_weight,

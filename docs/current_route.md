@@ -71,6 +71,8 @@ returning it to length or direction. See
 - active R043 lock: `configs/r043_density_matched_render_support.lock.json`
 - active R049 geometry-parent configuration:
   `configs/r049_secondary_guide_resume16k_30k.env`
+- active R050 single-variable appearance experiment:
+  `configs/r050_gaussian_rgb_residual_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`

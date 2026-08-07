@@ -78,6 +78,8 @@ def main() -> None:
 
     mesh_color = sample_backing_color(config, device, train=False)
     scene_bg = scene_background_color(config, device)
+    residual_enabled = model.gaussian_rgb_residual is not None
+    residual_multiplier = float(model.gaussian_rgb_residual_multiplier)
     records = []
     with torch.no_grad():
         for idx in view_ids:
@@ -110,17 +112,59 @@ def main() -> None:
             save_image(output_dir / f"view_{idx:02d}_composite_diff_x4.png", composite_diff)
             raw_mse = torch.mean((pred - target).square()).clamp_min(1.0e-12)
             comp_mse = torch.mean((pred - target_eval).square()).clamp_min(1.0e-12)
-            records.append(
-                {
-                    "view": int(idx),
-                    "pred": f"view_{idx:02d}_pred.png",
-                    "gt": f"view_{idx:02d}_gt.png",
-                    "raw_psnr": float((-10.0 * torch.log10(raw_mse)).detach().cpu()),
-                    "composite_psnr": float((-10.0 * torch.log10(comp_mse)).detach().cpu()),
-                    "stats": stats,
-                }
-            )
+            record = {
+                "view": int(idx),
+                "pred": f"view_{idx:02d}_pred.png",
+                "gt": f"view_{idx:02d}_gt.png",
+                "raw_psnr": float((-10.0 * torch.log10(raw_mse)).detach().cpu()),
+                "composite_psnr": float((-10.0 * torch.log10(comp_mse)).detach().cpu()),
+                "stats": stats,
+            }
+            base_pred = None
+            residual_abs = None
+            residual_signed = None
+            if residual_enabled:
+                model.gaussian_rgb_residual_multiplier = 0.0
+                try:
+                    base_pred, _, _, _, base_stats, _ = render_view(
+                        model,
+                        viewmats[idx],
+                        ks[idx],
+                        width,
+                        height,
+                        config,
+                        background=mesh_color,
+                        mesh_depth=mesh_depth,
+                        backing_image=backing,
+                    )
+                finally:
+                    model.gaussian_rgb_residual_multiplier = residual_multiplier
+                residual_delta = pred - base_pred
+                residual_abs = (residual_delta.abs() * 4.0).clamp(0.0, 1.0)
+                residual_signed = (0.5 + residual_delta * 4.0).clamp(0.0, 1.0)
+                base_mse = torch.mean((base_pred - target_eval).square()).clamp_min(1.0e-12)
+                base_psnr = -10.0 * torch.log10(base_mse)
+                save_image(output_dir / f"view_{idx:02d}_pred_without_gaussian_rgb_residual.png", base_pred)
+                save_image(output_dir / f"view_{idx:02d}_gaussian_rgb_residual_abs_x4.png", residual_abs)
+                save_image(output_dir / f"view_{idx:02d}_gaussian_rgb_residual_signed_x4.png", residual_signed)
+                record.update(
+                    {
+                        "pred_without_gaussian_rgb_residual": f"view_{idx:02d}_pred_without_gaussian_rgb_residual.png",
+                        "gaussian_rgb_residual_abs_x4": f"view_{idx:02d}_gaussian_rgb_residual_abs_x4.png",
+                        "gaussian_rgb_residual_signed_x4": f"view_{idx:02d}_gaussian_rgb_residual_signed_x4.png",
+                        "composite_psnr_without_gaussian_rgb_residual": float(base_psnr.detach().cpu()),
+                        "composite_psnr_gain_from_gaussian_rgb_residual": float(
+                            ((-10.0 * torch.log10(comp_mse)) - base_psnr).detach().cpu()
+                        ),
+                        "gaussian_rgb_residual_image_abs_mean": float(residual_delta.abs().mean().detach().cpu()),
+                        "base_stats": base_stats,
+                    }
+                )
+                del residual_delta, base_mse, base_psnr
+            records.append(record)
             del target, mask, mesh_depth, backing, pred, alpha, target_eval, raw_diff, composite_diff
+            if base_pred is not None:
+                del base_pred, residual_abs, residual_signed
             torch.cuda.empty_cache()
 
     summary = {
@@ -132,6 +176,11 @@ def main() -> None:
         "guide_residual_multiplier": float(model.guide_residual_multiplier),
         "guide_coverage_residual_multiplier": float(model.guide_coverage_residual_multiplier),
         "shape_detail_multiplier": float(model.shape_detail_multiplier),
+        "gaussian_rgb_residual": (
+            model.gaussian_rgb_residual.stats(multiplier=residual_multiplier)
+            if residual_enabled
+            else None
+        ),
         "records": records,
     }
     (output_dir / "render_report.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
