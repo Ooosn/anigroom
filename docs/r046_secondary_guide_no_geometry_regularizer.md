@@ -2,7 +2,7 @@
 
 ## Status
 
-Prepared as an isolated causal diagnostic. R043 remains the accepted baseline;
+Completed as an isolated causal diagnostic. R043 remains the accepted baseline;
 R044 and R045 remain completed experiments.
 
 ## Question
@@ -41,3 +41,31 @@ checkpoints therefore retain their previous semantics.
 
 Do not increase G1 count or change learning rate before this distinction is
 measured.
+
+## Formal Result
+
+The one-H100 continuation completed from the exact R044 10k checkpoint:
+
+```text
+/home/wangyy/anigroom-r046-secondary-guide-runtime-20260808/outputs/r046_no_geometry_regularizer_resume10k_16k_h100_20260808
+```
+
+| Iteration | R045 test composite | R046 test composite | R046 - R045 | R046 direction P95 | R046 length P95 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 12000 | 30.5920 | 30.6025 | +0.0105 | 0.0000 | 0.0150 |
+| 14000 | 30.8607 | 30.8687 | +0.0080 | 0.0000 | 0.0235 |
+| 16000 | 31.0501 | 31.0552 | +0.0051 | 0.0000 | 0.0369 |
+
+Peak allocated CUDA memory was 10.60 GB. Removing all three explicit
+secondary-geometry losses did not recover the PSNR gap. More importantly,
+secondary length residuals learned normally while secondary direction
+residuals stayed exactly zero for the entire continuation.
+
+## Conclusion
+
+The result rejects both explanations that 20k G1 nodes are spatially too sparse
+or that explicit G1 smoothness is the primary bottleneck. Code-level gradient
+inspection found that zero-initialized direction residuals passed through
+`normalize(v) * norm(v)`, whose autograd derivative at `v = 0` is zero. R046
+therefore became the formal control showing the broken RGB-to-direction path.
+R047 fixes that vector transport without changing capacity or training values.
