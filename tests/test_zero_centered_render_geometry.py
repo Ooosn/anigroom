@@ -316,7 +316,7 @@ def test_structure_update_transports_residual_state_and_strict_checkpoint() -> N
         prune_mask=torch.tensor([True, False, False, False]),
         scores={},
     )
-    result = model.apply_structure_update(update)
+    result = model.apply_structure_update(update, neighbor_count=8)
     assert result["root_count_after"] == 4
     assert model.render_geometry_residual.root_count == 4
     assert model.groom.length_reference.shape == (4, 1)
@@ -405,7 +405,7 @@ def test_lifecycle_rebuild_preserves_surviving_adam_rows() -> None:
     render_transition = optimizer_row_transition(render_update, old_count=4)
 
     model.apply_guide_structure_update(guide_update)
-    model.apply_structure_update(render_update)
+    model.apply_structure_update(render_update, neighbor_count=8)
     rebuilt, report = rebuild_stage1_optimizer_with_state(
         model,
         config,
@@ -1041,7 +1041,7 @@ def test_asinh_log_ratio_structure_update_interpolates_raw_coordinate() -> None:
         scores={},
     )
 
-    model.apply_structure_update(update)
+    model.apply_structure_update(update, neighbor_count=8)
 
     torch.testing.assert_close(
         model.render_geometry_residual.length_raw,

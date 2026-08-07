@@ -734,7 +734,7 @@ def interpolate_child_attributes(
     vertices: torch.Tensor,
     faces: torch.Tensor,
     *,
-    neighbor_count: int = 8,
+    neighbor_count: int,
 ) -> torch.Tensor:
     """Initialize child root attributes from topology-local root support.
 

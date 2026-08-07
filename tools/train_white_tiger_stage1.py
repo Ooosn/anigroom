@@ -2310,7 +2310,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 source_face_ids=old_state.face_ids,
                 query_points=child_points,
                 query_face_ids=update.new_face_ids,
-                neighbor_count=8,
+                neighbor_count=self.guide_interpolation_k,
             )
             child_weights = local_surface_weights(child_points, old_state.points, child_support)
             child_ids = child_support.indices
@@ -3072,7 +3072,12 @@ class WhiteTigerStage1Model(torch.nn.Module):
             barycentric=torch.softmax(self.bary_logits.detach(), dim=-1),
         )
 
-    def apply_structure_update(self, update) -> dict[str, int]:
+    def apply_structure_update(
+        self,
+        update,
+        *,
+        neighbor_count: int,
+    ) -> dict[str, int]:
         old_state = self.lifecycle_state()
         old_count = int(old_state.points.shape[0])
         if update.new_barycentric.numel() == 0 and not bool(update.prune_mask.any()):
@@ -3103,7 +3108,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 source_face_ids=old_state.face_ids,
                 query_points=child_points,
                 query_face_ids=update.new_face_ids,
-                neighbor_count=8,
+                neighbor_count=max(1, int(neighbor_count)),
             )
             child_ids = child_support.indices
             child_weights = local_surface_weights(child_points, old_state.points, child_support)
@@ -3493,7 +3498,7 @@ def initialize_groom_from_projections(
             colors,
             observed,
             root_conf,
-            neighbor_count=8,
+            neighbor_count=config.smooth_graph_k,
             normalize_vectors=False,
         )
         filled = filled_color
@@ -5764,7 +5769,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
     guide_graph_edges, guide_graph_report = build_guide_graph_edges(
         model,
         mode=config.smooth_graph_mode,
-        k=config.smooth_graph_k,
+        k=config.guide_interpolation_k,
     )
     setup_progress("guide_graph_done", **guide_graph_report)
     face_adjacency_started = time.perf_counter()
@@ -6081,7 +6086,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 guide_graph_edges,
                 smooth_field_metric=config.smooth_field_metric,
                 guide_length_smooth_mode=config.guide_length_smooth_mode,
-                smooth_graph_k=config.smooth_graph_k,
+                smooth_graph_k=config.guide_interpolation_k,
             )
             effective_smooth_loss = effective_groom_graph_smoothness(
                 effective_groom_now,
@@ -6315,7 +6320,10 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         old_count=root_count_before,
                     )
                     render_update_started = time.perf_counter()
-                    result = model.apply_structure_update(update)
+                    result = model.apply_structure_update(
+                        update,
+                        neighbor_count=config.smooth_graph_k,
+                    )
                     lifecycle_timing["render_update_seconds"] = float(
                         time.perf_counter() - render_update_started
                     )
@@ -6332,7 +6340,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     guide_graph_edges, guide_graph_report = build_guide_graph_edges(
                         model,
                         mode=config.smooth_graph_mode,
-                        k=config.smooth_graph_k,
+                        k=config.guide_interpolation_k,
                     )
                     lifecycle_record["smoothing_graph"] = {
                         "render": graph_report,
