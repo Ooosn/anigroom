@@ -2,8 +2,8 @@
 
 ## Status
 
-Prepared as a strict single-concept child of the frozen R042 baseline. Formal
-H100 gate and 30k validation are pending.
+The full-resolution from-zero H100 gate passed. A formal from-zero 30k run is
+active on the same verified source and configuration.
 
 ## Motivation
 
@@ -80,3 +80,32 @@ the same 100k-strand export protocol. In addition to RGB and composite PSNR,
 report effective-length P50/P95/max and counts above `0.12`, `0.15`, and `0.20`.
 Inspect the tail tip, head fringe, and ordinary coat for transferred artifacts.
 These thresholds are diagnostics only; they do not enter training or loss.
+
+## Gate Result
+
+The gate ran on one H100 from iteration 0 through 700 at 1920x1080. It exited
+normally with no fallback or memory guard event.
+
+| Measure | R040 K8 gate | R043 K32 gate |
+| --- | ---: | ---: |
+| Test composite PSNR at 700 | 20.779205 | 20.780363 |
+| Render roots after iteration 700 | 402252 | 402253 |
+| Parents selected at 600 / 700 | 901 / 1351 | 903 / 1350 |
+| Render graph edges after 700 | 3,218,016 | 12,872,096 |
+| Render graph rebuild after 700 | 18.5848 s | 0.2163 s |
+| Peak allocated CUDA memory | 9.83 GB | 16.15 GB |
+
+The changed smoothing support causes only the expected small optimization
+difference: lifecycle evidence remains uncapped and selects effectively the
+same number of parents. The render graph reports `K=32`; the guide graph
+reports `K=8`. K32 increases live memory but remains below the 25 GB guard, and
+the accelerated exact graph path keeps lifecycle rebuild practical.
+
+Formal run paths:
+
+```text
+source: /home/wangyy/anigroom-r043-density-support-20260807
+gate:   /home/wangyy/anigroom-r043-density-support-runtime-20260807/outputs/r043_density_support_from_zero_700_h100_20260807
+full:   /home/wangyy/anigroom-r043-density-support-runtime-20260807/outputs/r043_density_support_full_0_30k_h100_20260807
+commit: 3afc5078026dd335eccc284ee04136e42dd70a41
+```
