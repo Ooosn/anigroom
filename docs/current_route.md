@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-08-07.
+Status date: 2026-08-08.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -50,6 +50,18 @@ audit removes every length above `0.15` and reduces maximum local turn from
 `14.89` to `2.73` degrees. The exact v4 target remains tracked under
 `baseline_inputs/` with unchanged content.
 
+R049 is the active geometry parent for the next appearance experiment, not a
+replacement RGB metric claim. It continues the corrected 20k secondary-guide
+field to 30k and reaches final/best test composite `31.60320/31.74100` with
+`469402` roots and `5323659` Gaussians. Against R043 under the same fixed
+100k-strand protocol, it reduces local relative length discontinuity about
+`4.9x` in the mean and `4.0x` at P95, removes every strand longer than `0.12`,
+and improves the tortuosity tail without changing the local direction trend.
+R050 therefore starts from R049 geometry and tests one variable only: a true
+Gaussian-sample RGB residual that must recover appearance evidence without
+returning it to length or direction. See
+`docs/r049_secondary_guide_30k_validation.md`.
+
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
@@ -57,6 +69,8 @@ audit removes every length above `0.15` and reduces maximum local turn from
 - active R043 behavior configuration:
   `configs/r043_density_matched_render_support_0_30k.env`
 - active R043 lock: `configs/r043_density_matched_render_support.lock.json`
+- active R049 geometry-parent configuration:
+  `configs/r049_secondary_guide_resume16k_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
