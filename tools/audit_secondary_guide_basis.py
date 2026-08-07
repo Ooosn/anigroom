@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from anigroom.flow.direction_geometry import parallel_transport_vector_field
 from anigroom.grooming.geometry_residuals import local_components_to_world
+from anigroom.mesh_roots import TriangleMesh, sample_surface_candidates
 from anigroom.surface_interpolation import local_surface_weights
 from train_white_tiger_stage1 import (
     build_stage1_model_from_checkpoint,
@@ -23,6 +25,140 @@ from train_white_tiger_stage1 import (
 
 
 EPS = 1.0e-12
+
+
+def seeded_local_fps(
+    points: np.ndarray,
+    seed_point: np.ndarray,
+    count: int,
+) -> np.ndarray:
+    if count <= 0:
+        return np.empty((0,), dtype=np.int64)
+    if count > int(points.shape[0]):
+        raise RuntimeError("area-proportional placement exhausted a primary cell")
+    minimum_distance = np.sum((points - seed_point[None, :]) ** 2, axis=1)
+    available = np.ones((int(points.shape[0]),), dtype=bool)
+    selected = np.empty((count,), dtype=np.int64)
+    for index in range(count):
+        score = np.where(available, minimum_distance, -np.inf)
+        candidate = int(np.argmax(score))
+        selected[index] = candidate
+        available[candidate] = False
+        distance = np.sum((points - points[candidate : candidate + 1]) ** 2, axis=1)
+        minimum_distance = np.minimum(minimum_distance, distance)
+    return selected
+
+
+@torch.no_grad()
+def area_proportional_secondary_topology(
+    model,
+    *,
+    secondary_root_count: int,
+    candidate_multiplier: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
+    primary_count = int(model.guide_points_local.shape[0])
+    secondary_root_count = int(secondary_root_count)
+    if secondary_root_count < primary_count:
+        raise ValueError("secondary root count must retain every primary guide anchor")
+    extra_count = secondary_root_count - primary_count
+    candidate_count = max(
+        secondary_root_count,
+        int(np.ceil(float(secondary_root_count) * float(candidate_multiplier))),
+    )
+    mesh = TriangleMesh(
+        vertices=model.vertices.detach().cpu().numpy(),
+        faces=model.faces.detach().cpu().numpy(),
+    )
+    candidates = sample_surface_candidates(mesh, candidate_count, int(seed))
+    candidate_points = torch.as_tensor(
+        candidates.points,
+        device=model.vertices.device,
+        dtype=model.vertices.dtype,
+    )
+    candidate_faces = torch.as_tensor(
+        candidates.face_ids,
+        device=model.vertices.device,
+        dtype=torch.long,
+    )
+    candidate_support = model.guide_surface_interpolator().build_support(
+        candidate_points,
+        candidate_faces,
+    )
+    owner = candidate_support.indices[:, 0].cpu().numpy().astype(np.int64)
+    cell_counts = np.bincount(owner, minlength=primary_count)
+    raw_quota = float(extra_count) * cell_counts.astype(np.float64) / float(cell_counts.sum())
+    allocation = np.floor(raw_quota).astype(np.int64)
+    if np.any(allocation > cell_counts):
+        raise RuntimeError("area-proportional allocation exceeds candidate capacity")
+    remainder = int(extra_count - allocation.sum())
+    if remainder > 0:
+        fractional = raw_quota - allocation
+        eligible = np.flatnonzero(allocation < cell_counts)
+        order = np.lexsort((eligible, -fractional[eligible]))
+        allocation[eligible[order[:remainder]]] += 1
+    if int(allocation.sum()) != extra_count:
+        raise RuntimeError("area-proportional allocation did not preserve root count")
+
+    primary_points = model.guide_points_local.detach().cpu().numpy()
+    primary_faces = model.guide_face_ids.detach().cpu().numpy()
+    primary_barycentric = model.guide_barycentric.detach().cpu().numpy()
+    cell_order = np.argsort(owner, kind="stable")
+    cell_offsets = np.concatenate([[0], np.cumsum(cell_counts)])
+    output_faces: list[np.ndarray] = []
+    output_barycentric: list[np.ndarray] = []
+    output_parent: list[np.ndarray] = []
+    selected_distance: list[np.ndarray] = []
+    for parent_id in range(primary_count):
+        output_faces.append(primary_faces[parent_id : parent_id + 1])
+        output_barycentric.append(primary_barycentric[parent_id : parent_id + 1])
+        output_parent.append(np.asarray([parent_id], dtype=np.int64))
+        local_count = int(allocation[parent_id])
+        if local_count <= 0:
+            continue
+        local_ids = cell_order[cell_offsets[parent_id] : cell_offsets[parent_id + 1]]
+        local_selection = seeded_local_fps(
+            candidates.points[local_ids],
+            primary_points[parent_id],
+            local_count,
+        )
+        selected = local_ids[local_selection]
+        output_faces.append(candidates.face_ids[selected])
+        output_barycentric.append(candidates.barycentric[selected])
+        output_parent.append(np.full((local_count,), parent_id, dtype=np.int64))
+        selected_distance.append(
+            np.linalg.norm(
+                candidates.points[selected] - primary_points[parent_id : parent_id + 1],
+                axis=-1,
+            )
+        )
+    face_ids = np.concatenate(output_faces).astype(np.int64, copy=False)
+    barycentric = np.concatenate(output_barycentric).astype(np.float32, copy=False)
+    parent_ids = np.concatenate(output_parent).astype(np.int64, copy=False)
+    distances = np.concatenate(selected_distance) if selected_distance else np.empty((0,))
+    if int(face_ids.shape[0]) != secondary_root_count:
+        raise RuntimeError("area-proportional placement produced the wrong root count")
+    return face_ids, barycentric, parent_ids, {
+        "mode": "area_proportional_primary_cells",
+        "candidate_count": int(candidate_count),
+        "candidate_cell_count": {
+            "min": int(cell_counts.min()),
+            "median": float(np.median(cell_counts)),
+            "max": int(cell_counts.max()),
+        },
+        "children_per_primary": {
+            "min": int((allocation + 1).min()),
+            "median": float(np.median(allocation + 1)),
+            "max": int((allocation + 1).max()),
+        },
+        "selected_parent_distance": {
+            "mean": float(distances.mean()) if distances.size else 0.0,
+            "max": float(distances.max(initial=0.0)),
+        },
+        "support_fallback_query_count": int(
+            candidate_support.report.get("fallback_query_count", 0)
+        ),
+    }
 
 
 def quantiles(value: torch.Tensor) -> dict[str, float]:
@@ -241,13 +377,15 @@ def run_audit(args: argparse.Namespace) -> dict[str, object]:
     basis_state = basis_checkpoint.get("model")
     if not isinstance(basis_state, dict):
         raise RuntimeError("basis checkpoint has no model state")
-    required = (
-        "secondary_guide_face_ids",
-        "secondary_guide_barycentric",
-        "secondary_guide_parent_ids",
-        "guide_face_ids",
-        "guide_barycentric",
-    )
+    required = ["guide_face_ids", "guide_barycentric"]
+    if args.placement == "checkpoint":
+        required.extend(
+            [
+                "secondary_guide_face_ids",
+                "secondary_guide_barycentric",
+                "secondary_guide_parent_ids",
+            ]
+        )
     missing = [name for name in required if name not in basis_state]
     if missing:
         raise RuntimeError("basis checkpoint is missing: " + ", ".join(missing))
@@ -283,10 +421,31 @@ def run_audit(args: argparse.Namespace) -> dict[str, object]:
 
     model.geometry_residual_domain = "secondary_guide"
     model.secondary_guide_interpolation_k = max(args.interpolation_k)
+    if args.placement == "checkpoint":
+        secondary_face_ids = basis_state["secondary_guide_face_ids"]
+        secondary_barycentric = basis_state["secondary_guide_barycentric"]
+        secondary_parent_ids = basis_state["secondary_guide_parent_ids"]
+        placement_report: dict[str, object] = {
+            "mode": "checkpoint",
+            "secondary_root_count": int(secondary_face_ids.shape[0]),
+        }
+    else:
+        (
+            secondary_face_ids,
+            secondary_barycentric,
+            secondary_parent_ids,
+            placement_report,
+        ) = area_proportional_secondary_topology(
+            model,
+            secondary_root_count=args.secondary_root_count,
+            candidate_multiplier=args.candidate_multiplier,
+            seed=int(getattr(config, "seed", 29)) + 29,
+        )
+        placement_report["secondary_root_count"] = int(secondary_face_ids.shape[0])
     model.attach_secondary_guides(
-        basis_state["secondary_guide_face_ids"],
-        basis_state["secondary_guide_barycentric"],
-        basis_state["secondary_guide_parent_ids"],
+        secondary_face_ids,
+        secondary_barycentric,
+        secondary_parent_ids,
     )
     source_points = model.secondary_guide_points_local
     parent_ids = model.secondary_guide_parent_ids
@@ -301,6 +460,7 @@ def run_audit(args: argparse.Namespace) -> dict[str, object]:
         "target_iteration": int(checkpoint.get("iteration", -1)),
         "target_render_root_count": int(query_points.shape[0]),
         "secondary_root_count": int(source_points.shape[0]),
+        "placement": placement_report,
         "target_geometry_domain": str(config.geometry_residual_domain),
         "audits": {},
     }
@@ -446,6 +606,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--basis-checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--interpolation-k", type=int, nargs="+", default=[4, 8])
+    parser.add_argument(
+        "--placement",
+        choices=("checkpoint", "area_proportional"),
+        default="checkpoint",
+    )
+    parser.add_argument("--secondary-root-count", type=int, default=20_000)
+    parser.add_argument("--candidate-multiplier", type=float, default=16.0)
     parser.add_argument("--cg-iterations", type=int, default=80)
     parser.add_argument("--cg-tolerance", type=float, default=1.0e-5)
     parser.add_argument("--device", default="cuda")
@@ -456,6 +623,10 @@ def main() -> None:
     args = parse_args()
     if not args.interpolation_k or any(value <= 0 for value in args.interpolation_k):
         raise ValueError("interpolation K values must be positive")
+    if args.secondary_root_count <= 0:
+        raise ValueError("secondary root count must be positive")
+    if args.candidate_multiplier < 1.0:
+        raise ValueError("candidate multiplier must be at least one")
     result = run_audit(args)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
