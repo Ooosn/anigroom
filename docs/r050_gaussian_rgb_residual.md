@@ -73,3 +73,10 @@ Formal H100 result pending. Local implementation verification completed:
   residual-free;
 - residual statistics are computed exactly in root chunks, avoiding a full
   decoded-profile temporary allocation during evaluation.
+
+Before the formal run, the explicitly non-reportable
+`configs/r050_gaussian_rgb_residual_fullres_preflight.env` executes one real
+1920x1080 view09 optimizer step with the full 400k-root model and residual
+multiplier one. Its sole purpose is to verify CUDA forward/backward, nonzero
+profile gradients/state, checkpoint reload, and peak memory before committing
+the held H100 to 30k.
