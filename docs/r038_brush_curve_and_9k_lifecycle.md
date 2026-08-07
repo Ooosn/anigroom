@@ -1,6 +1,6 @@
 # R038 Brush Curve And Finite Render Lifecycle
 
-Status: accepted as the active structural/lifecycle Stage 1 baseline after a
+Status: accepted as a historical structural/lifecycle Stage 1 baseline after a
 complete strict-schema 0-30k H100 run. R036 remains frozen as the higher-PSNR
 metric control.
 

@@ -1,6 +1,6 @@
 # R-Series Evolution
 
-Status date: 2026-08-07. Active structural/lifecycle baseline: R042. Frozen
+Status date: 2026-08-07. Active structural/lifecycle baseline: R043. Frozen
 higher-PSNR metric control: R036.
 
 This document is the compact decision history. Detailed measurements and
@@ -25,6 +25,7 @@ individual R-series documents.
 | R040 | Replaced four deterministic children with 400k independent render roots and `child_count=1`. |
 | R041 | Made the dense surface graph exact and practical by removing redundant rebuild work. |
 | R042 | Completed exact lifecycle-selection acceleration and passed the formal from-zero 30k gate. |
+| R043 | Restored density-matched K32 render support and removed the sparse long/sharp centerline tail without a physical cap. |
 
 ## Recovery And Interpolation: R000-R007
 
@@ -123,18 +124,20 @@ It is accepted because fixed-protocol structure remains coherent while root,
 Gaussian, memory, and runtime cost fall substantially. R036 stays frozen for
 metric comparisons.
 
-## Independent Dense Roots And Exact Execution: R039-R042
+## Independent Dense Roots And Exact Execution: R039-R043
 
 | Run | Test | Decision and lasting result |
 | --- | --- | --- |
 | R039 | One-turn direction-aware centerline | Completed: final/best test `32.2164/32.4111`; frozen as the direct structural parent. |
 | R040 | 400k independent roots, `child_count=1` | Representation and memory gates passed. Exact graph rebuild cost `18.3-18.6 s` per lifecycle event blocked a formal run. |
 | R041 | Exact dense surface-graph acceleration | Preserved selected roots and ordered edges while reducing graph rebuild from `18.5848 s` to `0.1988 s`. |
-| R042 | Exact lifecycle-selection acceleration plus formal 30k | Selection fell from `8.9911 s` to `5.1573 s` with identical parent/child counts. Formal 30k completed at final/best test `32.51543/32.71918`, `469737` roots, `5.319M` Gaussians, and `13.188 GB` peak allocation. Accepted as active structural/lifecycle baseline. |
+| R042 | Exact lifecycle-selection acceleration plus formal 30k | Selection fell from `8.9911 s` to `5.1573 s` with identical parent/child counts. Formal 30k completed at final/best test `32.51543/32.71918`, `469737` roots, `5.319M` Gaussians, and `13.188 GB` peak allocation. Accepted, then frozen as R043's K8 parent. |
+| R043 | Density-matched K32 render support | Final/best test is `32.51159/32.71421`, effectively tied with R042. In the fixed 100k-strand audit, maximum length falls from `0.22087` to `0.13155`, count above `0.15` falls from 7 to 0, and maximum local turn falls from `14.89` to `2.73` degrees. Accepted as active structural/lifecycle baseline. |
 
-R042 improves final/best test composite over R038 by
-`+0.16955/+0.20241 dB`, uses about `44.0%` fewer Gaussians, and trains about
-`8.8%` faster. It remains `0.14779 dB` below R036 at the final test metric, so
+R043 improves final/best test composite over R038 by
+`+0.16571/+0.19744 dB`, uses about `44.2%` fewer Gaussians, and retains the
+independent-root representation. It remains `0.15163 dB` below R036 at the
+final test metric, so
 R036 remains the metric control rather than being rewritten by the structural
 decision.
 
@@ -160,9 +163,10 @@ The strongest reusable findings are:
 
 ## Current Boundary
 
-R042 contains the base brush curve, independent render roots, and an exact
+R043 contains the base brush curve, independent render roots, and an exact
 finite render-root lifecycle. It does not redesign or enable curl/frizz, and it
 does not add Gaussian-level RGB appearance residuals. Those remain separate
-future candidates and must not be described as part of this baseline. The
-sparse long/sharp tail in the 100k-strand audit is recorded for later asset
-cleanup; it is not hidden by a sample-specific length cap in R042.
+future candidates and must not be described as part of this baseline. R043
+removes R042's sparse long/sharp residual tail through density-matched surface
+support, not through a sample-specific length cap. Exact per-iteration K32
+edge-pass acceleration is the next isolated execution candidate.

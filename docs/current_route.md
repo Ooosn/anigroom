@@ -7,23 +7,26 @@ ledger records measured experiments, but it does not define executable schema.
 
 ## Baseline Status
 
-R042 is the active structural/lifecycle Stage 1 baseline:
+R043 is the active structural/lifecycle Stage 1 baseline:
 
-- final train/test composite PSNR: `33.48265 / 32.51543`
-- best test composite PSNR: `32.71918` at 29k
-- final render roots/training-metric Gaussians: `469737 / 5319498`
-- elapsed H100 training time: `11263.974 s`
-- peak allocated CUDA memory: `13187.99 MB`
+- final train/test composite PSNR: `33.46581 / 32.51159`
+- best test composite PSNR: `32.71421` at 29k
+- final render roots/training-metric Gaussians: `469620 / 5295653`
+- elapsed H100 training time: `17388.655 s`
+- peak allocated CUDA memory: `19733.46 MB`
 - formal checkpoint SHA-256:
-  `5d05bf9a7b5e8f95f46498f97ce2c89d5f233a5f65830002a3ae42378b9dbdf9`
+  `748018581c0eac02eefe1f2361c10dbfe0fa5e5a742ff3beee2e3163c143a632`
 - canonical asset render:
-  `D:/RTS/_tmp/r042_30k_final/r042_030000_asset_side_y_v11_protocol.png`
+  `D:/RTS/_tmp/r043_30k_final/r043_030000_asset_side_y_v11_protocol.png`
 
-The `stage1-r042` tag and
-`configs/r042_exact_lifecycle_selection.lock.json` freeze the exact source,
-unchanged R040 behavior configuration, formal metrics, checkpoint, and
-postprocess evidence. R042 uses 400k initial independent render roots with
+The `stage1-r043` tag and
+`configs/r043_density_matched_render_support.lock.json` freeze the exact
+source, behavior configuration, formal metrics, checkpoint, and postprocess
+evidence. R043 uses 400k initial independent render roots with
 `child_count=1`; no deterministic child expansion is part of the active route.
+Its render-domain surface support is K32, matching the fourfold independent-root
+density increase from R039, while guide-domain support remains K8. R042 is the
+frozen K8 parent.
 
 R036 remains the immutable higher-PSNR metric control:
 
@@ -36,21 +39,24 @@ R036 remains the immutable higher-PSNR metric control:
   `D:/RTS/_tmp/r036_30k_final/r036_030000_asset_side_y_v11_protocol.png`
 
 The `stage1-r036` Git tag is byte-identical to its formal runtime snapshot, and
-`configs/stage1_baseline.lock.json` continues to verify that control. R042 is
-`0.14779 dB` lower at the final test metric and `0.12059 dB` lower at the best
-test metric, while using about `62.6%` fewer generated Gaussians. It is
+`configs/stage1_baseline.lock.json` continues to verify that control. R043 is
+`0.15163 dB` lower at the final test metric and `0.12556 dB` lower at the best
+test metric, while using about `62.7%` fewer generated Gaussians. It is
 accepted for independent-root structure, exact finite lifecycle, lower
-capacity cost, and coherent fixed-protocol assets, not reported as a PSNR gain
-over R036. The exact v4 target remains tracked under `baseline_inputs/` with
-unchanged content.
+capacity cost, density-matched surface smoothing, and coherent fixed-protocol
+assets, not reported as a PSNR gain over R036. Relative to R042, final/best
+test composite changes by only `-0.00384/-0.00496 dB`, while the 100k-strand
+audit removes every length above `0.15` and reduces maximum local turn from
+`14.89` to `2.73` degrees. The exact v4 target remains tracked under
+`baseline_inputs/` with unchanged content.
 
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
 - frozen R036 metric-control configuration: `configs/stage1_baseline.env`
-- active R042 behavior configuration:
-  `configs/r040_child1_dense_render_0_30k.env`
-- active R042 lock: `configs/r042_exact_lifecycle_selection.lock.json`
+- active R043 behavior configuration:
+  `configs/r043_density_matched_render_support_0_30k.env`
+- active R043 lock: `configs/r043_density_matched_render_support.lock.json`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
@@ -86,7 +92,7 @@ preserving the root, tip, straight length, and 3D endpoint direction. The
 effective value is brush stiffness multiplied by the continuous tangential
 difference between the normal and endpoint direction. There is no second
 interior deformation field. Curl and frizz remain separate optional shape
-controls but stay disabled in R042. The active route has one strand per render
+controls but stay disabled in R043. The active route has one strand per render
 root (`child_count=1`); density comes from independent render roots and their
 finite lifecycle, not deterministic child expansion.
 
@@ -131,7 +137,7 @@ parameterization is stored beside the normalized 3D vector.
 - full resolution: `1920x1080`
 - initial guide/render roots: `4500 / 400000`
 - render-root lifecycle: every 100 iterations from 600 through 9k
-- guide-root lifecycle: disabled in R042
+- guide-root lifecycle: disabled in R043
 - guide fields unlock after 9k; render-root geometry residuals ramp 10k to 20k
 - render child-spread coverage unlock: 1k to 7k
 - shape detail freeze: through 14k, then shared gradual unlock
@@ -156,7 +162,7 @@ accepted mean absolute prior and adds the population-stable concentration term
 ## Representation Lineage
 
 The retired directional decomposition and old gravity/sag controls are no
-longer present. R042 uses only length, normalized 3D endpoint direction, and
+longer present. R043 uses only length, normalized 3D endpoint direction, and
 guide-owned brush stiffness for the ordinary base centerline. Curl/frizz and
 clump remain separate explicit controls; curl/frizz have zero effective scale
 in this short-fur baseline.
@@ -225,9 +231,10 @@ evidence in
 and
 [`r039_one_turn_brush_centerline.md`](r039_one_turn_brush_centerline.md).
 R040 establishes independent dense render roots, R041 accelerates their exact
-surface graph, and R042 accelerates exact lifecycle selection. Their accepted
+surface graph, R042 accelerates exact lifecycle selection, and R043 restores
+density-matched physical support to the independent render field. The active
 result is recorded in
-[`r042_exact_lifecycle_selection_acceleration.md`](r042_exact_lifecycle_selection_acceleration.md).
+[`r043_density_matched_render_support.md`](r043_density_matched_render_support.md).
 
 ## Execution Memory Contract
 
@@ -264,7 +271,10 @@ from `18.45` to `12.34 GB`.
 No image resolution, root/strand/Gaussian count, segment budget, renderer
 setting, loss, or optimization schedule was reduced for this repair.
 
-The formal R042 H100 run validates the same execution contract at `469737`
-independent render roots. It completes in `11263.974 s` with `5319498`
-training-metric Gaussians and `13187.99 MB` peak allocated CUDA memory, without
-OOM, restart, fallback, or use of a second GPU.
+The formal R043 H100 run validates the same execution contract at `469620`
+independent render roots. It completes in `17388.655 s` with `5295653`
+training-metric Gaussians and `19733.46 MB` peak allocated CUDA memory, without
+OOM, restart, fallback, or use of a second GPU. Exact K32 graph construction is
+cached and fast; the remaining cost is repeated per-iteration traversal of the
+larger edge set. The next execution candidate must preserve exact R043 losses
+and gradients rather than reducing K or model capacity.

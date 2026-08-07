@@ -1,10 +1,11 @@
 # AniGroom Module Map
 
-Current source of truth: `docs/current_route.md`. R042 is the active
+Current source of truth: `docs/current_route.md`. R043 is the active
 structural/lifecycle result; R036 remains the frozen higher-PSNR metric
-control. R042 retains the accepted flow, interpolation, hierarchy, one-turn
+control. R043 retains the accepted flow, interpolation, hierarchy, one-turn
 centerline, and finite 600-9000 render lifecycle while using 400k independent
-render roots and exact accelerated graph/lifecycle selection.
+render roots, exact accelerated graph/lifecycle selection, and density-matched
+K32 render support. Guide support remains K8.
 
 ## Flow Initialization
 
@@ -17,7 +18,7 @@ render roots and exact accelerated graph/lifecycle selection.
 - Code: `anigroom/grooming/strand_gaussians.py`.
 - It owns explicit groom decoding, strand construction, adaptive segment
   counts, and strand-to-Gaussian conversion.
-- R042 constructs one guide-owned quadratic normal-to-groom curve and allocates
+- R043 constructs one guide-owned quadratic normal-to-groom curve and allocates
   Gaussians from its final arc/turn complexity. Curve strength is multiplied by
   the continuous normal/direction difference. No second interior deformation
   is present in the executable schema.
@@ -35,14 +36,14 @@ render roots and exact accelerated graph/lifecycle selection.
 - Generic runner: `scripts/server/run_white_tiger_stage1.sh`; `CONFIG_PATH` is
   mandatory and has no fallback.
 - Frozen R036 metric-control config: `configs/stage1_baseline.env`.
-- Active R042 result: train/test composite PSNR `33.48265 / 32.51543`; best
-  test composite PSNR `32.71918` at 29k.
+- Active R043 result: train/test composite PSNR `33.46581 / 32.51159`; best
+  test composite PSNR `32.71421` at 29k.
 - Active behavior config and lock:
-  `configs/r040_child1_dense_render_0_30k.env` and
-  `configs/r042_exact_lifecycle_selection.lock.json`.
+  `configs/r043_density_matched_render_support_0_30k.env` and
+  `configs/r043_density_matched_render_support.lock.json`.
 - R038/R039 configs remain historical evidence and are not launcher fallbacks.
 - Frozen R036 metric-control lock: `configs/stage1_baseline.lock.json`.
-- Evidence: `docs/r042_exact_lifecycle_selection_acceleration.md` and
+- Evidence: `docs/r043_density_matched_render_support.md` and
   `docs/accept_line_recovery_ledger.md`.
 
 The active schema is strict and has no historical checkpoint migration.

@@ -6,6 +6,7 @@ from tools.verify_stage1_baseline import PROJECT_ROOT, verify_baseline_lock
 
 CONFIG_PATH = PROJECT_ROOT / "configs" / "stage1_baseline.env"
 R042_LOCK_PATH = PROJECT_ROOT / "configs" / "r042_exact_lifecycle_selection.lock.json"
+R043_LOCK_PATH = PROJECT_ROOT / "configs" / "r043_density_matched_render_support.lock.json"
 RUNNER_PATH = PROJECT_ROOT / "scripts" / "server" / "run_white_tiger_stage1.sh"
 
 
@@ -30,6 +31,13 @@ def test_active_r042_files_match_lock() -> None:
     report = verify_baseline_lock(lock_path=R042_LOCK_PATH)
     assert report["baseline_id"] == "stage1-r042"
     assert report["source_ref"] == "stage1-r042"
+    assert report["ok"], report["failures"]
+
+
+def test_active_r043_files_match_lock() -> None:
+    report = verify_baseline_lock(lock_path=R043_LOCK_PATH)
+    assert report["baseline_id"] == "stage1-r043"
+    assert report["source_ref"] == "stage1-r043"
     assert report["ok"], report["failures"]
 
 

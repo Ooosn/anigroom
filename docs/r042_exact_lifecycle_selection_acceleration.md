@@ -8,10 +8,11 @@ candidate set, child placement, pruning, interpolation, graph K, and graph
 ordering. The matched 600-to-700 H100 gate passes. R042 removes the remaining
 obvious duplicate work in lifecycle selection; it does not add a new method.
 
-The formal from-zero 30k gate has now completed. R042 is the active
-structural/lifecycle Stage 1 baseline: `child_count=1`, 400k initial independent
-render roots, exact surface neighborhoods, and the unchanged finite 600-9000
-render-root lifecycle. R036 remains the frozen higher-PSNR metric control.
+The formal from-zero 30k gate completed successfully. R042 is now the frozen
+K8 parent of the accepted R043 density-matched-support baseline:
+`child_count=1`, 400k initial independent render roots, exact surface
+neighborhoods, and the unchanged finite 600-9000 render-root lifecycle. R036
+remains the frozen higher-PSNR metric control.
 
 ## Profiled Bottleneck
 

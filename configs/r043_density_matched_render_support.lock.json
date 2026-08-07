@@ -1,0 +1,64 @@
+{
+  "baseline_id": "stage1-r043",
+  "source_ref": "stage1-r043",
+  "source_commit": "3afc5078026dd335eccc284ee04136e42dd70a41",
+  "frozen_at": "2026-08-07",
+  "behavior_config": "configs/r043_density_matched_render_support_0_30k.env",
+  "formal_run": {
+    "output": "/home/wangyy/anigroom-r043-density-support-runtime-20260807/outputs/r043_density_support_full_0_30k_h100_20260807",
+    "checkpoint": {
+      "path": "checkpoint_030000.pt",
+      "bytes": 201705226,
+      "sha256": "748018581c0eac02eefe1f2361c10dbfe0fa5e5a742ff3beee2e3163c143a632"
+    },
+    "config_bytes": 4445,
+    "config_sha256": "6cdf05b78ea4b9968546aefe99da9355565228bdef1829cd7d3ed97b434e13e1",
+    "launcher_bytes": 14922,
+    "launcher_sha256": "d1fff35c0c798bf622de23319a122e42bae9a26457a132e0d928b0c492f126a6",
+    "saved_config_bytes": 5836,
+    "saved_config_sha256": "a11289553944a7587d4df9f539a0e52eb07f6ad1c1795f7f89b6276967173b07",
+    "metrics_bytes": 1196775,
+    "metrics_sha256": "6ebb96708a84f5fa13ab18e17940634b4d7d6965b8daf4ca78378a94392dba93",
+    "final_train_composite_psnr": 33.46581268310547,
+    "final_test_composite_psnr": 32.51158905029297,
+    "best_test_composite_psnr": 32.71421432495117,
+    "best_test_iteration": 29000,
+    "render_roots": 469620,
+    "training_metric_gaussians": 5295653,
+    "checkpoint_postprocess_gaussians": 5295533,
+    "elapsed_seconds": 17388.655,
+    "max_allocated_memory_mb": 19733.46,
+    "lifecycle_event_count": 85,
+    "lifecycle_last_iteration": 9000
+  },
+  "postprocess": {
+    "local_root": "D:/RTS/_tmp/r043_30k_final",
+    "manifest_files": 73,
+    "manifest_sha256": "f8a0c55aad557b450ca94955868d38dab6de3b403e3b96cee5922657b1aef60f",
+    "strand_export": {
+      "path": "strands/r043_030000_child1_100k_samples32.npz",
+      "bytes": 56432264,
+      "sha256": "635a7f990a4ef511e5126f6588f8129232afdc7accef70d041687d3a70645d49"
+    },
+    "asset_side_y_sha256": "753ecfb042eae149adf0d541176490779e5d1b9e78eefaa5fa7585adc65c9f0a",
+    "asset_side_y_pos_sha256": "c64ab7e6386bbe6437d306ef3a8e861ac419eaecd6898fd34680bbbb4bdbc460",
+    "asset_front_z_sha256": "1bbc122dc7e022015b13ecaec13cd958fc26ecb4c781592c36ebc6b8d7cc3aeb"
+  },
+  "local_files": {
+    "configs/r043_density_matched_render_support_0_30k.env": "6cdf05b78ea4b9968546aefe99da9355565228bdef1829cd7d3ed97b434e13e1",
+    "baseline_inputs/v4_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz": "60a33b360bb415cb47cd38173d6e0cf4504448203ef277a5861641b40fdb3141",
+    "anigroom/roots/__init__.py": "5a3b06a87bb5c7d11ddc06d53ec79870aea9a8f84c6af4a9aa61b846913422c2",
+    "anigroom/roots/lifecycle.py": "3e0a08d0390042d4925c790e7c30e4b65c7e67f6d1dcad4b81c5270e84b8591a",
+    "anigroom/roots/statistics.py": "5c66bfb55581392c018ed0970f85396da61db8de2412480e729d158ed69d8416",
+    "anigroom/surface_interpolation.py": "c5d90ac253ad109006cd41586ac0352103c4511b446b38d0edfb8f04d1a86cf5",
+    "anigroom/grooming/__init__.py": "6e7f2928692fd4e325dd443b3d5dd9eee2f07f8fac25f82cfe653e4ed2f8306f",
+    "anigroom/grooming/strand_gaussians.py": "2bd3979f0545a9190f5e517e8e3db0f8fc12ce49e39993a8e414057a36658330",
+    "tools/train_white_tiger_stage1.py": "99fd657284c7b36cda957082b5439ed1d159b79c5d8e04744470298b50163b9b",
+    "scripts/server/run_white_tiger_stage1.sh": "d1fff35c0c798bf622de23319a122e42bae9a26457a132e0d928b0c492f126a6",
+    "tools/export_white_tiger_checkpoint_strands.py": "92de7f73234b61673f603fe399bd4285ac2a78a5bd8e0f1b45f78beb770677b2",
+    "tools/export_white_tiger_checkpoint_gaussians_ply.py": "727cf5af37df578f3a4c2e31c7418add3d2179e46239bf3f2c10a23fa6dfaab1",
+    "tools/render_white_tiger_stage1_checkpoint_views.py": "1fc8a894e81bcc6656da06580535e04c0c80d650534ebb85ed74a987562f9021",
+    "tools/visualize_white_tiger_groom_attributes.py": "bd0aa183f9397dab2b7ea29fd9652ccb35ded4d0f5759f1a12d986292f796941",
+    "tools/blender_render_strand_npz.py": "2aac9ac60d507e1081467c5df1511cc2e7a566b13e679f1a69ec2c022cbd66a7"
+  }
+}
