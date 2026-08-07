@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from anigroom.grooming.geometry_residuals import RenderGeometryResidualField
@@ -16,6 +17,7 @@ from anigroom.surface_interpolation import SurfaceFieldInterpolator, SurfaceSupp
 from tools.train_white_tiger_stage1 import (
     Stage1Config,
     WhiteTigerStage1Model,
+    build_stage1_model_from_checkpoint,
     dense_groom_ranges,
     make_stage1_optimizer,
     stage1_optimizer_param_names,
@@ -388,3 +390,193 @@ def test_model_secondary_zero_state_matches_direct_primary_interpolation() -> No
     assert hierarchical.secondary_render_support().indices.shape == (5, 4)
     for name, parameter in hierarchical.secondary_geometry_residual.named_parameters():
         torch.testing.assert_close(parameter, secondary_before[name])
+
+
+def test_formal_checkpoint_loader_restores_render_and_secondary_domains(
+    monkeypatch,
+) -> None:
+    mesh = grid_mesh()
+    primary = primary_roots(mesh)
+    triangles = mesh.vertices[mesh.faces]
+    normals = np.cross(
+        triangles[:, 1] - triangles[:, 0],
+        triangles[:, 2] - triangles[:, 0],
+    )
+    normals /= np.maximum(np.linalg.norm(normals, axis=-1, keepdims=True), 1.0e-8)
+    interpolator = SurfaceFieldInterpolator(
+        vertices=mesh.vertices,
+        faces=mesh.faces,
+        source_points=primary.points,
+        source_face_ids=primary.face_ids,
+        neighbor_count=4,
+        device="cpu",
+    )
+    secondary = initialize_parent_conditioned_secondary_roots(
+        mesh,
+        primary,
+        interpolator,
+        8,
+        candidate_multiplier=32.0,
+        seed=31,
+        device="cpu",
+    )
+    monkeypatch.setattr(
+        "tools.train_white_tiger_stage1.read_obj_mesh",
+        lambda _path: mesh,
+    )
+
+    common_model = dict(
+        mesh=mesh,
+        face_normals=normals.astype(np.float32),
+        face_tangents=None,
+        face_ids=primary.face_ids,
+        barycentric=primary.barycentric,
+        ranges=dense_groom_ranges(),
+        device=torch.device("cpu"),
+        guide_face_ids=primary.face_ids,
+        guide_barycentric=primary.barycentric,
+        guide_interpolation_k=4,
+        render_geometry_parameterization="zero_centered_asinh_log_length_residual",
+        guide_length_residual_scale=1.0,
+        guide_direction_residual_scale=1.0,
+    )
+    render_model = WhiteTigerStage1Model(
+        **common_model,
+        geometry_residual_domain="render",
+    )
+    secondary_model = WhiteTigerStage1Model(
+        **common_model,
+        geometry_residual_domain="secondary_guide",
+        secondary_guide_face_ids=secondary.roots.face_ids,
+        secondary_guide_barycentric=secondary.roots.barycentric,
+        secondary_guide_parent_ids=secondary.parent_ids,
+        secondary_guide_interpolation_k=4,
+    )
+
+    common_config = dict(
+        data_root="unused",
+        mesh_path="unused.obj",
+        output_dir="unused",
+        guide_root_count=4,
+        guide_interpolation_k=4,
+        render_geometry_parameterization="zero_centered_asinh_log_length_residual",
+        guide_length_residual_scale=1.0,
+        guide_direction_residual_scale=1.0,
+        guide_residual_unlock_start=10,
+        guide_residual_unlock_end=20,
+        guide_residual_initial_multiplier=0.0,
+        guide_coverage_residual_unlock_start=10,
+        guide_coverage_residual_unlock_end=20,
+        guide_coverage_residual_initial_multiplier=0.2,
+        shape_detail_freeze_until=12,
+    )
+    cases = (
+        (
+            render_model,
+            Stage1Config(
+                **common_config,
+                geometry_residual_domain="render",
+            ),
+        ),
+        (
+            secondary_model,
+            Stage1Config(
+                **common_config,
+                geometry_residual_domain="secondary_guide",
+                secondary_guide_root_count=8,
+                secondary_guide_interpolation_k=4,
+            ),
+        ),
+    )
+
+    for source, config in cases:
+        restored = build_stage1_model_from_checkpoint(
+            {"model": source.state_dict(), "iteration": 15},
+            config,
+            torch.device("cpu"),
+        )
+        assert restored.geometry_residual_domain == source.geometry_residual_domain
+        assert restored.secondary_guides_enabled() == source.secondary_guides_enabled()
+        assert restored.training is False
+        assert restored.guide_residual_multiplier == pytest.approx(0.5)
+        assert restored.guide_coverage_residual_multiplier == pytest.approx(0.6)
+        assert restored.shape_detail_multiplier == pytest.approx(3.0 / 8.0)
+        restored_state = restored.state_dict()
+        source_state = source.state_dict()
+        assert restored_state.keys() == source_state.keys()
+        for name, value in source_state.items():
+            torch.testing.assert_close(value, restored_state[name])
+
+
+def test_formal_checkpoint_loader_rejects_incomplete_secondary_topology(
+    monkeypatch,
+) -> None:
+    mesh = grid_mesh()
+    primary = primary_roots(mesh)
+    triangles = mesh.vertices[mesh.faces]
+    normals = np.cross(
+        triangles[:, 1] - triangles[:, 0],
+        triangles[:, 2] - triangles[:, 0],
+    )
+    normals /= np.maximum(np.linalg.norm(normals, axis=-1, keepdims=True), 1.0e-8)
+    interpolator = SurfaceFieldInterpolator(
+        vertices=mesh.vertices,
+        faces=mesh.faces,
+        source_points=primary.points,
+        source_face_ids=primary.face_ids,
+        neighbor_count=4,
+        device="cpu",
+    )
+    secondary = initialize_parent_conditioned_secondary_roots(
+        mesh,
+        primary,
+        interpolator,
+        8,
+        candidate_multiplier=32.0,
+        seed=37,
+        device="cpu",
+    )
+    source = WhiteTigerStage1Model(
+        mesh=mesh,
+        face_normals=normals.astype(np.float32),
+        face_tangents=None,
+        face_ids=primary.face_ids,
+        barycentric=primary.barycentric,
+        ranges=dense_groom_ranges(),
+        device=torch.device("cpu"),
+        guide_face_ids=primary.face_ids,
+        guide_barycentric=primary.barycentric,
+        guide_interpolation_k=4,
+        geometry_residual_domain="secondary_guide",
+        secondary_guide_face_ids=secondary.roots.face_ids,
+        secondary_guide_barycentric=secondary.roots.barycentric,
+        secondary_guide_parent_ids=secondary.parent_ids,
+        secondary_guide_interpolation_k=4,
+        render_geometry_parameterization="zero_centered_asinh_log_length_residual",
+        guide_length_residual_scale=1.0,
+    )
+    state = source.state_dict()
+    del state["secondary_guide_parent_ids"]
+    monkeypatch.setattr(
+        "tools.train_white_tiger_stage1.read_obj_mesh",
+        lambda _path: mesh,
+    )
+    config = Stage1Config(
+        data_root="unused",
+        mesh_path="unused.obj",
+        output_dir="unused",
+        guide_root_count=4,
+        guide_interpolation_k=4,
+        geometry_residual_domain="secondary_guide",
+        secondary_guide_root_count=8,
+        secondary_guide_interpolation_k=4,
+        render_geometry_parameterization="zero_centered_asinh_log_length_residual",
+        guide_length_residual_scale=1.0,
+    )
+
+    with pytest.raises(RuntimeError, match="missing persistent topology"):
+        build_stage1_model_from_checkpoint(
+            {"model": state, "iteration": 0},
+            config,
+            torch.device("cpu"),
+        )

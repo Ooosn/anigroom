@@ -137,66 +137,6 @@ def summarize_tensor(value: torch.Tensor) -> dict[str, float]:
     }
 
 
-def load_checkpoint_model(checkpoint_path: Path, device: torch.device):
-    checkpoint = stage1.load_training_checkpoint(checkpoint_path)
-    config_mapping = checkpoint.get("config")
-    if config_mapping is None:
-        config_path = checkpoint_path.parent / "config.json"
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"checkpoint has no embedded config and no config exists next to it: {config_path}"
-            )
-        config_mapping = json.loads(config_path.read_text(encoding="utf-8"))
-    config = stage1.stage1_config_from_checkpoint_mapping(config_mapping)
-    state = checkpoint["model"]
-    mesh_path = stage1.resolve_project_path(config.mesh_path)
-    mesh = stage1.read_obj_mesh(mesh_path)
-    normals = stage1.face_normals_np(mesh)
-    face_ids = state["face_ids"].detach().cpu().numpy()
-    bary = state["bary_initial"].detach().cpu().numpy()
-    guide_face_ids = None
-    guide_bary = None
-    if "guide_face_ids" in state and int(state["guide_face_ids"].numel()) > 0:
-        guide_face_ids = state["guide_face_ids"].detach().cpu().numpy()
-        guide_bary = state["guide_barycentric"].detach().cpu().numpy()
-    model = stage1.WhiteTigerStage1Model(
-        mesh,
-        normals,
-        None,
-        face_ids,
-        bary,
-        stage1.dense_groom_ranges(),
-        device,
-        init_scale=config.init_mesh_scale,
-        init_translation=tuple(config.init_mesh_translation),
-        init_groom_length=getattr(config, "init_groom_length", 0.060),
-        max_child_count=config.child_count,
-        local_child_color_support=config.local_child_color_support,
-        local_child_color_scale=config.local_child_color_scale,
-        guide_face_ids=guide_face_ids,
-        guide_barycentric=guide_bary,
-        guide_interpolation_k=config.guide_interpolation_k,
-        render_geometry_parameterization=getattr(
-            config,
-            "render_geometry_parameterization",
-            "absolute_endpoint",
-        ),
-        guide_length_residual_scale=getattr(config, "guide_length_residual_scale", 0.0),
-        guide_direction_residual_scale=config.guide_direction_residual_scale,
-        guide_width_residual_scale=getattr(config, "guide_width_residual_scale", 1.0),
-        guide_child_radius_residual_scale=getattr(config, "guide_child_radius_residual_scale", 1.0),
-        guide_clump_residual_scale=getattr(config, "guide_clump_residual_scale", 1.0),
-        guide_curl_residual_scale=getattr(config, "guide_curl_residual_scale", 1.0),
-        guide_frizz_residual_scale=getattr(config, "guide_frizz_residual_scale", 1.0),
-        shape_curl_scale=getattr(config, "shape_curl_scale", 1.0),
-        shape_frizz_scale=getattr(config, "shape_frizz_scale", 1.0),
-        strand_shape_normal_mode=getattr(config, "strand_shape_normal_mode", "full"),
-    )
-    model.load_state_dict(state, strict=True)
-    model.eval()
-    return model, config, checkpoint
-
-
 @torch.no_grad()
 def run_diagnostics(args: argparse.Namespace) -> None:
     if not torch.cuda.is_available():
@@ -206,7 +146,10 @@ def run_diagnostics(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model, config, checkpoint = load_checkpoint_model(checkpoint_path, device)
+    model, config, checkpoint = stage1.load_stage1_checkpoint_model(
+        checkpoint_path,
+        device,
+    )
     data_root = stage1.resolve_project_path(config.data_root)
     mesh_path = stage1.resolve_project_path(config.mesh_path)
     report = stage1.build_stage1_input_report(data_root, mesh_path, test_stride=config.test_stride)

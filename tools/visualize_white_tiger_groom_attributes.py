@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -18,7 +17,6 @@ if str(TOOLS_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import diagnose_white_tiger_streak_roots as streak_diag  # noqa: E402
 import train_white_tiger_stage1 as stage1  # noqa: E402
 from anigroom.flow.clean_flow import groom_direction_3d  # noqa: E402
 
@@ -247,7 +245,7 @@ def main() -> None:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model, config, _ = streak_diag.load_checkpoint_model(checkpoint_path, device)
+    model, config, _ = stage1.load_stage1_checkpoint_model(checkpoint_path, device)
     data_root = stage1.resolve_project_path(config.data_root)
     viewmats, ks = stage1.load_camera_tensors(data_root, device)
     width, height = int(config.expected_width), int(config.expected_height)

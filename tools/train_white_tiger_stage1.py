@@ -5703,6 +5703,205 @@ def shape_detail_multiplier_for_iteration(config: Stage1Config, iteration: int) 
     return float(iteration - freeze_until) / float(max(1, ramp_end - freeze_until))
 
 
+def build_stage1_model_from_checkpoint(
+    checkpoint: dict[str, object],
+    config: Stage1Config,
+    device: torch.device,
+) -> WhiteTigerStage1Model:
+    """Reconstruct the exact Stage1 model topology stored in a checkpoint."""
+
+    state = checkpoint.get("model")
+    if not isinstance(state, dict):
+        raise RuntimeError("Stage1 checkpoint has no model state dictionary")
+
+    def state_array(name: str, dtype: np.dtype) -> np.ndarray:
+        value = state.get(name)
+        if not isinstance(value, torch.Tensor):
+            raise RuntimeError(f"Stage1 checkpoint is missing tensor: {name}")
+        return value.detach().cpu().numpy().astype(dtype, copy=False)
+
+    mesh = read_obj_mesh(resolve_project_path(config.mesh_path))
+    normals = face_normals_np(mesh)
+    face_ids = state_array("face_ids", np.int64)
+    barycentric = state_array("bary_initial", np.float32)
+
+    face_tangents = None
+    face_tangent_state = state.get("face_tangents")
+    if isinstance(face_tangent_state, torch.Tensor) and face_tangent_state.numel() > 0:
+        face_tangents = face_tangent_state.detach().cpu().numpy().astype(np.float32)
+        if face_tangents.shape != (mesh.face_count, 3):
+            raise RuntimeError(
+                "checkpoint face tangent field shape mismatch: "
+                f"{face_tangents.shape} != {(mesh.face_count, 3)}"
+            )
+
+    guide_face_ids = None
+    guide_barycentric = None
+    guide_region_ids = None
+    guide_face_state = state.get("guide_face_ids")
+    guide_bary_state = state.get("guide_barycentric")
+    if isinstance(guide_face_state, torch.Tensor) and guide_face_state.numel() > 0:
+        if not isinstance(guide_bary_state, torch.Tensor):
+            raise RuntimeError(
+                "Stage1 checkpoint has guide face IDs but no guide barycentric coordinates"
+            )
+        guide_face_ids = guide_face_state.detach().cpu().numpy().astype(np.int64)
+        guide_barycentric = guide_bary_state.detach().cpu().numpy().astype(np.float32)
+        guide_region_state = state.get("guide_region_weight")
+        if isinstance(guide_region_state, torch.Tensor) and guide_region_state.numel() > 0:
+            guide_region_ids = (
+                guide_region_state.detach().reshape(-1).cpu().numpy() > 0.5
+            ).astype(np.int64)
+    elif isinstance(guide_bary_state, torch.Tensor) and guide_bary_state.numel() > 0:
+        raise RuntimeError(
+            "Stage1 checkpoint has guide barycentric coordinates but no guide face IDs"
+        )
+
+    secondary_names = (
+        "secondary_guide_face_ids",
+        "secondary_guide_barycentric",
+        "secondary_guide_parent_ids",
+    )
+    secondary_present = [name in state for name in secondary_names]
+    if any(secondary_present) and not all(secondary_present):
+        missing = [
+            name for name, present in zip(secondary_names, secondary_present) if not present
+        ]
+        raise RuntimeError(
+            "secondary-guide checkpoint is missing persistent topology: "
+            + ", ".join(missing)
+        )
+
+    secondary_guide_face_ids = None
+    secondary_guide_barycentric = None
+    secondary_guide_parent_ids = None
+    secondary_count = 0
+    if all(secondary_present):
+        secondary_guide_face_ids = state_array(
+            "secondary_guide_face_ids",
+            np.int64,
+        )
+        secondary_guide_barycentric = state_array(
+            "secondary_guide_barycentric",
+            np.float32,
+        )
+        secondary_guide_parent_ids = state_array(
+            "secondary_guide_parent_ids",
+            np.int64,
+        )
+        secondary_count = int(secondary_guide_face_ids.shape[0])
+        if secondary_guide_barycentric.shape != (secondary_count, 3):
+            raise RuntimeError(
+                "secondary-guide barycentric shape mismatch: "
+                f"{secondary_guide_barycentric.shape} != {(secondary_count, 3)}"
+            )
+        if secondary_guide_parent_ids.shape != (secondary_count,):
+            raise RuntimeError(
+                "secondary-guide parent shape mismatch: "
+                f"{secondary_guide_parent_ids.shape} != {(secondary_count,)}"
+            )
+
+    if config.geometry_residual_domain == "secondary_guide":
+        if secondary_count <= 0:
+            raise RuntimeError(
+                "secondary-guide checkpoint contains no persistent secondary roots"
+            )
+        configured_count = int(config.secondary_guide_root_count)
+        if configured_count > 0 and secondary_count != configured_count:
+            raise RuntimeError(
+                "secondary-guide checkpoint count does not match config: "
+                f"{secondary_count} != {configured_count}"
+            )
+    elif secondary_count > 0:
+        raise RuntimeError(
+            "checkpoint contains secondary guides but config geometry_residual_domain "
+            f"is {config.geometry_residual_domain!r}"
+        )
+    if secondary_count == 0:
+        secondary_guide_face_ids = None
+        secondary_guide_barycentric = None
+        secondary_guide_parent_ids = None
+
+    model = WhiteTigerStage1Model(
+        mesh,
+        normals,
+        face_tangents,
+        face_ids,
+        barycentric,
+        dense_groom_ranges(),
+        device,
+        init_scale=config.init_mesh_scale,
+        init_translation=config.init_mesh_translation,
+        init_groom_length=config.init_groom_length,
+        max_child_count=config.child_count,
+        local_child_color_support=config.local_child_color_support,
+        local_child_color_scale=config.local_child_color_scale,
+        guide_face_ids=guide_face_ids,
+        guide_barycentric=guide_barycentric,
+        guide_region_ids=guide_region_ids,
+        guide_interpolation_k=config.guide_interpolation_k,
+        geometry_residual_domain=config.geometry_residual_domain,
+        secondary_guide_face_ids=secondary_guide_face_ids,
+        secondary_guide_barycentric=secondary_guide_barycentric,
+        secondary_guide_parent_ids=secondary_guide_parent_ids,
+        secondary_guide_interpolation_k=config.secondary_guide_interpolation_k,
+        render_geometry_parameterization=config.render_geometry_parameterization,
+        guide_length_residual_scale=config.guide_length_residual_scale,
+        guide_direction_residual_scale=config.guide_direction_residual_scale,
+        guide_width_residual_scale=config.guide_width_residual_scale,
+        guide_child_radius_residual_scale=config.guide_child_radius_residual_scale,
+        guide_clump_residual_scale=config.guide_clump_residual_scale,
+        guide_curl_residual_scale=config.guide_curl_residual_scale,
+        guide_frizz_residual_scale=config.guide_frizz_residual_scale,
+        shape_curl_scale=config.shape_curl_scale,
+        shape_frizz_scale=config.shape_frizz_scale,
+        strand_shape_normal_mode=config.strand_shape_normal_mode,
+    )
+    incompatible = model.load_state_dict(state, strict=True)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "strict checkpoint load failed: "
+            f"missing={incompatible.missing_keys}, "
+            f"unexpected={incompatible.unexpected_keys}"
+        )
+
+    iteration = int(checkpoint.get("iteration", 0))
+    model.guide_residual_multiplier = guide_residual_multiplier_for_iteration(
+        config,
+        iteration,
+    )
+    model.guide_coverage_residual_multiplier = (
+        guide_coverage_residual_multiplier_for_iteration(config, iteration)
+    )
+    model.shape_detail_multiplier = shape_detail_multiplier_for_iteration(
+        config,
+        iteration,
+    )
+    model.eval()
+    return model
+
+
+def load_stage1_checkpoint_model(
+    checkpoint_path: Path,
+    device: torch.device,
+) -> tuple[WhiteTigerStage1Model, Stage1Config, dict[str, object]]:
+    checkpoint = load_training_checkpoint(checkpoint_path)
+    config_mapping = checkpoint.get("config")
+    if config_mapping is None:
+        config_path = checkpoint_path.parent / "config.json"
+        if not config_path.exists():
+            raise FileNotFoundError(
+                "checkpoint has no embedded config and no config exists next to it: "
+                f"{config_path}"
+            )
+        config_mapping = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(config_mapping, dict):
+        raise RuntimeError("Stage1 checkpoint config is not a dictionary")
+    config = stage1_config_from_checkpoint_mapping(config_mapping)
+    model = build_stage1_model_from_checkpoint(checkpoint, config, device)
+    return model, config, checkpoint
+
+
 def lifecycle_statistics_active(
     config: Stage1Config,
     iteration: int,

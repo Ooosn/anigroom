@@ -13,16 +13,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from anigroom.grooming import build_strands, expand_child_strands  # noqa: E402
-from anigroom.mesh_roots import read_obj_mesh  # noqa: E402
 from tools.train_white_tiger_stage1 import (  # noqa: E402
-    Stage1Config,
-    WhiteTigerStage1Model,
-    dense_groom_ranges,
-    face_normals_np,
-    guide_coverage_residual_multiplier_for_iteration,
-    guide_residual_multiplier_for_iteration,
+    build_stage1_model_from_checkpoint,
+    load_training_checkpoint,
     resolve_project_path,
-    shape_detail_multiplier_for_iteration,
     stage1_config_from_checkpoint_mapping,
 )
 
@@ -48,72 +42,9 @@ def main() -> None:
     args = parse_args()
     device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
     checkpoint_path = resolve_project_path(args.checkpoint)
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    except TypeError:
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = load_training_checkpoint(checkpoint_path)
     config = stage1_config_from_checkpoint_mapping(checkpoint["config"])
-    state = checkpoint["model"]
-
-    mesh = read_obj_mesh(resolve_project_path(config.mesh_path))
-    face_normals = face_normals_np(mesh)
-    face_tangents = None
-    if config.face_tangent_field:
-        tangent_path = resolve_project_path(config.face_tangent_field)
-        face_tangents = np.load(tangent_path).astype(np.float32)
-        if face_tangents.shape != (mesh.face_count, 3):
-            raise RuntimeError(f"face tangent field shape mismatch: {face_tangents.shape} != {(mesh.face_count, 3)}")
-        tangent_norm = np.linalg.norm(face_tangents, axis=-1, keepdims=True)
-        face_tangents = face_tangents / np.maximum(tangent_norm, 1.0e-8)
-    face_ids = tensor_to_numpy(state["face_ids"]).astype(np.int64)
-    if "bary_initial" in state:
-        barycentric = tensor_to_numpy(state["bary_initial"]).astype(np.float32)
-    else:
-        barycentric = tensor_to_numpy(torch.softmax(state["bary_logits"], dim=-1)).astype(np.float32)
-
-    guide_face_ids = None
-    guide_barycentric = None
-    if "guide_face_ids" in state and state["guide_face_ids"].numel() > 0:
-        guide_face_ids = tensor_to_numpy(state["guide_face_ids"]).astype(np.int64)
-        guide_barycentric = tensor_to_numpy(state["guide_barycentric"]).astype(np.float32)
-
-    model = WhiteTigerStage1Model(
-        mesh,
-        face_normals,
-        face_tangents,
-        face_ids,
-        barycentric,
-        dense_groom_ranges(),
-        device,
-        init_scale=config.init_mesh_scale,
-        init_translation=config.init_mesh_translation,
-        init_groom_length=config.init_groom_length,
-        max_child_count=config.child_count,
-        local_child_color_support=config.local_child_color_support,
-        local_child_color_scale=config.local_child_color_scale,
-        guide_face_ids=guide_face_ids,
-        guide_barycentric=guide_barycentric,
-        guide_interpolation_k=config.guide_interpolation_k,
-        render_geometry_parameterization=config.render_geometry_parameterization,
-        guide_length_residual_scale=config.guide_length_residual_scale,
-        guide_direction_residual_scale=config.guide_direction_residual_scale,
-        guide_width_residual_scale=config.guide_width_residual_scale,
-        guide_child_radius_residual_scale=config.guide_child_radius_residual_scale,
-        guide_clump_residual_scale=config.guide_clump_residual_scale,
-        guide_curl_residual_scale=config.guide_curl_residual_scale,
-        guide_frizz_residual_scale=config.guide_frizz_residual_scale,
-        shape_curl_scale=getattr(config, "shape_curl_scale", 1.0),
-        shape_frizz_scale=getattr(config, "shape_frizz_scale", 1.0),
-        strand_shape_normal_mode=getattr(config, "strand_shape_normal_mode", "full"),
-    )
-    missing, unexpected = model.load_state_dict(state, strict=True)
-    if missing or unexpected:
-        raise RuntimeError(f"strict checkpoint load failed: missing={missing}, unexpected={unexpected}")
-    iteration = int(checkpoint.get("iteration", 0))
-    model.guide_residual_multiplier = guide_residual_multiplier_for_iteration(config, iteration)
-    model.guide_coverage_residual_multiplier = guide_coverage_residual_multiplier_for_iteration(config, iteration)
-    model.shape_detail_multiplier = shape_detail_multiplier_for_iteration(config, iteration)
-    model.eval()
+    model = build_stage1_model_from_checkpoint(checkpoint, config, device)
 
     with torch.no_grad():
         roots, normals, roots_local = model.roots_and_normals()
@@ -169,8 +100,8 @@ def main() -> None:
         "iteration": int(checkpoint.get("iteration", -1)),
         "guide_residual_multiplier": float(model.guide_residual_multiplier),
         "shape_detail_multiplier": float(model.shape_detail_multiplier),
-        "root_count": int(face_ids.shape[0]),
-        "guide_root_count": int(0 if guide_face_ids is None else guide_face_ids.shape[0]),
+        "root_count": int(model.face_ids.shape[0]),
+        "guide_root_count": int(model.guide_face_ids.shape[0]),
         "child_count": child_count,
         "strand_count": int(strands.shape[0]),
         "samples": int(strands.shape[1]),

@@ -13,15 +13,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from anigroom.mesh_roots import read_obj_mesh  # noqa: E402
 from tools.train_white_tiger_stage1 import (  # noqa: E402
-    Stage1Config,
-    WhiteTigerStage1Model,
-    dense_groom_ranges,
-    face_normals_np,
-    guide_residual_multiplier_for_iteration,
+    build_stage1_model_from_checkpoint,
+    load_training_checkpoint,
     resolve_project_path,
-    shape_detail_multiplier_for_iteration,
     stage1_config_from_checkpoint_mapping,
 )
 
@@ -54,64 +49,6 @@ def tensor_to_numpy(value: torch.Tensor) -> np.ndarray:
 def inverse_sigmoid_np(x: np.ndarray) -> np.ndarray:
     x = np.clip(x, EPS, 1.0 - EPS)
     return np.log(x / (1.0 - x))
-
-
-def build_model(checkpoint: dict, config: Stage1Config, device: torch.device) -> WhiteTigerStage1Model:
-    state = checkpoint["model"]
-    mesh = read_obj_mesh(resolve_project_path(config.mesh_path))
-    face_ids = tensor_to_numpy(state["face_ids"]).astype(np.int64)
-    if "bary_initial" in state:
-        barycentric = tensor_to_numpy(state["bary_initial"]).astype(np.float32)
-    else:
-        barycentric = tensor_to_numpy(torch.softmax(state["bary_logits"], dim=-1)).astype(np.float32)
-
-    guide_face_ids = None
-    guide_barycentric = None
-    if "guide_face_ids" in state and state["guide_face_ids"].numel() > 0:
-        guide_face_ids = tensor_to_numpy(state["guide_face_ids"]).astype(np.int64)
-        guide_barycentric = tensor_to_numpy(state["guide_barycentric"]).astype(np.float32)
-    face_tangents_tensor = state.get("face_tangents")
-    face_tangents = None
-    if face_tangents_tensor is not None and int(face_tangents_tensor.numel()) > 0:
-        face_tangents = tensor_to_numpy(face_tangents_tensor).astype(np.float32)
-
-    model = WhiteTigerStage1Model(
-        mesh,
-        face_normals_np(mesh),
-        face_tangents,
-        face_ids,
-        barycentric,
-        dense_groom_ranges(),
-        device,
-        init_scale=config.init_mesh_scale,
-        init_translation=config.init_mesh_translation,
-        init_groom_length=config.init_groom_length,
-        max_child_count=config.child_count,
-        local_child_color_support=config.local_child_color_support,
-        local_child_color_scale=config.local_child_color_scale,
-        guide_face_ids=guide_face_ids,
-        guide_barycentric=guide_barycentric,
-        guide_interpolation_k=config.guide_interpolation_k,
-        render_geometry_parameterization=config.render_geometry_parameterization,
-        guide_length_residual_scale=config.guide_length_residual_scale,
-        guide_direction_residual_scale=config.guide_direction_residual_scale,
-        guide_width_residual_scale=config.guide_width_residual_scale,
-        guide_child_radius_residual_scale=config.guide_child_radius_residual_scale,
-        guide_clump_residual_scale=config.guide_clump_residual_scale,
-        guide_curl_residual_scale=config.guide_curl_residual_scale,
-        guide_frizz_residual_scale=config.guide_frizz_residual_scale,
-        shape_curl_scale=getattr(config, "shape_curl_scale", 1.0),
-        shape_frizz_scale=getattr(config, "shape_frizz_scale", 1.0),
-        strand_shape_normal_mode=getattr(config, "strand_shape_normal_mode", "full"),
-    )
-    missing, unexpected = model.load_state_dict(state, strict=True)
-    if missing or unexpected:
-        raise RuntimeError(f"strict checkpoint load failed: missing={missing}, unexpected={unexpected}")
-    iteration = int(checkpoint.get("iteration", 0))
-    model.guide_residual_multiplier = guide_residual_multiplier_for_iteration(config, iteration)
-    model.shape_detail_multiplier = shape_detail_multiplier_for_iteration(config, iteration)
-    model.eval()
-    return model
 
 
 def write_3dgs_ply(path: Path, means: np.ndarray, quats: np.ndarray, scales: np.ndarray, colors: np.ndarray, opacities: np.ndarray, sh_degree: int) -> None:
@@ -158,9 +95,9 @@ def main() -> None:
     args = parse_args()
     device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
     checkpoint_path = resolve_project_path(args.checkpoint)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = load_training_checkpoint(checkpoint_path)
     config = stage1_config_from_checkpoint_mapping(checkpoint["config"])
-    model = build_model(checkpoint, config, device)
+    model = build_stage1_model_from_checkpoint(checkpoint, config, device)
 
     samples = int(config.samples if args.samples < 0 else args.samples)
     min_segments = int(config.min_segments if args.min_segments < 0 else args.min_segments)
