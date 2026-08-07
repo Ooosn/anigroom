@@ -183,6 +183,22 @@ for name in "${required_config[@]}"; do
   require_var "$name"
 done
 
+GEOMETRY_RESIDUAL_DOMAIN="${GEOMETRY_RESIDUAL_DOMAIN:-render}"
+if [[ "$GEOMETRY_RESIDUAL_DOMAIN" == "secondary_guide" ]]; then
+  for name in \
+    SECONDARY_GUIDE_ROOT_COUNT \
+    SECONDARY_GUIDE_CANDIDATE_MULTIPLIER \
+    SECONDARY_GUIDE_INTERPOLATION_K \
+    SECONDARY_GUIDE_SMOOTH_K; do
+    require_var "$name"
+  done
+else
+  SECONDARY_GUIDE_ROOT_COUNT=0
+  SECONDARY_GUIDE_CANDIDATE_MULTIPLIER=16
+  SECONDARY_GUIDE_INTERPOLATION_K=8
+  SECONDARY_GUIDE_SMOOTH_K=32
+fi
+
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"
 export PROJECT_ROOT PYTHON DATA_ROOT MESH_PATH RUN_ID OUTPUT_DIR EXPECTED_WIDTH EXPECTED_HEIGHT
 
@@ -235,6 +251,11 @@ cmd=(
   --guide-root-count "$GUIDE_ROOT_COUNT"
   --guide-candidate-multiplier "$GUIDE_CANDIDATE_MULTIPLIER"
   --guide-interpolation-k "$GUIDE_INTERPOLATION_K"
+  --geometry-residual-domain "$GEOMETRY_RESIDUAL_DOMAIN"
+  --secondary-guide-root-count "$SECONDARY_GUIDE_ROOT_COUNT"
+  --secondary-guide-candidate-multiplier "$SECONDARY_GUIDE_CANDIDATE_MULTIPLIER"
+  --secondary-guide-interpolation-k "$SECONDARY_GUIDE_INTERPOLATION_K"
+  --secondary-guide-smooth-k "$SECONDARY_GUIDE_SMOOTH_K"
   --render-geometry-parameterization "$RENDER_GEOMETRY_PARAMETERIZATION"
   --guide-length-residual-scale "$GUIDE_LENGTH_RESIDUAL_SCALE"
   --guide-direction-residual-scale "$GUIDE_DIRECTION_RESIDUAL_SCALE"

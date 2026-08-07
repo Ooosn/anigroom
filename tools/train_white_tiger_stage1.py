@@ -86,6 +86,12 @@ from anigroom.grooming import (  # noqa: E402
     tail_concentration_residual_loss,
     vector_to_local_components,
 )
+from anigroom.grooming.secondary_guides import (  # noqa: E402
+    InterpolatedGeometryResiduals,
+    build_parent_conditioned_query_support,
+    initialize_parent_conditioned_secondary_roots,
+    interpolate_secondary_geometry_residuals,
+)
 from anigroom.mesh_roots import (  # noqa: E402
     SurfaceRoots,
     TriangleMesh,
@@ -119,6 +125,7 @@ from anigroom.roots.lifecycle import (  # noqa: E402
 from anigroom.roots.statistics import RootStatsWindow  # noqa: E402
 from anigroom.surface_interpolation import (  # noqa: E402
     SurfaceFieldInterpolator,
+    LocalSurfaceSupport,
     SurfaceSourceGraph,
     SurfaceSupport,
     build_hierarchical_surface_edges,
@@ -1014,6 +1021,7 @@ def root_graph_smoothness(
     bitangents: torch.Tensor | None = None,
     smooth_field_metric: str = "ambient",
     include_geometry: bool = True,
+    appearance_only: bool = False,
 ) -> torch.Tensor:
     if edges.numel() == 0:
         return next(field.parameters()).new_tensor(0.0)
@@ -1036,27 +1044,30 @@ def root_graph_smoothness(
         return value.mean()
 
     terms = [
-        2.0 * weighted_mean((torch.log(groom.root_width[src].clamp_min(1.0e-6)) - torch.log(groom.root_width[dst].clamp_min(1.0e-6))).square()),
-        0.8 * weighted_mean((torch.log(groom.tip_width[src].clamp_min(1.0e-6)) - torch.log(groom.tip_width[dst].clamp_min(1.0e-6))).square()),
-        0.4
-        * weighted_mean(
-            (
-                torch.log(groom.width_taper[src].clamp_min(EPS))
-                - torch.log(groom.width_taper[dst].clamp_min(EPS))
-            ).square()
-        ),
-        0.8
-        * weighted_mean(
-            (
-                torch.log(groom.child_radius[src].clamp_min(EPS))
-                - torch.log(groom.child_radius[dst].clamp_min(EPS))
-            ).square()
-        ),
         0.25 * weighted_mean((groom.root_color[src] - groom.root_color[dst]).square()),
         0.15 * weighted_mean((groom.tip_color[src] - groom.tip_color[dst]).square()),
         0.5 * weighted_mean((groom.opacity[src] - groom.opacity[dst]).square()),
         0.25 * weighted_mean((groom.tip_opacity[src] - groom.tip_opacity[dst]).square()),
     ]
+    if not appearance_only:
+        terms[:0] = [
+            2.0 * weighted_mean((torch.log(groom.root_width[src].clamp_min(1.0e-6)) - torch.log(groom.root_width[dst].clamp_min(1.0e-6))).square()),
+            0.8 * weighted_mean((torch.log(groom.tip_width[src].clamp_min(1.0e-6)) - torch.log(groom.tip_width[dst].clamp_min(1.0e-6))).square()),
+            0.4
+            * weighted_mean(
+                (
+                    torch.log(groom.width_taper[src].clamp_min(EPS))
+                    - torch.log(groom.width_taper[dst].clamp_min(EPS))
+                ).square()
+            ),
+            0.8
+            * weighted_mean(
+                (
+                    torch.log(groom.child_radius[src].clamp_min(EPS))
+                    - torch.log(groom.child_radius[dst].clamp_min(EPS))
+                ).square()
+            ),
+        ]
     if include_geometry:
         if smooth_metric_uses_transport(smooth_field_metric):
             if normals is None or tangents is None or bitangents is None:
@@ -1110,9 +1121,9 @@ def render_geometry_residual_graph_smoothness(
     bitangents: torch.Tensor,
     observation_confidence: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Smooth only the active zero-centered render geometry residual field."""
+    """Smooth the active zero-centered geometry residual field."""
 
-    field = model.render_geometry_residual
+    field = model.active_geometry_residual()
     if field is None or edges.numel() == 0:
         return model.groom.length_raw.sum() * 0.0
     decoded = field.decode()
@@ -1468,7 +1479,7 @@ def render_geometry_residual_stats(
 ) -> dict[str, dict[str, float]] | None:
     """Report the active normalized residual field without legacy endpoints."""
 
-    field = model.render_geometry_residual
+    field = model.active_geometry_residual()
     if field is None:
         return None
     residual = field.decode()
@@ -1735,6 +1746,11 @@ class Stage1Config:
     guide_candidate_multiplier: float = 8.0
     guide_roots_from_clean_flow: bool = False
     guide_interpolation_k: int = 8
+    geometry_residual_domain: str = "render"
+    secondary_guide_root_count: int = 0
+    secondary_guide_candidate_multiplier: float = 16.0
+    secondary_guide_interpolation_k: int = 8
+    secondary_guide_smooth_k: int = 32
     render_geometry_parameterization: str = "absolute_endpoint"
     guide_length_residual_scale: float = 0.0
     guide_direction_residual_scale: float = 1.0
@@ -1876,6 +1892,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
         guide_barycentric: np.ndarray | None = None,
         guide_region_ids: np.ndarray | None = None,
         guide_interpolation_k: int = 8,
+        geometry_residual_domain: str = "render",
+        secondary_guide_face_ids: np.ndarray | None = None,
+        secondary_guide_barycentric: np.ndarray | None = None,
+        secondary_guide_parent_ids: np.ndarray | None = None,
+        secondary_guide_interpolation_k: int = 8,
         render_geometry_parameterization: str = "absolute_endpoint",
         guide_length_residual_scale: float = 0.0,
         guide_direction_residual_scale: float = 1.0,
@@ -1895,6 +1916,15 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.max_child_count = max(1, int(max_child_count))
         self.local_child_color_scale = float(local_child_color_scale)
         self.guide_interpolation_k = max(1, int(guide_interpolation_k))
+        self.geometry_residual_domain = str(geometry_residual_domain)
+        if self.geometry_residual_domain not in {"render", "secondary_guide"}:
+            raise ValueError(
+                "geometry_residual_domain must be render or secondary_guide"
+            )
+        self.secondary_guide_interpolation_k = max(
+            1,
+            int(secondary_guide_interpolation_k),
+        )
         self.render_geometry_parameterization = str(render_geometry_parameterization)
         if self.render_geometry_parameterization not in {
             "absolute_endpoint",
@@ -1948,13 +1978,17 @@ class WhiteTigerStage1Model(torch.nn.Module):
             init_length=self.init_groom_length,
             device=device,
         )
-        if self.render_geometry_parameterization != "absolute_endpoint":
+        if (
+            self.render_geometry_parameterization != "absolute_endpoint"
+            and self.geometry_residual_domain == "render"
+        ):
             self.render_geometry_residual = RenderGeometryResidualField(
                 int(face_ids.shape[0]),
                 device=device,
             )
         else:
             self.render_geometry_residual = None
+        self.secondary_geometry_residual: RenderGeometryResidualField | None = None
         self.log_scale = torch.nn.Parameter(torch.tensor([math.log(float(init_scale))], device=device))
         self.translation = torch.nn.Parameter(torch.tensor(init_translation, device=device, dtype=torch.float32))
         if bool(local_child_color_support):
@@ -2045,9 +2079,46 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.register_parameter("guide_child_radius_raw", None)
             self.register_parameter("guide_clump_strength_raw", None)
             self.register_parameter("guide_direction_local_raw", None)
-        if self.render_geometry_parameterization != "absolute_endpoint":
-            if not self.guide_enabled():
-                raise ValueError("zero-centered render geometry requires guide roots")
+        if self.render_geometry_parameterization != "absolute_endpoint" and not self.guide_enabled():
+            raise ValueError("zero-centered geometry requires primary guide roots")
+        self.register_buffer(
+            "secondary_guide_face_ids",
+            torch.empty((0,), device=device, dtype=torch.long),
+        )
+        self.register_buffer(
+            "secondary_guide_barycentric",
+            torch.empty((0, 3), device=device),
+        )
+        self.register_buffer(
+            "secondary_guide_points_local",
+            torch.empty((0, 3), device=device),
+        )
+        self.register_buffer(
+            "secondary_guide_parent_ids",
+            torch.empty((0,), device=device, dtype=torch.long),
+        )
+        self.register_buffer(
+            "secondary_primary_support_ids_cache",
+            torch.empty((0, 0), device=device, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "secondary_primary_support_paths_cache",
+            torch.empty((0, 0, 3), device=device),
+            persistent=False,
+        )
+        self.register_buffer(
+            "secondary_render_support_ids_cache",
+            torch.empty((0, 0), device=device, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "secondary_smooth_edges_cache",
+            torch.empty((0, 2), device=device, dtype=torch.long),
+            persistent=False,
+        )
+        self._secondary_smooth_graph_k = -1
+        self._secondary_support_report: dict[str, object] = {}
         self.register_buffer("guide_interp_ids_cache", torch.empty((0, 0), device=device, dtype=torch.long), persistent=False)
         self.register_buffer("guide_interp_vertex_paths_cache", torch.empty((0, 0, 3), device=device), persistent=False)
         self.register_buffer(
@@ -2074,6 +2145,20 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self._guide_support_report: dict[str, float | int] = {}
         self.initialize_default_groom()
         self.rebuild_guide_surface_interpolation()
+        if secondary_guide_face_ids is not None:
+            if secondary_guide_barycentric is None or secondary_guide_parent_ids is None:
+                raise ValueError(
+                    "secondary guide face IDs require barycentric coordinates and parent IDs"
+                )
+            self.attach_secondary_guides(
+                secondary_guide_face_ids,
+                secondary_guide_barycentric,
+                secondary_guide_parent_ids,
+            )
+        elif self.geometry_residual_domain == "secondary_guide":
+            # From-zero setup attaches the parent-conditioned FPS layer after
+            # the primary guide interpolator has been constructed.
+            self.secondary_geometry_residual = None
 
     def initialize_default_groom(self) -> None:
         ranges = self.groom.ranges
@@ -2122,7 +2207,17 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 )
 
     def uses_zero_centered_geometry(self) -> bool:
-        return self.render_geometry_residual is not None
+        return self.active_geometry_residual() is not None
+
+    def active_geometry_residual(self) -> RenderGeometryResidualField | None:
+        if self.geometry_residual_domain == "secondary_guide":
+            return self.secondary_geometry_residual
+        return self.render_geometry_residual
+
+    def geometry_residual_parameter_prefix(self) -> str:
+        if self.geometry_residual_domain == "secondary_guide":
+            return "secondary_geometry_residual"
+        return "render_geometry_residual"
 
     def guide_direction_world(self) -> torch.Tensor | None:
         if not self.guide_enabled():
@@ -2139,6 +2234,180 @@ class WhiteTigerStage1Model(torch.nn.Module):
     def guide_enabled(self) -> bool:
         return self.guide_length_raw is not None and self.guide_points_local.numel() > 0
 
+    def guide_surface_interpolator(self) -> SurfaceFieldInterpolator:
+        if not self.guide_enabled() or self._guide_surface_interpolator is None:
+            raise RuntimeError("primary guide surface interpolator is unavailable")
+        return self._guide_surface_interpolator
+
+    def secondary_guides_enabled(self) -> bool:
+        return (
+            self.secondary_geometry_residual is not None
+            and self.secondary_guide_points_local.numel() > 0
+        )
+
+    @torch.no_grad()
+    def attach_secondary_guides(
+        self,
+        face_ids: np.ndarray | torch.Tensor,
+        barycentric: np.ndarray | torch.Tensor,
+        parent_ids: np.ndarray | torch.Tensor,
+    ) -> dict[str, object]:
+        if self.geometry_residual_domain != "secondary_guide":
+            raise RuntimeError(
+                "secondary guides require geometry_residual_domain=secondary_guide"
+            )
+        if not self.guide_enabled() or self._guide_surface_interpolator is None:
+            raise RuntimeError("secondary guides require initialized primary guides")
+        device = self.vertices.device
+        face_tensor = torch.as_tensor(face_ids, device=device, dtype=torch.long).reshape(-1)
+        bary_tensor = torch.as_tensor(
+            barycentric,
+            device=device,
+            dtype=self.vertices.dtype,
+        )
+        parent_tensor = torch.as_tensor(
+            parent_ids,
+            device=device,
+            dtype=torch.long,
+        ).reshape(-1)
+        count = int(face_tensor.shape[0])
+        if bary_tensor.shape != (count, 3) or parent_tensor.shape != (count,):
+            raise ValueError("secondary guide arrays have inconsistent shapes")
+        if count <= 0:
+            raise ValueError("secondary guide count must be positive")
+        if bool((face_tensor < 0).any()) or bool((face_tensor >= self.faces.shape[0]).any()):
+            raise ValueError("secondary guide face IDs are out of range")
+        if bool((parent_tensor < 0).any()) or bool((parent_tensor >= self.guide_points_local.shape[0]).any()):
+            raise ValueError("secondary guide parent IDs are out of range")
+        if not bool((torch.bincount(parent_tensor, minlength=self.guide_points_local.shape[0]) > 0).all()):
+            raise ValueError("every primary guide must own at least one secondary guide")
+
+        triangles = self.vertices[self.faces[face_tensor]]
+        self.secondary_guide_face_ids = face_tensor.detach()
+        self.secondary_guide_barycentric = bary_tensor.detach()
+        self.secondary_guide_points_local = (
+            triangles * bary_tensor[:, :, None]
+        ).sum(dim=1).detach()
+        self.secondary_guide_parent_ids = parent_tensor.detach()
+        self.secondary_geometry_residual = RenderGeometryResidualField(
+            count,
+            device=device,
+        )
+        self.secondary_primary_support_ids_cache = torch.empty(
+            (0, 0), device=device, dtype=torch.long
+        )
+        self.secondary_primary_support_paths_cache = torch.empty(
+            (0, 0, 3), device=device
+        )
+        self.secondary_render_support_ids_cache = torch.empty(
+            (0, 0), device=device, dtype=torch.long
+        )
+        self.secondary_smooth_edges_cache = torch.empty(
+            (0, 2), device=device, dtype=torch.long
+        )
+        self._secondary_smooth_graph_k = -1
+        primary_support = self._guide_surface_interpolator.build_support(
+            self.secondary_guide_points_local,
+            self.secondary_guide_face_ids,
+        )
+        self.secondary_primary_support_ids_cache = primary_support.indices.detach()
+        self.secondary_primary_support_paths_cache = (
+            primary_support.vertex_path_distances.detach()
+        )
+        self._secondary_support_report = {
+            "primary": dict(primary_support.report),
+        }
+        render_report = self.rebuild_secondary_render_support()
+        return {
+            "secondary_root_count": count,
+            "primary_support": dict(primary_support.report),
+            "render_support": render_report,
+        }
+
+    @torch.no_grad()
+    def secondary_primary_support(self) -> SurfaceSupport:
+        if not self.secondary_guides_enabled():
+            raise RuntimeError("secondary guide support requested while disabled")
+        expected = (
+            int(self.secondary_guide_points_local.shape[0]),
+            min(int(self.guide_interpolation_k), int(self.guide_points_local.shape[0])),
+        )
+        if tuple(self.secondary_primary_support_ids_cache.shape) != expected:
+            if self._guide_surface_interpolator is None:
+                raise RuntimeError("primary guide interpolator is unavailable")
+            support = self._guide_surface_interpolator.build_support(
+                self.secondary_guide_points_local,
+                self.secondary_guide_face_ids,
+            )
+            self.secondary_primary_support_ids_cache = support.indices.detach()
+            self.secondary_primary_support_paths_cache = (
+                support.vertex_path_distances.detach()
+            )
+            self._secondary_support_report["primary"] = dict(support.report)
+        return SurfaceSupport(
+            indices=self.secondary_primary_support_ids_cache,
+            vertex_path_distances=self.secondary_primary_support_paths_cache,
+            report=dict(self._secondary_support_report.get("primary", {})),
+        )
+
+    @torch.no_grad()
+    def rebuild_secondary_render_support(self) -> dict[str, object]:
+        if not self.secondary_guides_enabled():
+            self.secondary_render_support_ids_cache = torch.empty(
+                (0, 0), device=self.vertices.device, dtype=torch.long
+            )
+            return {}
+        support = build_parent_conditioned_query_support(
+            self.anchor_local,
+            self.guide_interpolation_support(),
+            self.secondary_guide_points_local,
+            self.secondary_guide_parent_ids,
+            neighbor_count=self.secondary_guide_interpolation_k,
+        )
+        self.secondary_render_support_ids_cache = support.indices.detach()
+        self._secondary_support_report["render"] = dict(support.report)
+        return dict(support.report)
+
+    @torch.no_grad()
+    def secondary_render_support(self) -> LocalSurfaceSupport:
+        if not self.secondary_guides_enabled():
+            raise RuntimeError("secondary render support requested while disabled")
+        expected = (
+            int(self.anchor_local.shape[0]),
+            min(
+                int(self.secondary_guide_interpolation_k),
+                int(self.secondary_guide_points_local.shape[0]),
+            ),
+        )
+        if tuple(self.secondary_render_support_ids_cache.shape) != expected:
+            self.rebuild_secondary_render_support()
+        return LocalSurfaceSupport(
+            indices=self.secondary_render_support_ids_cache,
+            report=dict(self._secondary_support_report.get("render", {})),
+        )
+
+    @torch.no_grad()
+    def secondary_surface_smoothing_edges(self, neighbor_count: int) -> torch.Tensor:
+        if not self.secondary_guides_enabled():
+            return torch.empty(
+                (0, 2), device=self.vertices.device, dtype=torch.long
+            )
+        expected_edges = int(self.secondary_guide_points_local.shape[0]) * min(
+            max(int(neighbor_count), 0),
+            max(int(self.secondary_guide_points_local.shape[0]) - 1, 0),
+        )
+        if (
+            self._secondary_smooth_graph_k != int(neighbor_count)
+            or tuple(self.secondary_smooth_edges_cache.shape) != (expected_edges, 2)
+        ):
+            self.secondary_smooth_edges_cache = build_hierarchical_surface_edges(
+                self.secondary_guide_points_local,
+                self.secondary_primary_support().indices,
+                neighbor_count=int(neighbor_count),
+            ).detach()
+            self._secondary_smooth_graph_k = int(neighbor_count)
+        return self.secondary_smooth_edges_cache
+
     def invalidate_guide_interpolation_cache(self) -> None:
         self.invalidate_guide_surface_support_cache()
         device = self.vertices.device
@@ -2152,6 +2421,9 @@ class WhiteTigerStage1Model(torch.nn.Module):
         device = self.vertices.device
         self.guide_interp_ids_cache = torch.empty((0, 0), device=device, dtype=torch.long)
         self.guide_interp_vertex_paths_cache = torch.empty((0, 0, 3), device=device)
+        self.secondary_render_support_ids_cache = torch.empty(
+            (0, 0), device=device, dtype=torch.long
+        )
         self._guide_support_report = {}
 
     @torch.no_grad()
@@ -2183,7 +2455,10 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.guide_interp_ids_cache = support.indices.detach()
         self.guide_interp_vertex_paths_cache = support.vertex_path_distances.detach()
         self._guide_support_report = dict(support.report)
-        return dict(self._guide_support_report)
+        report: dict[str, object] = dict(self._guide_support_report)
+        if self.secondary_guides_enabled():
+            report["secondary_render_support"] = self.rebuild_secondary_render_support()
+        return report
 
     @torch.no_grad()
     def guide_interpolation_support(self) -> SurfaceSupport:
@@ -2692,6 +2967,53 @@ class WhiteTigerStage1Model(torch.nn.Module):
             support=self.guide_interpolation_support(),
         )
 
+    def geometry_residual_at_render_roots(
+        self,
+        roots_local: torch.Tensor,
+        normals: torch.Tensor,
+        tangents: torch.Tensor,
+        bitangents: torch.Tensor,
+    ) -> InterpolatedGeometryResiduals | None:
+        """Return the active residual coordinates in render-root frames.
+
+        Primary guide controls are never routed through the secondary layer.
+        In secondary-guide mode only the zero-centered residual field is
+        interpolated, so an all-zero secondary field reproduces the direct
+        primary-guide result exactly.
+        """
+
+        field = self.active_geometry_residual()
+        if field is None:
+            return None
+        if self.geometry_residual_domain == "render":
+            if int(field.root_count) != int(roots_local.shape[0]):
+                raise RuntimeError(
+                    "render geometry residual count does not match render roots"
+                )
+            return InterpolatedGeometryResiduals(
+                raw=dict(field.named_parameters()),
+                decoded=field.decode(),
+            )
+        if not self.secondary_guides_enabled():
+            raise RuntimeError(
+                "secondary geometry residual domain has no attached secondary guides"
+            )
+        source_normals, source_tangents, source_bitangents = (
+            self.tangent_frames_for_face_ids(self.secondary_guide_face_ids)
+        )
+        return interpolate_secondary_geometry_residuals(
+            field,
+            source_normals,
+            source_tangents,
+            source_bitangents,
+            roots_local,
+            normals,
+            tangents,
+            bitangents,
+            self.secondary_guide_points_local,
+            self.secondary_render_support(),
+        )
+
     def apply_guide_controls(
         self,
         groom,
@@ -2699,6 +3021,10 @@ class WhiteTigerStage1Model(torch.nn.Module):
         normals: torch.Tensor | None = None,
         tangents: torch.Tensor | None = None,
         bitangents: torch.Tensor | None = None,
+        *,
+        root_face_ids: torch.Tensor | None = None,
+        guide_support: SurfaceSupport | None = None,
+        residual_sample_override: InterpolatedGeometryResiduals | None = None,
     ):
         if not self.guide_enabled():
             return self.apply_shape_detail_gate(groom)
@@ -2707,15 +3033,50 @@ class WhiteTigerStage1Model(torch.nn.Module):
         if tangents is None or bitangents is None:
             tangents, bitangents = self.tangent_frames(normals)
         ranges = self.groom.ranges
-        guide_interp, guide_direction = self.interpolate_guide_controls(roots_local, normals, tangents, bitangents)
-        residual_decoded = (
-            self.render_geometry_residual.decode()
-            if self.render_geometry_residual is not None
-            else None
-        )
+        if guide_support is None:
+            guide_interp, guide_direction = self.interpolate_guide_controls(
+                roots_local,
+                normals,
+                tangents,
+                bitangents,
+            )
+        else:
+            if root_face_ids is None:
+                raise ValueError("explicit guide support requires root_face_ids")
+            guide_interp, guide_direction = self.sample_guide_controls(
+                roots_local,
+                root_face_ids,
+                normals,
+                tangents,
+                bitangents,
+                support=guide_support,
+            )
+        residual_sample = residual_sample_override
+        if residual_sample is None:
+            residual_sample = self.geometry_residual_at_render_roots(
+                roots_local,
+                normals,
+                tangents,
+                bitangents,
+            )
+        residual_decoded = residual_sample.decoded if residual_sample is not None else None
+        residual_raw = residual_sample.raw if residual_sample is not None else {}
         residual_physical = (
-            self.render_geometry_residual.physical_scalar_deltas(ranges)
-            if self.render_geometry_residual is not None
+            {
+                "curl_radius": RenderGeometryResidualField.scalar_physical_delta(
+                    residual_decoded.curl_radius,
+                    ranges.curl_radius,
+                ),
+                "frizz": RenderGeometryResidualField.scalar_physical_delta(
+                    residual_decoded.frizz,
+                    ranges.frizz,
+                ),
+                "clump_strength": RenderGeometryResidualField.scalar_physical_delta(
+                    residual_decoded.clump_strength,
+                    ranges.clump_strength,
+                ),
+            }
+            if residual_decoded is not None
             else {}
         )
 
@@ -2737,7 +3098,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             ):
                 guide_value = apply_log_ratio_residual(
                     guide_value,
-                    self.render_geometry_residual.length_raw,
+                    residual_raw["length_raw"],
                     effective_residual_scale,
                 )
             elif (
@@ -2747,7 +3108,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             ):
                 guide_value = apply_asinh_log_ratio_residual(
                     guide_value,
-                    self.render_geometry_residual.length_raw,
+                    residual_raw["length_raw"],
                     effective_residual_scale,
                 )
             elif (
@@ -2771,7 +3132,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 guide_value = guide_value * (
                     1.0 + effective_residual_scale * residual_decoded.length
                 ).clamp_min(tiny)
-            elif self.render_geometry_residual is not None and name in residual_physical:
+            elif residual_sample is not None and name in residual_physical:
                 guide_value = guide_value + effective_residual_scale * residual_physical[name]
             elif should_apply:
                 guide_value = guide_value + effective_residual_scale * (render_value - guide_value)
@@ -2796,24 +3157,24 @@ class WhiteTigerStage1Model(torch.nn.Module):
             None,
         )
         coverage_multiplier = float(getattr(self, "guide_coverage_residual_multiplier", self.guide_residual_multiplier))
-        if self.render_geometry_residual is not None:
+        if residual_sample is not None:
             width_residual_scale = (
                 float(self.guide_width_residual_scale)
                 * float(self.guide_residual_multiplier)
             )
             root_width = apply_asinh_log_ratio_residual(
                 guide_interp["root_width"],
-                self.render_geometry_residual.root_width_raw,
+                residual_raw["root_width_raw"],
                 width_residual_scale,
             )
             tip_ratio = apply_asinh_logit_residual(
                 guide_interp["tip_width_ratio"],
-                self.render_geometry_residual.tip_width_ratio_raw,
+                residual_raw["tip_width_ratio_raw"],
                 width_residual_scale,
             )
             width_taper = apply_asinh_log_ratio_residual(
                 guide_interp["width_taper"],
-                self.render_geometry_residual.width_taper_raw,
+                residual_raw["width_taper_raw"],
                 width_residual_scale,
             )
         else:
@@ -2838,10 +3199,10 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.guide_frizz_residual_scale,
             ranges.frizz,
         )
-        if self.render_geometry_residual is not None:
+        if residual_sample is not None:
             child_radius = apply_asinh_log_ratio_residual(
                 guide_interp["child_radius"],
-                self.render_geometry_residual.child_radius_raw,
+                residual_raw["child_radius_raw"],
                 float(self.guide_child_radius_residual_scale)
                 * coverage_multiplier,
             )
@@ -2876,7 +3237,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 * float(self.guide_residual_multiplier)
             )
             should_apply_direction_residual = effective_direction_residual_scale > 0.0
-            if self.render_geometry_residual is not None:
+            if residual_sample is not None:
                 guide_direction = apply_direction_residual(
                     guide_direction,
                     residual_decoded.direction_local,
@@ -2907,6 +3268,59 @@ class WhiteTigerStage1Model(torch.nn.Module):
                     bitangents,
                 )
         return self.apply_shape_detail_gate(replace(groom, **kwargs))
+
+    def secondary_effective_groom(self):
+        """Evaluate the effective geometry on the fixed secondary control set."""
+
+        if not self.secondary_guides_enabled():
+            raise RuntimeError("secondary effective groom requested while disabled")
+        residual = self.secondary_geometry_residual
+        if residual is None:
+            raise RuntimeError("secondary geometry residual is unavailable")
+        count = int(self.secondary_guide_points_local.shape[0])
+        template = self.groom.decode()
+        template_values = {}
+        for field in fields(template):
+            value = getattr(template, field.name)
+            template_values[field.name] = value[:1].detach().expand(
+                count,
+                *value.shape[1:],
+            )
+        secondary_template = replace(template, **template_values)
+        normals, tangents, bitangents = self.tangent_frames_for_face_ids(
+            self.secondary_guide_face_ids
+        )
+        residual_sample = InterpolatedGeometryResiduals(
+            raw=dict(residual.named_parameters()),
+            decoded=residual.decode(),
+        )
+        return self.apply_guide_controls(
+            secondary_template,
+            self.secondary_guide_points_local,
+            normals,
+            tangents,
+            bitangents,
+            root_face_ids=self.secondary_guide_face_ids,
+            guide_support=self.secondary_primary_support(),
+            residual_sample_override=residual_sample,
+        )
+
+    def secondary_clean_flow_confidence(self) -> torch.Tensor:
+        """Interpolate primary clean-flow evidence onto secondary controls."""
+
+        if not self.secondary_guides_enabled() or self._guide_surface_interpolator is None:
+            raise RuntimeError("secondary clean-flow confidence requested while disabled")
+        support = self.secondary_primary_support()
+        weights = self._guide_surface_interpolator.weights(
+            self.secondary_guide_points_local,
+            self.secondary_guide_face_ids,
+            support,
+        )
+        return interpolate_physical(
+            self.guide_clean_flow_anchor_confidence[:, None],
+            support.indices,
+            weights,
+        ).reshape(-1)
 
     def apply_shape_detail_gate(self, groom):
         """Stage1-A should render neutral curl/frizz, not frozen nonzero values."""
@@ -4418,7 +4832,9 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
             ]
         )
         if model.uses_zero_centered_geometry():
-            residual = model.render_geometry_residual
+            residual = model.active_geometry_residual()
+            if residual is None:
+                raise RuntimeError("active geometry residual is unavailable")
             if float(config.guide_length_residual_scale) > 0.0:
                 groom_params.append(residual.length_raw)
             if float(config.guide_direction_residual_scale) > 0.0:
@@ -4430,11 +4846,14 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
                 groom_params.append(model.groom.direction_local_raw)
         if float(config.guide_width_residual_scale) > 0.0:
             if model.uses_zero_centered_geometry():
+                residual = model.active_geometry_residual()
+                if residual is None:
+                    raise RuntimeError("active geometry residual is unavailable")
                 groom_params.extend(
                     [
-                        model.render_geometry_residual.root_width_raw,
-                        model.render_geometry_residual.tip_width_ratio_raw,
-                        model.render_geometry_residual.width_taper_raw,
+                        residual.root_width_raw,
+                        residual.tip_width_ratio_raw,
+                        residual.width_taper_raw,
                     ]
                 )
             else:
@@ -4466,7 +4885,9 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
         if float(config.shape_frizz_scale) > 0.0:
             high_frequency_params.append(model.guide_frizz_raw)
         if model.uses_zero_centered_geometry():
-            residual = model.render_geometry_residual
+            residual = model.active_geometry_residual()
+            if residual is None:
+                raise RuntimeError("active geometry residual is unavailable")
             if float(config.guide_curl_residual_scale) > 0.0:
                 high_frequency_params.append(residual.curl_radius_raw)
             if float(config.guide_frizz_residual_scale) > 0.0:
@@ -4513,6 +4934,7 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
         "groom.tip_opacity_ratio_raw",
     ]
     if model.guide_enabled():
+        residual_prefix = model.geometry_residual_parameter_prefix()
         groom_names.extend(
             [
                 "guide_length_raw",
@@ -4527,9 +4949,9 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
         )
         if model.uses_zero_centered_geometry():
             if float(config.guide_length_residual_scale) > 0.0:
-                groom_names.append("render_geometry_residual.length_raw")
+                groom_names.append(f"{residual_prefix}.length_raw")
             if float(config.guide_direction_residual_scale) > 0.0:
-                groom_names.append("render_geometry_residual.direction_local_raw")
+                groom_names.append(f"{residual_prefix}.direction_local_raw")
         else:
             if float(config.guide_length_residual_scale) > 0.0:
                 groom_names.append("groom.length_raw")
@@ -4539,9 +4961,9 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
             if model.uses_zero_centered_geometry():
                 groom_names.extend(
                     [
-                        "render_geometry_residual.root_width_raw",
-                        "render_geometry_residual.tip_width_ratio_raw",
-                        "render_geometry_residual.width_taper_raw",
+                        f"{residual_prefix}.root_width_raw",
+                        f"{residual_prefix}.tip_width_ratio_raw",
+                        f"{residual_prefix}.width_taper_raw",
                     ]
                 )
             else:
@@ -4574,13 +4996,13 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
             high_frequency_names.append("guide_frizz_raw")
         if model.uses_zero_centered_geometry():
             if float(config.guide_curl_residual_scale) > 0.0:
-                high_frequency_names.append("render_geometry_residual.curl_radius_raw")
+                high_frequency_names.append(f"{residual_prefix}.curl_radius_raw")
             if float(config.guide_frizz_residual_scale) > 0.0:
-                high_frequency_names.append("render_geometry_residual.frizz_raw")
+                high_frequency_names.append(f"{residual_prefix}.frizz_raw")
             if float(config.guide_child_radius_residual_scale) > 0.0:
-                high_frequency_names.append("render_geometry_residual.child_radius_raw")
+                high_frequency_names.append(f"{residual_prefix}.child_radius_raw")
             if float(config.guide_clump_residual_scale) > 0.0:
-                high_frequency_names.append("render_geometry_residual.clump_strength_raw")
+                high_frequency_names.append(f"{residual_prefix}.clump_strength_raw")
         else:
             if float(config.guide_curl_residual_scale) > 0.0:
                 high_frequency_names.extend(["groom.curl_radius_raw", "groom.curl_frequency_raw", "groom.curl_phase"])
@@ -4644,6 +5066,9 @@ def optimizer_row_transition(
 def _optimizer_parameter_domain(name: str) -> str | None:
     if name.startswith("guide_"):
         return "guide"
+    if name.startswith("secondary_geometry_residual."):
+        # Secondary rows are fixed while render/primary lifecycle events run.
+        return None
     if (
         name == "bary_logits"
         or name == "child_color_delta_raw"
@@ -4920,11 +5345,12 @@ def zero_shape_detail_gradients(model: WhiteTigerStage1Model) -> None:
     ]
     if model.guide_enabled():
         params.extend([model.guide_curl_radius_raw, model.guide_frizz_raw])
-    if model.render_geometry_residual is not None:
+    residual = model.active_geometry_residual()
+    if residual is not None:
         params.extend(
             [
-                model.render_geometry_residual.curl_radius_raw,
-                model.render_geometry_residual.frizz_raw,
+                residual.curl_radius_raw,
+                residual.frizz_raw,
             ]
         )
     for param in params:
@@ -4940,9 +5366,10 @@ def zero_render_geometry_residual_gradients(model: WhiteTigerStage1Model) -> Non
     because both controls share the same lifecycle-aware residual container.
     """
 
-    if model.render_geometry_residual is None:
+    residual = model.active_geometry_residual()
+    if residual is None:
         return
-    for name, param in model.render_geometry_residual.named_parameters():
+    for name, param in residual.named_parameters():
         if name == "child_radius_raw":
             continue
         if param.grad is not None:
@@ -5312,12 +5739,6 @@ def guide_interpolation_regularization_losses(
     needs_prior = float(config.guide_prior_weight) > 0.0
     if not model.guide_enabled() or not needs_prior:
         return zero
-    _, normals, roots_local = model.roots_and_normals()
-    tangents, bitangents = model.tangent_frames(normals)
-    guide_interp, guide_direction = model.interpolate_guide_controls(roots_local, normals, tangents, bitangents)
-    if not guide_interp:
-        return zero
-    groom = model.groom.decode()
     ranges = model.groom.ranges
 
     def normalized_l1(value: torch.Tensor, target: torch.Tensor, bounds: tuple[float, float]) -> torch.Tensor:
@@ -5327,8 +5748,9 @@ def guide_interpolation_regularization_losses(
 
     terms: list[torch.Tensor] = []
     weights: list[float] = []
-    if model.render_geometry_residual is not None:
-        residual = model.render_geometry_residual.decode()
+    residual_field = model.active_geometry_residual()
+    if residual_field is not None:
+        residual = residual_field.decode()
 
         def add_residual(
             value: torch.Tensor,
@@ -5368,7 +5790,7 @@ def guide_interpolation_regularization_losses(
         )
         add_residual(
             length_residual_prior_coordinate(
-                model.render_geometry_residual.length_raw,
+                residual_field.length_raw,
                 model.render_geometry_parameterization,
                 config.render_length_prior_coordinate,
             ),
@@ -5397,6 +5819,18 @@ def guide_interpolation_regularization_losses(
         for term, weight in zip(terms[1:], weights[1:]):
             prior_loss = prior_loss + term * weight
         return prior_loss / max(sum(weights), EPS)
+
+    _, normals, roots_local = model.roots_and_normals()
+    tangents, bitangents = model.tangent_frames(normals)
+    guide_interp, guide_direction = model.interpolate_guide_controls(
+        roots_local,
+        normals,
+        tangents,
+        bitangents,
+    )
+    if not guide_interp:
+        return zero
+    groom = model.groom.decode()
 
     if guide_direction is not None and float(config.guide_prior_direction_weight) > 0.0:
         render_direction = groom_direction_3d(groom, normals, tangents, bitangents)
@@ -5488,6 +5922,27 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
     device = torch.device("cuda")
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
+
+    if config.geometry_residual_domain == "secondary_guide":
+        if config.render_geometry_parameterization == "absolute_endpoint":
+            raise ValueError(
+                "secondary-guide geometry requires a zero-centered residual parameterization"
+            )
+        if int(config.secondary_guide_root_count) <= 0:
+            raise ValueError(
+                "secondary-guide geometry requires SECONDARY_GUIDE_ROOT_COUNT > 0"
+            )
+        if (
+            int(config.guide_densify_interval) > 0
+            or int(config.guide_densify_max_splits_per_event) > 0
+        ):
+            raise ValueError(
+                "primary guide densification is not implemented for fixed secondary guides"
+            )
+    elif int(config.secondary_guide_root_count) != 0:
+        raise ValueError(
+            "SECONDARY_GUIDE_ROOT_COUNT must be zero unless geometry residual domain is secondary_guide"
+        )
 
     data_root = resolve_project_path(config.data_root)
     mesh_path = resolve_project_path(config.mesh_path)
@@ -5640,6 +6095,45 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             + "\n",
             encoding="utf-8",
         )
+    secondary_guide_face_ids = None
+    secondary_guide_barycentric = None
+    secondary_guide_parent_ids = None
+    if resume_model_state is not None and config.geometry_residual_domain == "secondary_guide":
+        required_secondary_state = (
+            "secondary_guide_face_ids",
+            "secondary_guide_barycentric",
+            "secondary_guide_parent_ids",
+        )
+        missing_secondary_state = [
+            name for name in required_secondary_state if name not in resume_model_state
+        ]
+        if missing_secondary_state:
+            raise RuntimeError(
+                "secondary-guide checkpoint is missing persistent topology: "
+                + ", ".join(missing_secondary_state)
+            )
+        secondary_guide_face_ids = (
+            resume_model_state["secondary_guide_face_ids"]
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.int64)
+        )
+        secondary_guide_barycentric = (
+            resume_model_state["secondary_guide_barycentric"]
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32)
+        )
+        secondary_guide_parent_ids = (
+            resume_model_state["secondary_guide_parent_ids"]
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.int64)
+        )
+
     model = WhiteTigerStage1Model(
         mesh,
         normals,
@@ -5658,6 +6152,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         guide_barycentric=guide_surface_roots.barycentric if guide_surface_roots is not None else None,
         guide_region_ids=guide_region_ids,
         guide_interpolation_k=config.guide_interpolation_k,
+        geometry_residual_domain=config.geometry_residual_domain,
+        secondary_guide_face_ids=secondary_guide_face_ids,
+        secondary_guide_barycentric=secondary_guide_barycentric,
+        secondary_guide_parent_ids=secondary_guide_parent_ids,
+        secondary_guide_interpolation_k=config.secondary_guide_interpolation_k,
         render_geometry_parameterization=config.render_geometry_parameterization,
         guide_length_residual_scale=config.guide_length_residual_scale,
         guide_direction_residual_scale=config.guide_direction_residual_scale,
@@ -5670,6 +6169,53 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         shape_frizz_scale=config.shape_frizz_scale,
         strand_shape_normal_mode=config.strand_shape_normal_mode,
     )
+    if config.geometry_residual_domain == "secondary_guide":
+        if resume_model_state is None:
+            if guide_surface_roots is None:
+                raise RuntimeError(
+                    "secondary-guide initialization requires primary surface guides"
+                )
+            secondary_roots = initialize_parent_conditioned_secondary_roots(
+                mesh,
+                guide_surface_roots,
+                model.guide_surface_interpolator(),
+                int(config.secondary_guide_root_count),
+                candidate_multiplier=float(config.secondary_guide_candidate_multiplier),
+                seed=int(config.seed) + 29,
+                device=device,
+            )
+            support_report = model.attach_secondary_guides(
+                secondary_roots.roots.face_ids,
+                secondary_roots.roots.barycentric,
+                secondary_roots.parent_ids,
+            )
+            secondary_report = {
+                **secondary_roots.report,
+                "source": "parent_conditioned_local_fps",
+                "support": support_report,
+            }
+        else:
+            secondary_report = {
+                "source": "resume_checkpoint",
+                "secondary_root_count": int(model.secondary_guide_points_local.shape[0]),
+                "support": dict(model._secondary_support_report),
+            }
+        if int(model.secondary_guide_points_local.shape[0]) != int(
+            config.secondary_guide_root_count
+        ):
+            raise RuntimeError(
+                "secondary guide count does not match config: "
+                f"{int(model.secondary_guide_points_local.shape[0])} != "
+                f"{int(config.secondary_guide_root_count)}"
+            )
+        (output_dir / "secondary_guide_init_report.json").write_text(
+            json.dumps(secondary_report, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        setup_progress(
+            "secondary_guide_init_done",
+            secondary_guide_root_count=int(model.secondary_guide_points_local.shape[0]),
+        )
     viewmats, ks = load_camera_tensors(data_root, device)
     width, height = config.expected_width, config.expected_height
 
@@ -5772,6 +6318,26 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         k=config.guide_interpolation_k,
     )
     setup_progress("guide_graph_done", **guide_graph_report)
+    if model.secondary_guides_enabled():
+        setup_progress(
+            "secondary_graph_start",
+            secondary_guide_root_count=int(model.secondary_guide_points_local.shape[0]),
+        )
+        secondary_graph_started = time.perf_counter()
+        geometry_graph_edges = model.secondary_surface_smoothing_edges(
+            config.secondary_guide_smooth_k
+        )
+        geometry_graph_report = {
+            "mode": "secondary_parent_conditioned",
+            "root_count": int(model.secondary_guide_points_local.shape[0]),
+            "neighbor_count": int(config.secondary_guide_smooth_k),
+            "edge_count": int(geometry_graph_edges.shape[0]),
+            "build_seconds": float(time.perf_counter() - secondary_graph_started),
+        }
+        setup_progress("secondary_graph_done", **geometry_graph_report)
+    else:
+        geometry_graph_edges = graph_edges
+        geometry_graph_report = dict(graph_report)
     face_adjacency_started = time.perf_counter()
     face_adjacency_index = FaceAdjacencyIndex.from_faces(model.faces)
     setup_progress(
@@ -5781,7 +6347,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
     )
     (output_dir / "root_graph.json").write_text(
         json.dumps(
-            {"render": graph_report, "guide": guide_graph_report},
+            {
+                "render": graph_report,
+                "guide": guide_graph_report,
+                "geometry": geometry_graph_report,
+            },
             indent=2,
         )
         + "\n",
@@ -6060,7 +6630,21 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 progress_event("before_regularizers", iteration=int(iteration))
             _, normals_now, roots_local = model.roots_and_normals()
             tangents_now, bitangents_now = model.tangent_frames(normals_now)
-            effective_groom_now = model.apply_guide_controls(model.groom.decode(), roots_local)
+            if model.secondary_guides_enabled():
+                geometry_normals, geometry_tangents, geometry_bitangents = (
+                    model.tangent_frames_for_face_ids(model.secondary_guide_face_ids)
+                )
+                geometry_effective_groom = model.secondary_effective_groom()
+                geometry_confidence = model.secondary_clean_flow_confidence()
+            else:
+                geometry_normals = normals_now
+                geometry_tangents = tangents_now
+                geometry_bitangents = bitangents_now
+                geometry_effective_groom = model.apply_guide_controls(
+                    model.groom.decode(),
+                    roots_local,
+                )
+                geometry_confidence = model.root_observation_confidence
             zero_loss = model.groom.length_raw.sum() * 0.0
             smooth_loss = root_graph_smoothness(
                 model.groom,
@@ -6071,14 +6655,15 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 bitangents=bitangents_now,
                 smooth_field_metric=config.smooth_field_metric,
                 include_geometry=not model.uses_zero_centered_geometry(),
+                appearance_only=model.secondary_guides_enabled(),
             )
             geometry_residual_smooth_loss = render_geometry_residual_graph_smoothness(
                 model,
-                graph_edges,
-                normals_now,
-                tangents_now,
-                bitangents_now,
-                model.root_observation_confidence,
+                geometry_graph_edges,
+                geometry_normals,
+                geometry_tangents,
+                geometry_bitangents,
+                geometry_confidence,
             )
             smooth_loss = smooth_loss + geometry_residual_smooth_loss
             guide_smooth_loss = guide_root_graph_smoothness(
@@ -6089,23 +6674,28 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 smooth_graph_k=config.guide_interpolation_k,
             )
             effective_smooth_loss = effective_groom_graph_smoothness(
-                effective_groom_now,
-                graph_edges,
-                normals_now,
-                tangents_now,
-                bitangents_now,
+                geometry_effective_groom,
+                geometry_graph_edges,
+                geometry_normals,
+                geometry_tangents,
+                geometry_bitangents,
                 model.groom.ranges,
-                model.root_observation_confidence,
+                geometry_confidence,
                 smooth_field_metric=config.smooth_field_metric,
             )
             guide_prior_loss = guide_interpolation_regularization_losses(model, config)
-            clean_pred_direction = groom_direction_3d(effective_groom_now, normals_now, tangents_now, bitangents_now)
+            clean_pred_direction = groom_direction_3d(
+                geometry_effective_groom,
+                geometry_normals,
+                geometry_tangents,
+                geometry_bitangents,
+            )
             clean_flow_smooth_loss = clean_flow_smoothness_loss(
                 clean_pred_direction,
-                graph_edges,
-                model.clean_flow_anchor_confidence,
+                geometry_graph_edges,
+                geometry_confidence,
                 normals=(
-                    normals_now
+                    geometry_normals
                     if smooth_metric_uses_transport(config.smooth_field_metric)
                     else None
                 ),
@@ -6342,9 +6932,13 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         mode=config.smooth_graph_mode,
                         k=config.guide_interpolation_k,
                     )
+                    if not model.secondary_guides_enabled():
+                        geometry_graph_edges = graph_edges
+                        geometry_graph_report = dict(graph_report)
                     lifecycle_record["smoothing_graph"] = {
                         "render": graph_report,
                         "guide": guide_graph_report,
+                        "geometry": geometry_graph_report,
                     }
                     lifecycle_timing["graph_update_seconds"] = float(
                         time.perf_counter() - graph_started
@@ -6423,7 +7017,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "render": render_stats,
                     "groom": groom_parameter_stats(model.groom),
                     "effective_groom": effective_groom_stats(model),
-                    "render_geometry_residual": render_geometry_residual_stats(model),
+                    "geometry_residual": render_geometry_residual_stats(model),
                     "rgb_flow": rgb_flow_stats,
                     "loss_mask": {
                         "edge_kernel": int(config.loss_mask_edge_kernel),
@@ -6681,6 +7275,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guide-roots-from-clean-flow", action="store_true")
     parser.add_argument("--guide-interpolation-k", type=int, default=8)
     parser.add_argument(
+        "--geometry-residual-domain",
+        choices=("render", "secondary_guide"),
+        default="render",
+    )
+    parser.add_argument("--secondary-guide-root-count", type=int, default=0)
+    parser.add_argument("--secondary-guide-candidate-multiplier", type=float, default=16.0)
+    parser.add_argument("--secondary-guide-interpolation-k", type=int, default=8)
+    parser.add_argument("--secondary-guide-smooth-k", type=int, default=32)
+    parser.add_argument(
         "--render-geometry-parameterization",
         choices=(
             "absolute_endpoint",
@@ -6878,6 +7481,11 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         guide_candidate_multiplier=args.guide_candidate_multiplier,
         guide_roots_from_clean_flow=args.guide_roots_from_clean_flow,
         guide_interpolation_k=args.guide_interpolation_k,
+        geometry_residual_domain=args.geometry_residual_domain,
+        secondary_guide_root_count=args.secondary_guide_root_count,
+        secondary_guide_candidate_multiplier=args.secondary_guide_candidate_multiplier,
+        secondary_guide_interpolation_k=args.secondary_guide_interpolation_k,
+        secondary_guide_smooth_k=args.secondary_guide_smooth_k,
         render_geometry_parameterization=args.render_geometry_parameterization,
         guide_length_residual_scale=args.guide_length_residual_scale,
         guide_direction_residual_scale=args.guide_direction_residual_scale,
