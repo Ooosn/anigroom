@@ -3,9 +3,14 @@
 ## Status
 
 R044 is an isolated candidate built from the immutable R043 baseline. Its
-from-zero full-resolution H100 forward/backward gate and strict checkpoint
-resume gate pass. The formal 30k result is pending; R043 remains the active
-accepted baseline until that result is measured and structurally inspected.
+from-zero full-resolution H100 forward/backward gate, strict checkpoint resume
+gate, and formal 30k run all pass.
+
+R044 is retained as a validated structural and efficiency ablation, but it is
+not promoted over R043. It substantially improves local length continuity and
+halves training cost, while preserving the same lifecycle population. It does
+not materially improve cross-root direction continuity and loses about 0.94 dB
+test composite PSNR. R043 therefore remains the active accepted baseline.
 
 ## Problem
 
@@ -125,7 +130,7 @@ and population settings remain unchanged.
 
 ## Verification
 
-The complete local suite passes (`96 passed`). Focused coverage includes:
+The complete local suite passes (`98 passed`). Focused coverage includes:
 
 - balanced deterministic local FPS;
 - topology-restricted G1 support;
@@ -198,18 +203,149 @@ Resume artifacts:
 /home/wangyy/anigroom-r044-secondary-guide-runtime-20260807/outputs/r044_secondary_guide_resume_gate_h100_20260807
 ```
 
-## Acceptance Gate
+## Formal 30k Run
 
-R044 is not accepted from the one-step gates. The next required evidence is a
-from-zero 30k run followed by the same fixed postprocess used for R043:
+The formal run started from zero on one H100 at full 1920x1080 resolution. It
+used the same data, losses, schedules, renderer, mesh clipping, random mesh
+backing, initial render population, and render lifecycle as R043.
 
-1. train/test composite PSNR and full lifecycle history;
-2. wall time and peak memory against R043;
-3. canonical single-image 100k-strand asset renders;
-4. centerline length/turn audit, especially tail tip and head fringe;
-5. G1 residual distributions and local continuity after the residual unlock;
-6. proof that render lifecycle changed support but not G1 row identity.
+```text
+host/GPU:        pcg02 / one H100 80GB
+start/end:       2026-08-07 18:56:08 / 21:31:10 +09:00
+exit code:       0
+elapsed:         9133.443 s (2.54 h)
+final G0/G1/R:   4500 / 20000 / 469402
+final Gaussians: 5319491
+peak allocated:  10699.64 MB
+config SHA-256:  53eb815b63ca26cbd63777c099fc0ec6cb4c63d0a4c1f8618c738ab944ead494
+checkpoint SHA:  d9f2e55091c72548f973c7030cc6f1269121caeec853d4f45078a5c76d62125f
+```
 
-R044 replaces R043 only if it preserves competitive reconstruction while
-improving local groom continuity or execution cost without introducing a new
-artifact class.
+The finite render lifecycle completed at iteration 9000. It split 554 parents
+into 1108 children, removed the 554 parents, and rebuilt render-to-G1 support.
+G1 remained exactly 20k rows with the same row identity and 640k directed
+smoothing edges throughout training.
+
+Artifacts:
+
+```text
+output:     /home/wangyy/anigroom-r044-secondary-guide-runtime-20260807/outputs/r044_secondary_guide_full_0_30k_h100_20260807
+checkpoint: /home/wangyy/anigroom-r044-secondary-guide-runtime-20260807/outputs/r044_secondary_guide_full_0_30k_h100_20260807/checkpoint_030000.pt
+local QA:   D:/RTS/_tmp/r044_30k_final
+```
+
+## Reconstruction Result
+
+R044 and R043 are nearly identical before geometry residuals unlock. At 10k,
+their test composite PSNR differs by only 0.033 dB. The gap appears after the
+residual stage begins, grows through 20k, and remains near 1 dB:
+
+| Iteration | R043 test | R044 test | R044 - R043 |
+| ---: | ---: | ---: | ---: |
+| 10000 | 29.871 | 29.839 | -0.033 |
+| 12000 | 30.787 | 30.579 | -0.208 |
+| 14000 | 31.372 | 30.848 | -0.524 |
+| 16000 | 31.739 | 31.037 | -0.703 |
+| 20000 | 32.370 | 31.392 | -0.978 |
+| 30000 | 32.512 | 31.575 | -0.937 |
+
+Final aggregate results:
+
+| Metric | R043 | R044 | Change |
+| --- | ---: | ---: | ---: |
+| Train composite PSNR | 33.466 | 32.234 | -1.232 dB |
+| Test composite PSNR | 32.512 | 31.575 | -0.937 dB |
+| RGB L1 | 0.018278 | 0.020621 | +0.002343 |
+| Final render roots | 469620 | 469402 | -218 |
+| Peak allocated CUDA | 19733 MB | 10700 MB | -45.8% |
+| Wall time | 17389 s | 9133 s | -47.5% |
+
+The same eight full-resolution fixed views give 33.472 dB mean for R043 and
+32.327 dB for R044, a -1.145 dB change. Every inspected view is lower by
+0.90--1.59 dB, so the loss is broad high-frequency capacity rather than one
+bad camera, one body region, or an evaluation mismatch.
+
+## Structural Audit
+
+The canonical postprocess is identical for both runs: 100k exported strands,
+32 centerline samples, one child, uniform material, fixed mesh/camera/lighting,
+1920x1080 output, and no RGB texture. The R044 asset does not introduce a new
+curl, backward-strand, long-tail, or lifecycle artifact class.
+
+Within individual strands, R044 is measurably less extreme:
+
+| Centerline statistic | R043 | R044 |
+| --- | ---: | ---: |
+| Backward segments | 0 | 0 |
+| Strands with chord length > 0.12 | 6 | 0 |
+| Maximum chord length | 0.13155 | 0.11892 |
+| Arc/chord P95 | 1.00589 | 1.00306 |
+| Maximum local turn P95 | 0.86996 deg | 0.60208 deg |
+| Maximum observed local turn | 2.73359 deg | 2.02703 deg |
+
+An independent cross-root KNN audit on the exported roots separates length
+continuity from direction continuity. With eight spatial neighbors:
+
+| Local-field statistic | R043 | R044 |
+| --- | ---: | ---: |
+| Nearest-root relative length difference P50 | 0.03164 | 0.00278 |
+| Nearest-root relative length difference P95 | 0.15710 | 0.02936 |
+| Mean-8 relative length difference P50 | 0.04796 | 0.00934 |
+| Mean-8 relative length difference P95 | 0.11900 | 0.03809 |
+| Nearest-root direction angle P50 | 1.940 deg | 1.914 deg |
+| Mean-8 direction angle P50 | 3.768 deg | 3.782 deg |
+| Max-8 direction angle P99 | 36.31 deg | 35.91 deg |
+| Roots with max-8 angle > 30 deg | 1.944% | 1.908% |
+
+The G1 representation therefore succeeds at its clearest structural objective:
+local length discontinuity falls by roughly 4--11x across the central and P95
+statistics. Direction discontinuity is almost unchanged. Visual inspection of
+the side, front, tail/hind, belly/flank, and neck/head renders agrees with this
+split: length is more uniform, while the remaining crossing regions largely
+coincide with R043.
+
+## Diagnosis
+
+This is not an initialization, lifecycle, renderer, or checkpoint-resume
+failure:
+
+- R043 and R044 match through 10k, before geometry residual capacity matters.
+- Final render populations and effective length distributions are nearly the
+  same.
+- G1 rows and optimizer state survive the full render lifecycle unchanged.
+- The fixed-view loss is distributed across views and body regions.
+
+The unresolved issue is the scale of the geometry operator. R043 evaluates
+geometry regularizers on about 470k render roots; R044 evaluates them on 20k
+G1 roots but reuses `K=32` and the same scalar loss weights. Under comparable
+surface sampling, the physical spacing changes approximately with the square
+root of density, so a 20k K32 neighborhood spans a much larger surface region
+than a 470k K32 neighborhood. The current edge losses do not normalize for
+edge length or source area. Their raw values are therefore not comparable
+across the two domains and the G1 field is over-low-passed.
+
+The training curve supports this diagnosis. At 30k, G1 residual direction P95
+is 0.0476 versus 0.2423 for R043, and residual length P95 is 0.0251 versus
+0.2079. R044 preserves a clean low-frequency field but suppresses useful local
+geometry evidence. Since the G0 clean-flow direction remains dominant, this
+strong residual bottleneck improves length continuity without materially
+changing direction crossings.
+
+## Disposition
+
+R044 is complete and reproducible, but it does not replace R043 as the active
+baseline. It establishes three useful results:
+
+1. A fixed parent-conditioned G1 residual layer is technically correct and
+   survives render-root densification without reparenting or state corruption.
+2. Moving geometry regularization from roughly 470k render roots to 20k G1
+   roots cuts wall time by 47.5% and peak allocated CUDA memory by 45.8%.
+3. The representation strongly improves local length continuity, but fixed-K,
+   unnormalized smoothing at the new density removes useful detail and does not
+   solve the remaining direction-field crossings.
+
+The next candidate must change only the G1 geometry operator: its neighborhood
+and quadrature must represent a consistent physical surface scale instead of a
+fixed neighbor count. It must not add an animal-region rule, absolute groom
+threshold, split budget, or per-sample schedule. R043 remains immutable while
+that candidate is evaluated.
