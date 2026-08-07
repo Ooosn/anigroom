@@ -37,6 +37,11 @@ Use the vector-field operation consistently for:
 No root count, interpolation K, graph K, loss weight, learning rate, renderer,
 or schedule changes are part of R047.
 
+The formal run uses
+`configs/r047_secondary_guide_vector_transport_resume10k_16k.env`, which
+inherits the R046 diagnostic configuration without changing any value. This
+keeps the code-level transport fix as the only experimental variable.
+
 ## Gate
 
 1. Unit tests must prove nonzero residual-direction gradient at exact zero.
