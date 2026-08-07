@@ -58,7 +58,10 @@ from anigroom.flow import (  # noqa: E402
     load_clean_flow_targets,
     sample_clean_flow_targets,
 )
-from anigroom.flow.direction_geometry import parallel_transport_vectors  # noqa: E402
+from anigroom.flow.direction_geometry import (  # noqa: E402
+    parallel_transport_vector_field,
+    parallel_transport_vectors,
+)
 from anigroom.grooming import (  # noqa: E402
     GroomParameterField,
     GroomRanges,
@@ -1146,12 +1149,11 @@ def render_geometry_residual_graph_smoothness(
         bitangents,
         normalize=False,
     )
-    dst_magnitude = torch.linalg.norm(residual_world[dst], dim=-1, keepdim=True)
-    transported_dst = parallel_transport_vectors(
+    transported_dst = parallel_transport_vector_field(
         residual_world[dst],
         normals[dst],
         normals[src],
-    ) * dst_magnitude
+    )
     direction_difference = residual_world[src] - transported_dst
     terms = [
         weighted_mean(
@@ -3691,12 +3693,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
                     normalize=False,
                 )
                 neighbor_world = source_world[child_ids]
-                neighbor_magnitude = torch.linalg.norm(neighbor_world, dim=-1, keepdim=True)
-                transported = parallel_transport_vectors(
+                transported = parallel_transport_vector_field(
                     neighbor_world,
                     old_normals[child_ids],
                     child_normals[:, None, :].expand_as(neighbor_world),
-                ) * neighbor_magnitude
+                )
                 child_world = (transported * child_weights[..., None]).sum(dim=1)
                 child_local = vector_to_local_components(
                     child_world,

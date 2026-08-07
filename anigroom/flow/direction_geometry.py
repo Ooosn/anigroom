@@ -7,14 +7,19 @@ import torch.nn.functional as F
 EPS = 1.0e-8
 
 
-def parallel_transport_vectors(
+def parallel_transport_vector_field(
     vectors: torch.Tensor,
     source_normals: torch.Tensor,
     target_normals: torch.Tensor,
 ) -> torch.Tensor:
-    """Rotate 3D directions with the minimal rotation between surface normals."""
+    """Rotate arbitrary vectors with the minimal surface-normal rotation.
 
-    vectors = F.normalize(vectors, dim=-1, eps=EPS)
+    Unlike unit-direction transport, this operation is linear in ``vectors``
+    and preserves both magnitude and the gradient at the zero vector. This is
+    required for zero-centered residual fields whose parameters initialize at
+    exactly zero.
+    """
+
     source_normals = F.normalize(source_normals, dim=-1, eps=EPS)
     target_normals = F.normalize(target_normals, dim=-1, eps=EPS)
     axis = torch.linalg.cross(source_normals, target_normals, dim=-1)
@@ -38,4 +43,18 @@ def parallel_transport_vectors(
     half_turn = 2.0 * (vectors * half_turn_axis).sum(dim=-1, keepdim=True) * half_turn_axis - vectors
     rotated = torch.where(parallel & (cosine >= 0.0), vectors, rotated)
     rotated = torch.where(parallel & (cosine < 0.0), half_turn, rotated)
-    return F.normalize(rotated, dim=-1, eps=EPS)
+    return rotated
+
+
+def parallel_transport_vectors(
+    vectors: torch.Tensor,
+    source_normals: torch.Tensor,
+    target_normals: torch.Tensor,
+) -> torch.Tensor:
+    """Rotate unit directions with the minimal surface-normal rotation."""
+
+    return F.normalize(
+        parallel_transport_vector_field(vectors, source_normals, target_normals),
+        dim=-1,
+        eps=EPS,
+    )

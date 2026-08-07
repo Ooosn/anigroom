@@ -8,7 +8,10 @@ from anigroom.flow.clean_flow import (
     clean_flow_smoothness_loss,
     sample_clean_flow_targets,
 )
-from anigroom.flow.direction_geometry import parallel_transport_vectors
+from anigroom.flow.direction_geometry import (
+    parallel_transport_vector_field,
+    parallel_transport_vectors,
+)
 from anigroom.surface_interpolation import reconstruct_surface_directions
 
 
@@ -76,6 +79,25 @@ def test_parallel_transport_preserves_surface_relative_lift() -> None:
         atol=1.0e-6,
         rtol=1.0e-6,
     )
+
+
+def test_vector_field_transport_has_nonzero_gradient_at_zero() -> None:
+    source_normal = torch.tensor([[0.0, 0.0, 1.0]])
+    target_normal = torch.tensor([[0.0, 1.0, 0.0]])
+    source_vector = torch.zeros((1, 3), requires_grad=True)
+    target_vector = torch.tensor([[0.25, -0.40, 0.15]])
+
+    transported = parallel_transport_vector_field(
+        source_vector,
+        source_normal,
+        target_normal,
+    )
+    loss = (transported - target_vector).square().sum()
+    loss.backward()
+
+    assert source_vector.grad is not None
+    assert torch.isfinite(source_vector.grad).all()
+    assert float(source_vector.grad.abs().sum()) > 0.0
 
 
 def test_direction_is_surface_aware_while_scalar_sampling_stays_legacy() -> None:

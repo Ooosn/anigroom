@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from anigroom.flow.direction_geometry import parallel_transport_vectors
+from anigroom.flow.direction_geometry import parallel_transport_vector_field
 from anigroom.mesh_roots import (
     SurfaceRoots,
     TriangleMesh,
@@ -375,16 +375,11 @@ def interpolate_secondary_geometry_residuals(
     gathered_world = source_world[support.indices]
     gathered_normals = source_normals[support.indices]
     target_normals = query_normals[:, None, :].expand_as(gathered_normals)
-    gathered_magnitude = torch.linalg.norm(
-        gathered_world,
-        dim=-1,
-        keepdim=True,
-    )
-    transported = parallel_transport_vectors(
+    transported = parallel_transport_vector_field(
         gathered_world,
         gathered_normals,
         target_normals,
-    ) * gathered_magnitude
+    )
     world_residual = (transported * weights[..., None]).sum(dim=1)
     direction_local = vector_to_local_components(
         world_residual,

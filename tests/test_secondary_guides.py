@@ -168,6 +168,16 @@ def test_secondary_residual_zero_state_and_gradient_chain() -> None:
         torch.zeros_like(zero.decoded.direction_local),
     )
 
+    zero_direction_target = torch.tensor([[0.2, -0.1, 0.05]])
+    zero_direction_loss = (
+        zero.decoded.direction_local - zero_direction_target
+    ).square().sum()
+    zero_direction_loss.backward()
+    assert field.direction_local_raw.grad is not None
+    assert float(field.direction_local_raw.grad.abs().sum()) > 0.0
+    field.zero_grad(set_to_none=True)
+    query_points.grad = None
+
     with torch.no_grad():
         field.length_raw.copy_(torch.tensor([[0.0], [0.5], [-0.25]]))
         field.direction_local_raw.copy_(
