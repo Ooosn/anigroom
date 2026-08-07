@@ -16,8 +16,9 @@ from anigroom.flow.direction_geometry import parallel_transport_vector_field
 from anigroom.grooming.geometry_residuals import local_components_to_world
 from anigroom.surface_interpolation import local_surface_weights
 from train_white_tiger_stage1 import (
-    load_stage1_checkpoint_model,
+    build_stage1_model_from_checkpoint,
     load_training_checkpoint,
+    stage1_config_from_checkpoint_mapping,
 )
 
 
@@ -208,10 +209,28 @@ def audit_support(
 @torch.no_grad()
 def run_audit(args: argparse.Namespace) -> dict[str, object]:
     device = torch.device(args.device)
-    model, config, checkpoint = load_stage1_checkpoint_model(
-        args.target_checkpoint,
-        device,
-    )
+    checkpoint = load_training_checkpoint(args.target_checkpoint)
+    config_mapping = checkpoint.get("config")
+    if not isinstance(config_mapping, dict):
+        raise RuntimeError("target checkpoint has no embedded config")
+    config = stage1_config_from_checkpoint_mapping(config_mapping)
+    state = checkpoint.get("model")
+    if not isinstance(state, dict):
+        raise RuntimeError("target checkpoint has no model state")
+    if config.geometry_residual_domain != "render":
+        raise RuntimeError("target checkpoint must contain render-root residuals")
+    # R043 predates the persistent secondary-guide topology buffers. Their
+    # semantically exact value in a render-domain checkpoint is an empty tensor.
+    # Migrate only this known old schema in the read-only copy used by the audit;
+    # the formal checkpoint loader and checkpoint file remain unchanged.
+    migrated_state = dict(state)
+    migrated_state.setdefault("secondary_guide_face_ids", torch.empty((0,), dtype=torch.long))
+    migrated_state.setdefault("secondary_guide_barycentric", torch.empty((0, 3)))
+    migrated_state.setdefault("secondary_guide_points_local", torch.empty((0, 3)))
+    migrated_state.setdefault("secondary_guide_parent_ids", torch.empty((0,), dtype=torch.long))
+    migrated_checkpoint = dict(checkpoint)
+    migrated_checkpoint["model"] = migrated_state
+    model = build_stage1_model_from_checkpoint(migrated_checkpoint, config, device)
     if model.geometry_residual_domain != "render":
         raise RuntimeError("target checkpoint must contain render-root residuals")
     target_field = model.render_geometry_residual
