@@ -50,6 +50,13 @@ in sequence on one GPU. It also invokes the existing fixed checkpoint renderer
 and deterministic 100k-strand exporter; it does not introduce another QA
 protocol.
 
+The active-path preflight also overrides the inherited guide and residual
+freezes. It refuses authorization unless guide curl/frizz, secondary-guide
+curl/frizz residuals, and the Gaussian RGB residual all have finite, nonzero
+Adam first moments after the same real 1920x1080 step. The local RTX 4080
+preflight passed this contract with 400k render roots and a 7.55 GB peak
+allocation; this is a gradient-chain check, not a metric result.
+
 ## Required Comparison
 
 The two from-zero runs differ only in whether the Gaussian residual becomes

@@ -62,6 +62,61 @@ run_stage1() {
   echo "[r053] finish run=$run_id at=$(date --iso-8601=seconds)"
 }
 
+verify_active_path_preflight() {
+  local checkpoint="$OUTPUT_ROOT/$PREFLIGHT_ID/checkpoint_000001.pt"
+  [[ -s "$checkpoint" ]] || {
+    echo "[r053] missing active-path preflight checkpoint: $checkpoint" >&2
+    exit 2
+  }
+
+  "$PYTHON" - "$checkpoint" <<'PY'
+import sys
+
+import torch
+
+checkpoint_path = sys.argv[1]
+checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+for key in (
+    "shape_detail_multiplier",
+    "guide_residual_multiplier",
+    "gaussian_rgb_residual_multiplier",
+):
+    if float(checkpoint[key]) < 0.999:
+        raise RuntimeError(f"R053 active-path preflight left {key} gated: {checkpoint[key]}")
+
+optimizer = checkpoint["optimizer"]
+group_names = checkpoint["optimizer_param_names"]
+required = {
+    "guide_curl_radius_raw",
+    "guide_frizz_raw",
+    "secondary_geometry_residual.curl_radius_raw",
+    "secondary_geometry_residual.frizz_raw",
+    "gaussian_rgb_residual.raw",
+}
+seen = set()
+for group, names in zip(optimizer["param_groups"], group_names, strict=True):
+    for parameter_id, name in zip(group["params"], names, strict=True):
+        if name not in required:
+            continue
+        state = optimizer["state"].get(parameter_id, {})
+        exp_avg = state.get("exp_avg")
+        if exp_avg is None or not bool(torch.isfinite(exp_avg).all()):
+            raise RuntimeError(f"R053 active-path preflight has invalid Adam state for {name}")
+        nonzero = int(torch.count_nonzero(exp_avg))
+        if nonzero == 0:
+            raise RuntimeError(f"R053 active-path preflight produced zero gradient state for {name}")
+        print(
+            f"[r053] active_path={name} nonzero_adam_m={nonzero} "
+            f"max_abs_adam_m={float(exp_avg.abs().max()):.9g}"
+        )
+        seen.add(name)
+
+missing = sorted(required - seen)
+if missing:
+    raise RuntimeError(f"R053 active-path preflight is missing optimizer parameters: {missing}")
+PY
+}
+
 postprocess() {
   local run_id="$1"
   local label="$2"
@@ -111,6 +166,7 @@ postprocess() {
 run_stage1 \
   "$PREFLIGHT_ID" \
   r053_shape_detail_gaussian_residual_fullres_preflight.env
+verify_active_path_preflight
 touch "$CONTROL_ROOT/preflight_passed"
 echo "[r053] preflight passed; waiting for $CONTROL_ROOT/authorize_pair"
 while [[ ! -e "$CONTROL_ROOT/authorize_pair" ]]; do
