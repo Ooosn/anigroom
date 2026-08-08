@@ -23,6 +23,8 @@ def make_model(
     *,
     render_count: int = 4,
     gaussian_rgb_residual_support: bool = True,
+    guide_curl_residual_scale: float = 1.0,
+    guide_frizz_residual_scale: float = 1.0,
 ) -> WhiteTigerStage1Model:
     mesh = TriangleMesh(
         vertices=np.asarray(
@@ -74,6 +76,8 @@ def make_model(
         render_geometry_parameterization="zero_centered_residual",
         guide_length_residual_scale=0.18,
         guide_direction_residual_scale=0.10,
+        guide_curl_residual_scale=guide_curl_residual_scale,
+        guide_frizz_residual_scale=guide_frizz_residual_scale,
     )
 
 
@@ -353,3 +357,37 @@ def test_shape_gate_is_zero_before_handoff_and_joint_controls_receive_gradients(
     ):
         assert bool(torch.isfinite(parameter.grad).all())
         assert bool((parameter.grad.abs() > 0.0).any())
+
+
+def test_primary_guide_shape_ownership_excludes_render_residuals() -> None:
+    model = make_model(
+        guide_curl_residual_scale=0.0,
+        guide_frizz_residual_scale=0.0,
+    )
+    config = replace(
+        make_config(),
+        shape_curl_scale=1.0,
+        shape_frizz_scale=1.0,
+        guide_curl_residual_scale=0.0,
+        guide_frizz_residual_scale=0.0,
+    )
+    names = {
+        name
+        for group in stage1_optimizer_param_names(model, config)
+        for name in group
+    }
+    assert "guide_curl_radius_raw" in names
+    assert "guide_frizz_raw" in names
+    assert "render_geometry_residual.curl_radius_raw" not in names
+    assert "render_geometry_residual.frizz_raw" not in names
+    assert "gaussian_rgb_residual.raw" in names
+
+    model.shape_detail_multiplier = 1.0
+    _, _, roots_local = model.roots_and_normals()
+    before = model.apply_guide_controls(model.groom.decode(), roots_local)
+    with torch.no_grad():
+        model.render_geometry_residual.curl_radius_raw.fill_(8.0)
+        model.render_geometry_residual.frizz_raw.fill_(-8.0)
+    after = model.apply_guide_controls(model.groom.decode(), roots_local)
+    torch.testing.assert_close(after.curl_radius, before.curl_radius)
+    torch.testing.assert_close(after.frizz, before.frizz)
