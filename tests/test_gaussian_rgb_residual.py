@@ -14,6 +14,7 @@ from tools.train_white_tiger_stage1 import (
     make_stage1_optimizer,
     optimizer_row_transition,
     rebuild_stage1_optimizer_with_state,
+    shape_detail_multiplier_for_iteration,
     stage1_optimizer_param_names,
 )
 
@@ -281,3 +282,65 @@ def test_gaussian_rgb_residual_uses_shared_linear_schedule() -> None:
 
     disabled = replace(config, gaussian_rgb_residual_support=False)
     assert gaussian_rgb_residual_multiplier_for_iteration(disabled, 20_000) == 0.0
+
+
+def test_r053_shape_and_appearance_handoffs_are_synchronized() -> None:
+    config = replace(
+        make_config(),
+        guide_residual_unlock_end=20_000,
+        shape_detail_freeze_until=10_000,
+        shape_curl_scale=1.0,
+        shape_frizz_scale=1.0,
+    )
+    for iteration, expected in (
+        (9_999, 0.0),
+        (10_000, 0.0),
+        (15_000, 0.5),
+        (20_000, 1.0),
+        (25_000, 1.0),
+    ):
+        assert shape_detail_multiplier_for_iteration(config, iteration) == expected
+        assert gaussian_rgb_residual_multiplier_for_iteration(config, iteration) == expected
+
+
+def test_shape_gate_is_zero_before_handoff_and_joint_controls_receive_gradients() -> None:
+    model = make_model()
+    config = replace(
+        make_config(),
+        shape_curl_scale=1.0,
+        shape_frizz_scale=1.0,
+        guide_curl_residual_scale=1.0,
+        guide_frizz_residual_scale=1.0,
+    )
+    names = {
+        name
+        for group in stage1_optimizer_param_names(model, config)
+        for name in group
+    }
+    assert "guide_curl_radius_raw" in names
+    assert "guide_frizz_raw" in names
+    assert "render_geometry_residual.curl_radius_raw" in names
+    assert "render_geometry_residual.frizz_raw" in names
+    assert "gaussian_rgb_residual.raw" in names
+
+    _, _, roots_local = model.roots_and_normals()
+    model.shape_detail_multiplier = 0.0
+    frozen = model.apply_guide_controls(model.groom.decode(), roots_local)
+    torch.testing.assert_close(frozen.curl_radius, torch.zeros_like(frozen.curl_radius))
+    torch.testing.assert_close(frozen.frizz, torch.zeros_like(frozen.frizz))
+
+    model.shape_detail_multiplier = 0.5
+    active = model.apply_guide_controls(model.groom.decode(), roots_local)
+    (active.curl_radius.mean() + active.frizz.mean()).backward()
+    assert model.guide_curl_radius_raw.grad is not None
+    assert model.guide_frizz_raw.grad is not None
+    assert model.render_geometry_residual.curl_radius_raw.grad is not None
+    assert model.render_geometry_residual.frizz_raw.grad is not None
+    for parameter in (
+        model.guide_curl_radius_raw,
+        model.guide_frizz_raw,
+        model.render_geometry_residual.curl_radius_raw,
+        model.render_geometry_residual.frizz_raw,
+    ):
+        assert bool(torch.isfinite(parameter.grad).all())
+        assert bool((parameter.grad.abs() > 0.0).any())

@@ -80,6 +80,12 @@ def main() -> None:
     scene_bg = scene_background_color(config, device)
     residual_enabled = model.gaussian_rgb_residual is not None
     residual_multiplier = float(model.gaussian_rgb_residual_multiplier)
+    residual_active = residual_enabled and abs(residual_multiplier) > 0.0
+    shape_detail_multiplier = float(model.shape_detail_multiplier)
+    shape_detail_active = (
+        abs(shape_detail_multiplier) > 0.0
+        and (float(model.shape_curl_scale) > 0.0 or float(model.shape_frizz_scale) > 0.0)
+    )
     local_render_color_enabled = model.child_color_delta_raw is not None
     local_render_color_stats = None
     if local_render_color_enabled:
@@ -136,7 +142,7 @@ def main() -> None:
             base_pred = None
             residual_abs = None
             residual_signed = None
-            if residual_enabled:
+            if residual_active:
                 model.gaussian_rgb_residual_multiplier = 0.0
                 try:
                     base_pred, _, _, _, base_stats, _ = render_view(
@@ -174,6 +180,82 @@ def main() -> None:
                     }
                 )
                 del residual_delta, base_mse, base_psnr
+            without_shape_detail = None
+            without_shape_or_residual = None
+            if shape_detail_active:
+                model.shape_detail_multiplier = 0.0
+                try:
+                    without_shape_detail, _, _, _, without_shape_stats, _ = render_view(
+                        model,
+                        viewmats[idx],
+                        ks[idx],
+                        width,
+                        height,
+                        config,
+                        background=mesh_color,
+                        mesh_depth=mesh_depth,
+                        backing_image=backing,
+                    )
+                    if residual_active:
+                        model.gaussian_rgb_residual_multiplier = 0.0
+                        try:
+                            without_shape_or_residual, _, _, _, both_off_stats, _ = render_view(
+                                model,
+                                viewmats[idx],
+                                ks[idx],
+                                width,
+                                height,
+                                config,
+                                background=mesh_color,
+                                mesh_depth=mesh_depth,
+                                backing_image=backing,
+                            )
+                        finally:
+                            model.gaussian_rgb_residual_multiplier = residual_multiplier
+                    else:
+                        without_shape_or_residual = without_shape_detail
+                        both_off_stats = without_shape_stats
+                finally:
+                    model.shape_detail_multiplier = shape_detail_multiplier
+
+                without_shape_mse = torch.mean(
+                    (without_shape_detail - target_eval).square()
+                ).clamp_min(1.0e-12)
+                both_off_mse = torch.mean(
+                    (without_shape_or_residual - target_eval).square()
+                ).clamp_min(1.0e-12)
+                shape_delta = pred - without_shape_detail
+                save_image(
+                    output_dir / f"view_{idx:02d}_pred_without_shape_detail.png",
+                    without_shape_detail,
+                )
+                save_image(
+                    output_dir / f"view_{idx:02d}_shape_detail_abs_x4.png",
+                    (shape_delta.abs() * 4.0).clamp(0.0, 1.0),
+                )
+                save_image(
+                    output_dir / f"view_{idx:02d}_pred_without_shape_detail_or_gaussian_rgb_residual.png",
+                    without_shape_or_residual,
+                )
+                record.update(
+                    {
+                        "pred_without_shape_detail": f"view_{idx:02d}_pred_without_shape_detail.png",
+                        "shape_detail_abs_x4": f"view_{idx:02d}_shape_detail_abs_x4.png",
+                        "pred_without_shape_detail_or_gaussian_rgb_residual": (
+                            f"view_{idx:02d}_pred_without_shape_detail_or_gaussian_rgb_residual.png"
+                        ),
+                        "composite_psnr_without_shape_detail": float(
+                            (-10.0 * torch.log10(without_shape_mse)).cpu()
+                        ),
+                        "composite_psnr_without_shape_detail_or_gaussian_rgb_residual": float(
+                            (-10.0 * torch.log10(both_off_mse)).cpu()
+                        ),
+                        "shape_detail_image_abs_mean": float(shape_delta.abs().mean().cpu()),
+                        "without_shape_detail_stats": without_shape_stats,
+                        "without_shape_detail_or_gaussian_rgb_residual_stats": both_off_stats,
+                    }
+                )
+                del without_shape_mse, both_off_mse, shape_delta
             without_local_render_color = None
             root_tip_only = None
             if local_render_color_enabled:
@@ -191,7 +273,7 @@ def main() -> None:
                         mesh_depth=mesh_depth,
                         backing_image=backing,
                     )
-                    if residual_enabled:
+                    if residual_active:
                         model.gaussian_rgb_residual_multiplier = 0.0
                         try:
                             root_tip_only, _, _, _, root_tip_stats, _ = render_view(
@@ -261,6 +343,8 @@ def main() -> None:
                 del base_pred, residual_abs, residual_signed
             if without_local_render_color is not None:
                 del without_local_render_color, root_tip_only
+            if without_shape_detail is not None:
+                del without_shape_detail, without_shape_or_residual
             torch.cuda.empty_cache()
 
     summary = {
@@ -272,6 +356,7 @@ def main() -> None:
         "guide_residual_multiplier": float(model.guide_residual_multiplier),
         "guide_coverage_residual_multiplier": float(model.guide_coverage_residual_multiplier),
         "shape_detail_multiplier": float(model.shape_detail_multiplier),
+        "shape_detail_active": bool(shape_detail_active),
         "gaussian_rgb_residual": (
             model.gaussian_rgb_residual.stats(multiplier=residual_multiplier)
             if residual_enabled
