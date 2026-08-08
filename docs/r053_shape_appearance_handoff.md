@@ -39,6 +39,14 @@ configs/r053_shape_detail_gaussian_residual_0_30k.env
 configs/r053_shape_detail_gaussian_residual_fullres_preflight.env
 ```
 
+The H100 execution entry is
+`scripts/server/run_r053_shape_appearance_handoff.sh`. It verifies an exact
+clean commit, runs the real full-resolution active-path preflight, waits at an
+explicit authorization marker, then runs the control and treatment from zero
+in sequence on one GPU. It also invokes the existing fixed checkpoint renderer
+and deterministic 100k-strand exporter; it does not introduce another QA
+protocol.
+
 ## Required Comparison
 
 The two from-zero runs differ only in whether the Gaussian residual becomes
@@ -54,4 +62,3 @@ active. They must match through 10k. At 30k report:
 The treatment succeeds only if it reduces false curl/frizz, crossings, and
 local turn tails relative to the no-residual control while preserving useful
 RGB evidence. PSNR alone cannot accept it.
-
