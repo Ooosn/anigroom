@@ -307,13 +307,34 @@ def test_r053_shape_and_appearance_handoffs_are_synchronized() -> None:
         assert gaussian_rgb_residual_multiplier_for_iteration(config, iteration) == expected
 
 
-def test_shape_detail_starts_from_the_neutral_physical_state() -> None:
+def test_shape_detail_gate_is_neutral_and_guide_coordinates_are_learnable() -> None:
     model = make_model()
-    model.shape_detail_multiplier = 1.0
+    model.shape_detail_multiplier = 0.0
     _, _, roots_local = model.roots_and_normals()
+    neutral = model.apply_guide_controls(model.groom.decode(), roots_local)
+    torch.testing.assert_close(neutral.curl_radius, torch.zeros_like(neutral.curl_radius))
+    torch.testing.assert_close(neutral.frizz, torch.zeros_like(neutral.frizz))
+
+    model.shape_detail_multiplier = 1.0
     groom = model.apply_guide_controls(model.groom.decode(), roots_local)
-    assert float(groom.curl_radius.max()) < 1.0e-6
-    assert float(groom.frizz.max()) < 1.0e-6
+    torch.testing.assert_close(
+        groom.curl_radius,
+        model.guide_root_width_reference,
+        rtol=1.0e-4,
+        atol=1.0e-8,
+    )
+    torch.testing.assert_close(
+        groom.frizz,
+        model.guide_root_width_reference,
+        rtol=1.0e-4,
+        atol=1.0e-8,
+    )
+
+    (groom.curl_radius.mean() + groom.frizz.mean()).backward()
+    assert model.guide_curl_radius_raw.grad is not None
+    assert model.guide_frizz_raw.grad is not None
+    assert bool((model.guide_curl_radius_raw.grad.abs() > 1.0e-8).any())
+    assert bool((model.guide_frizz_raw.grad.abs() > 1.0e-8).any())
 
 
 def test_shape_gate_is_zero_before_handoff_and_joint_controls_receive_gradients() -> None:

@@ -2227,10 +2227,14 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 self.guide_child_radius_reference.fill_(0.0028)
                 set_range(
                     self.guide_curl_radius_raw,
-                    ranges.curl_radius[0],
+                    self.guide_root_width_reference,
                     ranges.curl_radius,
                 )
-                set_range(self.guide_frizz_raw, ranges.frizz[0], ranges.frizz)
+                set_range(
+                    self.guide_frizz_raw,
+                    self.guide_root_width_reference,
+                    ranges.frizz,
+                )
                 self.guide_child_radius_raw.zero_()
                 set_range(self.guide_clump_strength_raw, 0.25, ranges.clump_strength)
                 self.guide_direction_local_raw.copy_(

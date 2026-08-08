@@ -32,6 +32,9 @@ Consequently:
 - primary guides remain the sole owners of curl radius and frizz amplitude;
 - those guide fields remain trainable and use the existing surface-graph
   smoothness;
+- their initial physical amplitude equals the guide root-width reference. This
+  is a scale-consistent near-neutral initialization rather than the saturated
+  lower range endpoint; the shape gate still renders exact zero through 10k;
 - render roots receive curl/frizz only by the existing physical surface
   interpolation from primary guides;
 - secondary-guide curl/frizz residual tensors remain at the semantic neutral
