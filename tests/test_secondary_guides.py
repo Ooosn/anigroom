@@ -10,6 +10,7 @@ from anigroom.grooming.secondary_guides import (
     initialize_parent_conditioned_secondary_roots,
     interpolate_secondary_geometry_residuals,
 )
+from anigroom.grooming.secondary_guide_colors import SecondaryGuideColorField
 from anigroom.grooming.strand_gaussians import make_tangent_frames
 from anigroom.mesh_roots import SurfaceRoots, TriangleMesh
 from anigroom.roots.lifecycle import RootStructureUpdate
@@ -19,9 +20,23 @@ from tools.train_white_tiger_stage1 import (
     WhiteTigerStage1Model,
     build_stage1_model_from_checkpoint,
     dense_groom_ranges,
+    freeze_secondary_guide_color_gradients,
     make_stage1_optimizer,
     stage1_optimizer_param_names,
 )
+
+
+def test_secondary_guide_color_field_roundtrip() -> None:
+    field = SecondaryGuideColorField(3)
+    root = torch.tensor(
+        [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]],
+        dtype=torch.float32,
+    )
+    tip = (0.8 * root + 0.1).clamp(0.0, 1.0)
+    field.set_decoded(root, tip)
+    decoded = field.decode()
+    torch.testing.assert_close(decoded.root, root)
+    torch.testing.assert_close(decoded.tip, tip)
 
 
 def grid_mesh(size: int = 5) -> TriangleMesh:
@@ -400,6 +415,139 @@ def test_model_secondary_zero_state_matches_direct_primary_interpolation() -> No
     assert hierarchical.secondary_render_support().indices.shape == (5, 4)
     for name, parameter in hierarchical.secondary_geometry_residual.named_parameters():
         torch.testing.assert_close(parameter, secondary_before[name])
+
+
+def test_secondary_guide_colors_own_base_and_freeze_without_adam_drift() -> None:
+    mesh = grid_mesh()
+    primary = primary_roots(mesh)
+    triangles = mesh.vertices[mesh.faces]
+    normals = np.cross(
+        triangles[:, 1] - triangles[:, 0],
+        triangles[:, 2] - triangles[:, 0],
+    )
+    normals /= np.maximum(np.linalg.norm(normals, axis=-1, keepdims=True), 1.0e-8)
+    interpolator = SurfaceFieldInterpolator(
+        vertices=mesh.vertices,
+        faces=mesh.faces,
+        source_points=primary.points,
+        source_face_ids=primary.face_ids,
+        neighbor_count=4,
+        device="cpu",
+    )
+    secondary = initialize_parent_conditioned_secondary_roots(
+        mesh,
+        primary,
+        interpolator,
+        8,
+        candidate_multiplier=32.0,
+        seed=29,
+        device="cpu",
+    )
+    model = WhiteTigerStage1Model(
+        mesh=mesh,
+        face_normals=normals.astype(np.float32),
+        face_tangents=None,
+        face_ids=primary.face_ids,
+        barycentric=primary.barycentric,
+        ranges=dense_groom_ranges(),
+        device=torch.device("cpu"),
+        max_child_count=1,
+        gaussian_rgb_residual_support=True,
+        gaussian_rgb_residual_control_points=6,
+        guide_face_ids=primary.face_ids,
+        guide_barycentric=primary.barycentric,
+        guide_interpolation_k=4,
+        geometry_residual_domain="secondary_guide",
+        secondary_guide_face_ids=secondary.roots.face_ids,
+        secondary_guide_barycentric=secondary.roots.barycentric,
+        secondary_guide_parent_ids=secondary.parent_ids,
+        secondary_guide_interpolation_k=4,
+        secondary_guide_color_support=True,
+        render_geometry_parameterization="zero_centered_asinh_log_length_residual",
+        guide_length_residual_scale=1.0,
+        guide_direction_residual_scale=1.0,
+    )
+    root_colors = torch.linspace(0.1, 0.9, 8).view(8, 1).expand(-1, 3)
+    tip_colors = (0.75 * root_colors + 0.2).clamp(0.0, 1.0)
+    model.secondary_guide_colors.set_decoded(root_colors, tip_colors)
+
+    _, render_normals, render_roots = model.roots_and_normals()
+    effective = model.apply_guide_controls(
+        model.groom.decode(),
+        render_roots,
+        render_normals,
+    )
+    assert torch.isfinite(effective.root_color).all()
+    assert float(effective.root_color.min()) >= float(root_colors.min())
+    assert float(effective.root_color.max()) <= float(root_colors.max())
+    secondary_effective = model.secondary_effective_groom()
+    torch.testing.assert_close(secondary_effective.root_color, root_colors)
+    torch.testing.assert_close(secondary_effective.tip_color, tip_colors)
+
+    config = Stage1Config(
+        data_root="unused",
+        mesh_path="unused",
+        output_dir="unused",
+        child_count=1,
+        geometry_residual_domain="secondary_guide",
+        secondary_guide_root_count=8,
+        secondary_guide_color_support=True,
+        gaussian_rgb_residual_support=True,
+        guide_length_residual_scale=1.0,
+        guide_direction_residual_scale=1.0,
+    )
+    optimizer = make_stage1_optimizer(model, config)
+    names = {name for group in stage1_optimizer_param_names(model, config) for name in group}
+    assert "secondary_guide_colors.root_raw" in names
+    assert "secondary_guide_colors.tip_raw" in names
+    assert "gaussian_rgb_residual.raw" in names
+    assert "groom.root_color_raw" not in names
+    assert "groom.tip_color_raw" not in names
+    assert "child_color_delta_raw" not in names
+
+    optimizer.zero_grad(set_to_none=True)
+    (model.secondary_guide_colors.root_raw.sum() + model.secondary_guide_colors.tip_raw.sum()).backward()
+    optimizer.step()
+    before = {
+        name: value.detach().clone()
+        for name, value in model.secondary_guide_colors.named_parameters()
+    }
+    optimizer.zero_grad(set_to_none=True)
+    (model.secondary_guide_colors.root_raw.sum() + model.secondary_guide_colors.tip_raw.sum()).backward()
+    freeze_secondary_guide_color_gradients(model)
+    optimizer.step()
+    for name, value in model.secondary_guide_colors.named_parameters():
+        torch.testing.assert_close(value, before[name])
+
+    clone = WhiteTigerStage1Model(
+        mesh=mesh,
+        face_normals=normals.astype(np.float32),
+        face_tangents=None,
+        face_ids=primary.face_ids,
+        barycentric=primary.barycentric,
+        ranges=dense_groom_ranges(),
+        device=torch.device("cpu"),
+        max_child_count=1,
+        gaussian_rgb_residual_support=True,
+        gaussian_rgb_residual_control_points=6,
+        guide_face_ids=primary.face_ids,
+        guide_barycentric=primary.barycentric,
+        guide_interpolation_k=4,
+        geometry_residual_domain="secondary_guide",
+        secondary_guide_face_ids=secondary.roots.face_ids,
+        secondary_guide_barycentric=secondary.roots.barycentric,
+        secondary_guide_parent_ids=secondary.parent_ids,
+        secondary_guide_interpolation_k=4,
+        secondary_guide_color_support=True,
+        render_geometry_parameterization="zero_centered_asinh_log_length_residual",
+        guide_length_residual_scale=1.0,
+        guide_direction_residual_scale=1.0,
+    )
+    clone.load_state_dict(model.state_dict(), strict=True)
+    torch.testing.assert_close(
+        clone.secondary_guide_colors.root_raw,
+        model.secondary_guide_colors.root_raw,
+    )
 
 
 def test_formal_checkpoint_loader_restores_render_and_secondary_domains(

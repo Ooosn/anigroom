@@ -96,6 +96,9 @@ from anigroom.grooming.secondary_guides import (  # noqa: E402
     initialize_parent_conditioned_secondary_roots,
     interpolate_secondary_geometry_residuals,
 )
+from anigroom.grooming.secondary_guide_colors import (  # noqa: E402
+    SecondaryGuideColorField,
+)
 from anigroom.mesh_roots import (  # noqa: E402
     SurfaceRoots,
     TriangleMesh,
@@ -1026,6 +1029,7 @@ def root_graph_smoothness(
     smooth_field_metric: str = "ambient",
     include_geometry: bool = True,
     appearance_only: bool = False,
+    include_color: bool = True,
 ) -> torch.Tensor:
     if edges.numel() == 0:
         return next(field.parameters()).new_tensor(0.0)
@@ -1048,11 +1052,14 @@ def root_graph_smoothness(
         return value.mean()
 
     terms = [
-        0.25 * weighted_mean((groom.root_color[src] - groom.root_color[dst]).square()),
-        0.15 * weighted_mean((groom.tip_color[src] - groom.tip_color[dst]).square()),
         0.5 * weighted_mean((groom.opacity[src] - groom.opacity[dst]).square()),
         0.25 * weighted_mean((groom.tip_opacity[src] - groom.tip_opacity[dst]).square()),
     ]
+    if include_color:
+        terms[:0] = [
+            0.25 * weighted_mean((groom.root_color[src] - groom.root_color[dst]).square()),
+            0.15 * weighted_mean((groom.tip_color[src] - groom.tip_color[dst]).square()),
+        ]
     if not appearance_only:
         terms[:0] = [
             2.0 * weighted_mean((torch.log(groom.root_width[src].clamp_min(1.0e-6)) - torch.log(groom.root_width[dst].clamp_min(1.0e-6))).square()),
@@ -1115,6 +1122,21 @@ def root_graph_smoothness(
             ]
         )
     return torch.stack(terms).sum()
+
+
+def secondary_guide_color_graph_smoothness(
+    model: WhiteTigerStage1Model,
+    edges: torch.Tensor,
+) -> torch.Tensor:
+    field = model.secondary_guide_colors
+    if field is None or edges.numel() == 0:
+        return model.groom.length_raw.sum() * 0.0
+    decoded = field.decode()
+    src, dst = edges[:, 0], edges[:, 1]
+    return (
+        0.25 * (decoded.root[src] - decoded.root[dst]).square().mean()
+        + 0.15 * (decoded.tip[src] - decoded.tip[dst]).square().mean()
+    )
 
 
 def render_geometry_residual_graph_smoothness(
@@ -1754,6 +1776,7 @@ class Stage1Config:
     secondary_guide_candidate_multiplier: float = 16.0
     secondary_guide_interpolation_k: int = 8
     secondary_guide_smooth_k: int = 32
+    secondary_guide_color_support: bool = False
     render_geometry_parameterization: str = "absolute_endpoint"
     guide_length_residual_scale: float = 0.0
     guide_direction_residual_scale: float = 1.0
@@ -1910,6 +1933,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         secondary_guide_barycentric: np.ndarray | None = None,
         secondary_guide_parent_ids: np.ndarray | None = None,
         secondary_guide_interpolation_k: int = 8,
+        secondary_guide_color_support: bool = False,
         render_geometry_parameterization: str = "absolute_endpoint",
         guide_length_residual_scale: float = 0.0,
         guide_direction_residual_scale: float = 1.0,
@@ -1928,7 +1952,12 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.strand_shape_normal_mode = strand_shape_normal_mode
         self.max_child_count = max(1, int(max_child_count))
         self.local_child_color_scale = float(local_child_color_scale)
+        self.secondary_guide_color_support = bool(secondary_guide_color_support)
         self.gaussian_rgb_residual_multiplier = 1.0
+        if self.secondary_guide_color_support and bool(local_child_color_support):
+            raise ValueError(
+                "secondary guide colors replace local render-root colors; both cannot be enabled"
+            )
         if bool(gaussian_rgb_residual_support) and self.max_child_count != 1:
             raise ValueError(
                 "Gaussian RGB residual currently requires child_count=1 so every "
@@ -2008,6 +2037,16 @@ class WhiteTigerStage1Model(torch.nn.Module):
         else:
             self.render_geometry_residual = None
         self.secondary_geometry_residual: RenderGeometryResidualField | None = None
+        self.secondary_guide_colors: SecondaryGuideColorField | None = None
+        if self.secondary_guide_color_support:
+            if self.geometry_residual_domain != "secondary_guide":
+                raise ValueError(
+                    "secondary guide colors require geometry_residual_domain=secondary_guide"
+                )
+            self.register_buffer(
+                "secondary_guide_color_observation_confidence",
+                torch.empty((0,), device=device),
+            )
         self.log_scale = torch.nn.Parameter(torch.tensor([math.log(float(init_scale))], device=device))
         self.translation = torch.nn.Parameter(torch.tensor(init_translation, device=device, dtype=torch.float32))
         if bool(local_child_color_support):
@@ -2274,6 +2313,34 @@ class WhiteTigerStage1Model(torch.nn.Module):
             and self.secondary_guide_points_local.numel() > 0
         )
 
+    def secondary_guide_colors_enabled(self) -> bool:
+        return (
+            self.secondary_guide_colors is not None
+            and self.secondary_guide_points_local.numel() > 0
+        )
+
+    def secondary_colors_at_render_roots(
+        self,
+        roots_local: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.secondary_guide_colors_enabled():
+            raise RuntimeError("secondary guide colors requested while disabled")
+        if int(roots_local.shape[0]) != int(self.anchor_local.shape[0]):
+            raise RuntimeError(
+                "secondary guide color interpolation requires the render-root set"
+            )
+        decoded = self.secondary_guide_colors.decode()
+        support = self.secondary_render_support()
+        weights = local_surface_weights(
+            roots_local,
+            self.secondary_guide_points_local,
+            support,
+        )
+        return (
+            interpolate_physical(decoded.root, support.indices, weights),
+            interpolate_physical(decoded.tip, support.indices, weights),
+        )
+
     @torch.no_grad()
     def attach_secondary_guides(
         self,
@@ -2322,6 +2389,15 @@ class WhiteTigerStage1Model(torch.nn.Module):
             count,
             device=device,
         )
+        if self.secondary_guide_color_support:
+            self.secondary_guide_colors = SecondaryGuideColorField(
+                count,
+                device=device,
+            )
+            self.secondary_guide_color_observation_confidence = torch.zeros(
+                (count,),
+                device=device,
+            )
         self.secondary_primary_support_ids_cache = torch.empty(
             (0, 0), device=device, dtype=torch.long
         )
@@ -3054,6 +3130,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         root_face_ids: torch.Tensor | None = None,
         guide_support: SurfaceSupport | None = None,
         residual_sample_override: InterpolatedGeometryResiduals | None = None,
+        secondary_color_direct: bool = False,
     ):
         if not self.guide_enabled():
             return self.apply_shape_detail_gate(groom)
@@ -3260,6 +3337,20 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "child_radius": child_radius,
             "clump_strength": clump_strength,
         }
+        if self.secondary_guide_colors_enabled():
+            if secondary_color_direct:
+                decoded_colors = self.secondary_guide_colors.decode()
+                if int(decoded_colors.root.shape[0]) != int(roots_local.shape[0]):
+                    raise RuntimeError(
+                        "direct secondary guide colors do not match query count"
+                    )
+                root_color = decoded_colors.root
+                tip_color = decoded_colors.tip
+            else:
+                root_color, tip_color = self.secondary_colors_at_render_roots(
+                    roots_local
+                )
+            kwargs.update(root_color=root_color, tip_color=tip_color)
         if guide_direction is not None:
             effective_direction_residual_scale = (
                 float(self.guide_direction_residual_scale)
@@ -3332,6 +3423,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             root_face_ids=self.secondary_guide_face_ids,
             guide_support=self.secondary_primary_support(),
             residual_sample_override=residual_sample,
+            secondary_color_direct=True,
         )
 
     def secondary_clean_flow_confidence(self) -> torch.Tensor:
@@ -3915,6 +4007,24 @@ def initialize_groom_from_projections(
     root_count = int(roots.shape[0])
     color_sum = torch.zeros((root_count, 3), device=device)
     weight_sum = torch.zeros((root_count, 1), device=device)
+    secondary_roots = None
+    secondary_normals = None
+    secondary_color_sum = None
+    secondary_weight_sum = None
+    if model.secondary_guide_colors_enabled():
+        secondary_roots = (
+            model.secondary_guide_points_local
+            * torch.exp(model.log_scale.detach()).view(1, 1)
+            + model.translation.detach().view(1, 3)
+        )
+        secondary_normals = F.normalize(
+            model.face_normals[model.secondary_guide_face_ids],
+            dim=-1,
+            eps=EPS,
+        )
+        secondary_count = int(secondary_roots.shape[0])
+        secondary_color_sum = torch.zeros((secondary_count, 3), device=device)
+        secondary_weight_sum = torch.zeros((secondary_count, 1), device=device)
     chosen = train_indices[: max(1, min(int(config.projected_init_views), len(train_indices)))]
     mesh_for_visibility = TriangleMesh(
         vertices=(
@@ -3951,17 +4061,69 @@ def initialize_groom_from_projections(
         angle_weight = view_angle_weight(normals, viewmats[idx], config.projected_init_view_angle_power)
         weight = (sampled_mask * sampled_conf * angle_weight * root_vis.visible.to(sampled_mask.dtype)).clamp(0.0, 1.0)
         good = weight >= float(config.projected_init_min_confidence)
-        if not bool(good.any()):
-            continue
-        sampled_color = bilinear_sample(image, root_vis.xy).clamp(0.0, 1.0)
-        w = weight[:, None]
-        color_sum[good] += sampled_color[good] * w[good]
-        weight_sum[good] += w[good]
+        if bool(good.any()):
+            sampled_color = bilinear_sample(image, root_vis.xy).clamp(0.0, 1.0)
+            w = weight[:, None]
+            color_sum[good] += sampled_color[good] * w[good]
+            weight_sum[good] += w[good]
+
+        secondary_good_count = 0
+        if (
+            secondary_roots is not None
+            and secondary_normals is not None
+            and secondary_color_sum is not None
+            and secondary_weight_sum is not None
+        ):
+            secondary_vis = sample_mesh_visible_points(
+                secondary_roots,
+                secondary_normals,
+                viewmats[idx],
+                ks[idx],
+                mesh_depth.depth,
+                depth_abs_tolerance=config.projected_init_depth_abs_tolerance,
+                depth_rel_tolerance=config.projected_init_depth_rel_tolerance,
+                local_depth_kernel=config.projected_init_local_depth_kernel,
+                front_normal_z=config.projected_init_front_normal_z,
+            )
+            secondary_mask = bilinear_sample(mask, secondary_vis.xy)[:, 0]
+            secondary_conf = bilinear_sample(mask_conf, secondary_vis.xy)[:, 0]
+            secondary_angle = view_angle_weight(
+                secondary_normals,
+                viewmats[idx],
+                config.projected_init_view_angle_power,
+            )
+            secondary_weight = (
+                secondary_mask
+                * secondary_conf
+                * secondary_angle
+                * secondary_vis.visible.to(secondary_mask.dtype)
+            ).clamp(0.0, 1.0)
+            secondary_good = secondary_weight >= float(
+                config.projected_init_min_confidence
+            )
+            if bool(secondary_good.any()):
+                secondary_sampled_color = bilinear_sample(
+                    image,
+                    secondary_vis.xy,
+                ).clamp(0.0, 1.0)
+                secondary_w = secondary_weight[:, None]
+                secondary_color_sum[secondary_good] += (
+                    secondary_sampled_color[secondary_good]
+                    * secondary_w[secondary_good]
+                )
+                secondary_weight_sum[secondary_good] += secondary_w[secondary_good]
+                secondary_good_count = int(secondary_good.sum().detach().cpu())
         setup_progress(
             "projected_init_view_done",
             view_index=int(idx),
             good_roots=int(good.sum().detach().cpu()),
             observed_roots=int((weight_sum[:, 0] > 0.0).sum().detach().cpu()),
+            good_secondary_guides=int(secondary_good_count),
+            observed_secondary_guides=(
+                int((secondary_weight_sum[:, 0] > 0.0).sum().detach().cpu())
+                if secondary_weight_sum is not None
+                else 0
+            ),
         )
 
     observed = weight_sum[:, 0] > 0.0
@@ -3991,10 +4153,52 @@ def initialize_groom_from_projections(
         model.root_observation_confidence = root_conf.detach()
     else:
         filled = observed
+
+    secondary_observed = torch.zeros((0,), device=device, dtype=torch.bool)
+    secondary_filled = secondary_observed
+    if secondary_weight_sum is not None and secondary_color_sum is not None:
+        secondary_observed = secondary_weight_sum[:, 0] > 0.0
+        if not bool(secondary_observed.any()):
+            raise RuntimeError(
+                "projected initialization found no visible secondary guide colors"
+            )
+        secondary_confidence = secondary_weight_sum[:, 0]
+        secondary_confidence_scale = torch.quantile(
+            secondary_confidence[secondary_observed],
+            0.95,
+        ).clamp_min(1.0e-6)
+        secondary_confidence = (
+            secondary_confidence / secondary_confidence_scale
+        ).clamp(0.0, 1.0)
+        secondary_decoded = model.secondary_guide_colors.decode()
+        secondary_colors = secondary_decoded.root.detach().clone()
+        secondary_colors[secondary_observed] = (
+            secondary_color_sum[secondary_observed]
+            / secondary_weight_sum[secondary_observed].clamp_min(EPS)
+        ).clamp(0.02, 0.98)
+        secondary_edges = model.secondary_surface_smoothing_edges(
+            config.secondary_guide_smooth_k
+        )
+        secondary_colors = harmonic_inpaint_physical(
+            secondary_colors,
+            model.secondary_guide_points_local,
+            secondary_observed,
+            secondary_edges,
+        ).clamp(0.02, 0.98)
+        secondary_filled = torch.ones_like(secondary_observed)
+        model.secondary_guide_colors.set_decoded(
+            secondary_colors,
+            (0.88 * secondary_colors + 0.12).clamp(0.02, 0.98),
+        )
+        model.secondary_guide_color_observation_confidence = (
+            secondary_confidence.detach()
+        )
     setup_progress(
         "projected_init_done",
         observed_roots=int(observed.sum().detach().cpu()),
         filled_roots=int(filled.sum().detach().cpu()),
+        observed_secondary_guides=int(secondary_observed.sum().detach().cpu()),
+        filled_secondary_guides=int(secondary_filled.sum().detach().cpu()),
     )
     return {
         "projected_init_view_count": int(len(chosen)),
@@ -4002,6 +4206,17 @@ def initialize_groom_from_projections(
         "projected_init_observed_fraction": float(observed.float().mean().detach().cpu()),
         "projected_init_interpolated_roots": int((filled & ~observed).sum().detach().cpu()),
         "projected_init_filled_fraction": float(filled.float().mean().detach().cpu()),
+        "projected_init_observed_secondary_guides": int(
+            secondary_observed.sum().detach().cpu()
+        ),
+        "projected_init_observed_secondary_fraction": (
+            float(secondary_observed.float().mean().detach().cpu())
+            if secondary_observed.numel()
+            else 0.0
+        ),
+        "projected_init_interpolated_secondary_guides": int(
+            (secondary_filled & ~secondary_observed).sum().detach().cpu()
+        ),
     }
 
 
@@ -4945,9 +5160,15 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
                 model.groom.direction_local_raw,
             ]
         )
-    color_params = [model.groom.root_color_raw, model.groom.tip_color_raw]
-    if model.child_color_delta_raw is not None:
-        color_params.append(model.child_color_delta_raw)
+    if model.secondary_guide_colors_enabled():
+        color_params = [
+            model.secondary_guide_colors.root_raw,
+            model.secondary_guide_colors.tip_raw,
+        ]
+    else:
+        color_params = [model.groom.root_color_raw, model.groom.tip_color_raw]
+        if model.child_color_delta_raw is not None:
+            color_params.append(model.child_color_delta_raw)
     if model.gaussian_rgb_residual is not None:
         color_params.append(model.gaussian_rgb_residual.raw)
     high_frequency_params = []
@@ -5057,9 +5278,15 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
                 "groom.direction_local_raw",
             ]
         )
-    color_names = ["groom.root_color_raw", "groom.tip_color_raw"]
-    if model.child_color_delta_raw is not None:
-        color_names.append("child_color_delta_raw")
+    if model.secondary_guide_colors_enabled():
+        color_names = [
+            "secondary_guide_colors.root_raw",
+            "secondary_guide_colors.tip_raw",
+        ]
+    else:
+        color_names = ["groom.root_color_raw", "groom.tip_color_raw"]
+        if model.child_color_delta_raw is not None:
+            color_names.append("child_color_delta_raw")
     if model.gaussian_rgb_residual is not None:
         color_names.append("gaussian_rgb_residual.raw")
     high_frequency_names = []
@@ -5140,7 +5367,9 @@ def optimizer_row_transition(
 def _optimizer_parameter_domain(name: str) -> str | None:
     if name.startswith("guide_"):
         return "guide"
-    if name.startswith("secondary_geometry_residual."):
+    if name.startswith("secondary_geometry_residual.") or name.startswith(
+        "secondary_guide_colors."
+    ):
         # Secondary rows are fixed while render/primary lifecycle events run.
         return None
     if (
@@ -5383,6 +5612,13 @@ def render_parameter_finite_detail(
 
 def zero_color_gradients(model: WhiteTigerStage1Model) -> None:
     params = [model.groom.root_color_raw, model.groom.tip_color_raw]
+    if model.secondary_guide_colors_enabled():
+        params.extend(
+            [
+                model.secondary_guide_colors.root_raw,
+                model.secondary_guide_colors.tip_raw,
+            ]
+        )
     if model.child_color_delta_raw is not None:
         params.append(model.child_color_delta_raw)
     if model.gaussian_rgb_residual is not None:
@@ -5390,6 +5626,17 @@ def zero_color_gradients(model: WhiteTigerStage1Model) -> None:
     for param in params:
         if param.grad is not None:
             param.grad.zero_()
+
+
+def freeze_secondary_guide_color_gradients(
+    model: WhiteTigerStage1Model,
+) -> None:
+    """Freeze the structured base without applying stale Adam momentum."""
+
+    if not model.secondary_guide_colors_enabled():
+        return
+    model.secondary_guide_colors.root_raw.grad = None
+    model.secondary_guide_colors.tip_raw.grad = None
 
 
 def zero_guide_gradients(model: WhiteTigerStage1Model) -> None:
@@ -5954,6 +6201,7 @@ def build_stage1_model_from_checkpoint(
         secondary_guide_barycentric=secondary_guide_barycentric,
         secondary_guide_parent_ids=secondary_guide_parent_ids,
         secondary_guide_interpolation_k=config.secondary_guide_interpolation_k,
+        secondary_guide_color_support=config.secondary_guide_color_support,
         render_geometry_parameterization=config.render_geometry_parameterization,
         guide_length_residual_scale=config.guide_length_residual_scale,
         guide_direction_residual_scale=config.guide_direction_residual_scale,
@@ -6256,6 +6504,15 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         raise ValueError(
             "SECONDARY_GUIDE_ROOT_COUNT must be zero unless geometry residual domain is secondary_guide"
         )
+    if config.secondary_guide_color_support:
+        if config.geometry_residual_domain != "secondary_guide":
+            raise ValueError(
+                "secondary guide colors require secondary-guide geometry"
+            )
+        if config.local_child_color_support:
+            raise ValueError(
+                "secondary guide colors replace local render-root colors"
+            )
 
     data_root = resolve_project_path(config.data_root)
     mesh_path = resolve_project_path(config.mesh_path)
@@ -6473,6 +6730,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         secondary_guide_barycentric=secondary_guide_barycentric,
         secondary_guide_parent_ids=secondary_guide_parent_ids,
         secondary_guide_interpolation_k=config.secondary_guide_interpolation_k,
+        secondary_guide_color_support=config.secondary_guide_color_support,
         render_geometry_parameterization=config.render_geometry_parameterization,
         guide_length_residual_scale=config.guide_length_residual_scale,
         guide_direction_residual_scale=config.guide_direction_residual_scale,
@@ -6975,6 +7233,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 smooth_field_metric=config.smooth_field_metric,
                 include_geometry=not model.uses_zero_centered_geometry(),
                 appearance_only=model.secondary_guides_enabled(),
+                include_color=not model.secondary_guide_colors_enabled(),
+            )
+            secondary_color_smooth_loss = secondary_guide_color_graph_smoothness(
+                model,
+                geometry_graph_edges,
             )
             geometry_residual_smooth_loss = render_geometry_residual_graph_smoothness(
                 model,
@@ -6988,6 +7251,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 smooth_loss
                 + float(config.geometry_residual_smooth_scale)
                 * geometry_residual_smooth_loss
+                + secondary_color_smooth_loss
             )
             guide_smooth_loss = guide_root_graph_smoothness(
                 model,
@@ -7099,6 +7363,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 zero_shape_detail_gradients(model)
             if int(config.color_freeze_until) > 0 and iteration <= int(config.color_freeze_until):
                 zero_color_gradients(model)
+            if (
+                model.secondary_guide_colors_enabled()
+                and iteration > int(config.gaussian_rgb_residual_unlock_start)
+            ):
+                freeze_secondary_guide_color_gradients(model)
             optimizer.step()
             if trace_iteration or iteration % 20 == 0:
                 progress_event(
@@ -7321,6 +7590,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "rgb_flow_loss": float(rgb_flow_loss.detach().cpu()),
                     "rgb_flow_detail_loss": float(rgb_flow_detail_loss.detach().cpu()),
                     "smooth_loss": float(smooth_loss.detach().cpu()),
+                    "secondary_guide_color_smooth_loss": float(
+                        secondary_color_smooth_loss.detach().cpu()
+                    ),
                     "geometry_residual_smooth_loss": float(geometry_residual_smooth_loss.detach().cpu()),
                     "guide_smooth_loss": float(guide_smooth_loss.detach().cpu()),
                     "effective_smooth_loss": float(effective_smooth_loss.detach().cpu()),
@@ -7349,6 +7621,27 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                             multiplier=model.gaussian_rgb_residual_multiplier
                         )
                         if model.gaussian_rgb_residual is not None
+                        else None
+                    ),
+                    "secondary_guide_colors": (
+                        {
+                            **model.secondary_guide_colors.stats(),
+                            "observed_fraction": float(
+                                (
+                                    model.secondary_guide_color_observation_confidence
+                                    > 0.0
+                                )
+                                .float()
+                                .mean()
+                                .detach()
+                                .cpu()
+                            ),
+                            "frozen": bool(
+                                iteration
+                                > int(config.gaussian_rgb_residual_unlock_start)
+                            ),
+                        }
+                        if model.secondary_guide_colors_enabled()
                         else None
                     ),
                     "rgb_flow": rgb_flow_stats,
@@ -7619,6 +7912,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--secondary-guide-candidate-multiplier", type=float, default=16.0)
     parser.add_argument("--secondary-guide-interpolation-k", type=int, default=8)
     parser.add_argument("--secondary-guide-smooth-k", type=int, default=32)
+    parser.add_argument("--secondary-guide-color-support", action="store_true")
     parser.add_argument(
         "--render-geometry-parameterization",
         choices=(
@@ -7833,6 +8127,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         secondary_guide_candidate_multiplier=args.secondary_guide_candidate_multiplier,
         secondary_guide_interpolation_k=args.secondary_guide_interpolation_k,
         secondary_guide_smooth_k=args.secondary_guide_smooth_k,
+        secondary_guide_color_support=args.secondary_guide_color_support,
         render_geometry_parameterization=args.render_geometry_parameterization,
         guide_length_residual_scale=args.guide_length_residual_scale,
         guide_direction_residual_scale=args.guide_direction_residual_scale,

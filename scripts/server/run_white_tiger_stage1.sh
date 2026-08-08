@@ -203,6 +203,7 @@ fi
 
 GEOMETRY_RESIDUAL_DOMAIN="${GEOMETRY_RESIDUAL_DOMAIN:-render}"
 GEOMETRY_RESIDUAL_SMOOTH_SCALE="${GEOMETRY_RESIDUAL_SMOOTH_SCALE:-1.0}"
+SECONDARY_GUIDE_COLOR_SUPPORT="${SECONDARY_GUIDE_COLOR_SUPPORT:-0}"
 if [[ "$GEOMETRY_RESIDUAL_DOMAIN" == "secondary_guide" ]]; then
   for name in \
     SECONDARY_GUIDE_ROOT_COUNT \
@@ -412,6 +413,9 @@ if [[ "$LOCAL_CHILD_COLOR_SUPPORT" == "1" ]]; then
 fi
 if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
   cmd+=(--gaussian-rgb-residual-support)
+fi
+if [[ "$SECONDARY_GUIDE_COLOR_SUPPORT" == "1" ]]; then
+  cmd+=(--secondary-guide-color-support)
 fi
 if [[ -n "${TRAIN_VIEWS:-}" ]]; then
   cmd+=(--train-views "$TRAIN_VIEWS")
