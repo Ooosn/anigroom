@@ -2,8 +2,9 @@
 
 ## Status
 
-Implementation and verification in progress. R049 is the structural parent;
-R043 remains the RGB metric control.
+Completed and accepted as the appearance checkpoint. R049 remains the matched
+structural control and R043 remains the independent-render-root RGB metric
+control.
 
 ## Method Question
 
@@ -63,7 +64,100 @@ decoder would introduce a second variable.
 
 ## Result
 
-Formal H100 result pending. Local implementation verification completed:
+The one-H100 from-zero run completed without fallback, OOM, topology drift, or
+runtime error:
+
+```text
+source:     /home/wangyy/anigroom-r050-gaussian-rgb-residual-20260808
+runtime:    /home/wangyy/anigroom-r050-gaussian-rgb-residual-runtime-20260808
+output:     /home/wangyy/anigroom-r050-gaussian-rgb-residual-runtime-20260808/outputs/r050_gaussian_rgb_residual_0_30k_h100_20260808
+checkpoint: /home/wangyy/anigroom-r050-gaussian-rgb-residual-runtime-20260808/outputs/r050_gaussian_rgb_residual_0_30k_h100_20260808/checkpoint_030000.pt
+sha256:     21f5ff68461c69cca1b182a01cbd0a6dbd01b09c29128f77e82150eb7cc535ee
+```
+
+| Measurement | R044 full-run control | R049 structural control | R050 |
+| --- | ---: | ---: | ---: |
+| final train composite PSNR | 32.234222 | 32.262772 | 33.253601 |
+| final test composite PSNR | 31.574749 | 31.603195 | 32.121105 |
+| best test composite PSNR | 31.712448 | 31.741003 | 32.209358 |
+| best iteration | 29k | 29k | 29k |
+| render roots | 469,402 | 469,402 | 469,757 |
+| generated Gaussians | 5,319,491 | 5,323,659 | 5,358,403 |
+| peak allocated CUDA memory | 10,699.64 MB | 10,319.53 MB | 11,327.52 MB |
+| from-zero elapsed time | 9,133.44 s | continuation | 9,243.02 s |
+
+R050 improves final/best test composite over R049 by `+0.517910/+0.468355`
+dB. It recovers more than half of the final metric gap from R049 to R043 while
+remaining `0.390485` dB below R043's final metric. The extra profile and Adam
+state add about 0.6 GiB over the matched full-run control without introducing
+the historical retained-graph memory failure.
+
+### Same-checkpoint appearance ablation
+
+The fixed eight-view renderer loads the final checkpoint once, renders it with
+the residual enabled, then sets only its runtime multiplier to exactly zero and
+renders again. This isolates the direct appearance contribution from geometry,
+topology, camera, and evaluation differences.
+
+| View | Full PSNR | Residual-off PSNR | Direct gain |
+| ---: | ---: | ---: | ---: |
+| 00 | 32.494854 | 31.612377 | +0.882477 |
+| 05 | 32.606186 | 30.215857 | +2.390329 |
+| 09 | 32.539284 | 29.819038 | +2.720245 |
+| 14 | 33.637882 | 31.487896 | +2.149986 |
+| 18 | 33.130547 | 32.175415 | +0.955132 |
+| 21 | 34.262756 | 31.890663 | +2.372093 |
+| 27 | 33.060146 | 30.333593 | +2.726553 |
+| 32 | 33.798496 | 31.086613 | +2.711884 |
+| mean | 33.191269 | 31.077682 | +2.113587 |
+
+The final decoded residual has absolute mean `0.061171`, RMS `0.092599`, and
+`5.480%` near-saturated values. The residual images are confined to the fur
+support and restore stripe contrast and fine fur/shadow variation; they do not
+change alpha, roots, or exported asset geometry.
+
+### Fixed structural QA
+
+R043, R049, and R050 use the same deterministic 100k-strand, 32-sample,
+child-one export and the same three Blender cameras.
+
+| Statistic | R043 | R049 | R050 |
+| --- | ---: | ---: | ---: |
+| local 4NN relative length difference mean | 0.103637 | 0.021087 | 0.020467 |
+| local 4NN relative length difference P95 | 0.315815 | 0.079554 | 0.077408 |
+| local chord-direction difference P95 | 11.3489 deg | 11.3911 deg | 11.2959 deg |
+| arc/chord ratio P95 | 1.005887 | 1.003271 | 1.006726 |
+| maximum local turn P95 | 0.869957 deg | 0.627962 deg | 0.954593 deg |
+| maximum local turn maximum | 2.733589 deg | 2.062634 deg | 3.187551 deg |
+| maximum arc length | 0.131546 | 0.119080 | 0.128519 |
+| strands longer than 0.12 | 6 | 0 | 5 |
+| strands with a backward segment | 0 | 0 | 0 |
+
+R050 preserves and slightly improves the secondary field's local length and
+direction continuity. Its five sampled lengths above `0.12` are part of one
+coherent head/cheek long-hair patch already present in R049's upper tail, not
+distributed isolated spikes. The three canonical views contain no body spike,
+crossing cluster, foldback, or curl-back.
+
+Local fixed-protocol outputs:
+
+```text
+D:\RTS\_tmp\r050_30k_final\rgb_views\render_report.json
+D:\RTS\_tmp\r050_30k_final\r050_030000_asset_side_y_v11_protocol.png
+D:\RTS\_tmp\r050_30k_final\r050_030000_asset_side_y_pos_v11_protocol.png
+D:\RTS\_tmp\r050_30k_final\r050_030000_asset_front_z_v11_protocol.png
+D:\RTS\_tmp\r050_30k_final\r043_r049_r050_strand_audit.json
+```
+
+## Decision
+
+Accept and tag R050. It validates the intended separation: the smooth
+secondary geometry field remains structurally coherent, while generated-
+Gaussian RGB profiles recover image evidence that would otherwise pressure
+length and direction. Keep R049 as the residual-free structural control and
+R043 as the higher-capacity geometry/RGB metric control.
+
+Implementation verification also completed:
 
 - `109 passed` in the full test suite;
 - Python compilation and launcher syntax passed;

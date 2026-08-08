@@ -50,17 +50,16 @@ audit removes every length above `0.15` and reduces maximum local turn from
 `14.89` to `2.73` degrees. The exact v4 target remains tracked under
 `baseline_inputs/` with unchanged content.
 
-R049 is the active geometry parent for the next appearance experiment, not a
-replacement RGB metric claim. It continues the corrected 20k secondary-guide
-field to 30k and reaches final/best test composite `31.60320/31.74100` with
-`469402` roots and `5323659` Gaussians. Against R043 under the same fixed
-100k-strand protocol, it reduces local relative length discontinuity about
-`4.9x` in the mean and `4.0x` at P95, removes every strand longer than `0.12`,
-and improves the tortuosity tail without changing the local direction trend.
-R050 therefore starts from R049 geometry and tests one variable only: a true
-Gaussian-sample RGB residual that must recover appearance evidence without
-returning it to length or direction. See
-`docs/r049_secondary_guide_30k_validation.md`.
+R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
+geometry field and adds only a normalized arc-length Gaussian RGB residual
+profile. Final/best test composite reaches `32.12111/32.20936`, improving R049
+by `+0.51791/+0.46836` dB. In the same final checkpoint, disabling only the
+residual loses `0.88-2.73` dB over eight fixed full-resolution views. The fixed
+100k-strand audit retains R049's structural advantage: local relative-length
+mean/P95 is `0.02047/0.07741`, local direction P95 is `11.2959` degrees, and no
+backward segment appears. R049 remains the residual-free structural control;
+R043 remains the independent-root RGB metric control. See
+`docs/r050_gaussian_rgb_residual.md`.
 
 ## Active Entry Points
 
@@ -71,7 +70,7 @@ returning it to length or direction. See
 - active R043 lock: `configs/r043_density_matched_render_support.lock.json`
 - active R049 geometry-parent configuration:
   `configs/r049_secondary_guide_resume16k_30k.env`
-- active R050 single-variable appearance experiment:
+- active R050 appearance checkpoint configuration:
   `configs/r050_gaussian_rgb_residual_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
@@ -174,6 +173,14 @@ smoothness, effective-groom smoothness, strand-shape smoothness, clean-flow
 guide anchoring, and residual concentration. The length residual term keeps the
 accepted mean absolute prior and adds the population-stable concentration term
 `L4 - L2` during unlock.
+
+R050 retains smooth guide root/tip color and the existing local render-root
+color term, then adds one view-independent RGB profile per render root. Each
+generated Gaussian samples that profile at its normalized segment midpoint.
+The profile is exactly inactive through 10k and ramps with the common schedule
+to full strength at 20k. It has no TV or smoothness loss because it is the
+explicit high-frequency appearance outlet; pure-fur asset export intentionally
+omits it.
 
 ## Representation Lineage
 
