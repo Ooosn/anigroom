@@ -93,8 +93,12 @@ zero optimizer state.
 
 ## Verification Before Formal Run
 
-- full local suite: `114 passed`;
+- full local suite: `115 passed`;
 - focused guide-color and lifecycle tests pass;
 - Python compilation, launcher syntax, and `git diff --check` pass;
 - a regression test verifies that the handoff sets guide gradients to `None`
   while preserving Gaussian-residual gradients.
+
+The non-reportable active-path preflight configuration is
+`configs/r051_guide_color_fullres_preflight.env`. It forces the residual active
+for one real full-resolution view09 optimizer step and stops before training.
