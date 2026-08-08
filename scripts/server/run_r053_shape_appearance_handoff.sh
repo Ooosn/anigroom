@@ -58,6 +58,7 @@ run_stage1() {
   OUTPUT_DIR="$output_dir" \
   CONFIG_PATH="$PROJECT_ROOT/configs/$config_name" \
   RUN_PREFLIGHT=1 \
+  RUN_BATCH_PREFLIGHT=0 \
     bash scripts/server/run_white_tiger_stage1.sh 2>&1 | tee "$log_file"
   echo "[r053] finish run=$run_id at=$(date --iso-8601=seconds)"
 }
