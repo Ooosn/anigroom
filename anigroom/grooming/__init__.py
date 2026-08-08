@@ -17,6 +17,7 @@ from .geometry_residuals import (
     vector_to_local_components,
 )
 from .gaussian_rgb_residual import GaussianRGBResidualField
+from .guide_colors import DecodedGuideColors, GuideColorField, encode_color
 
 from .strand_gaussians import (
     build_brush_centerline,
@@ -45,7 +46,9 @@ __all__ = [
     "GroomParameterField",
     "GroomRanges",
     "GaussianRGBResidualField",
+    "GuideColorField",
     "RenderGeometryResidualField",
+    "DecodedGuideColors",
     "ResampledStrands",
     "StrandGaussianOutput",
     "adaptive_resample_strands",
@@ -61,6 +64,7 @@ __all__ = [
     "encode_positive_asinh",
     "encode_positive_asinh_ratio",
     "encode_asinh_logit_residual",
+    "encode_color",
     "fourth_moment_norm",
     "make_tangent_frames",
     "local_components_to_world",

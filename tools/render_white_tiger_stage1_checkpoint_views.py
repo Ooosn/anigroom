@@ -93,6 +93,15 @@ def main() -> None:
             "abs_max": float(local_render_color.abs().max().cpu()),
         }
         del local_render_color
+    guide_color_stats = None
+    if model.guide_colors is not None:
+        guide_colors = model.guide_colors.decode()
+        guide_color_stats = {
+            "root_mean": guide_colors.root.detach().mean(dim=0).cpu().tolist(),
+            "root_std": guide_colors.root.detach().std(dim=0).cpu().tolist(),
+            "tip_mean": guide_colors.tip.detach().mean(dim=0).cpu().tolist(),
+            "tip_std": guide_colors.tip.detach().std(dim=0).cpu().tolist(),
+        }
     records = []
     with torch.no_grad():
         for idx in view_ids:
@@ -163,6 +172,7 @@ def main() -> None:
                 record.update(
                     {
                         "pred_without_gaussian_rgb_residual": f"view_{idx:02d}_pred_without_gaussian_rgb_residual.png",
+                        "pred_low_frequency_base": f"view_{idx:02d}_pred_without_gaussian_rgb_residual.png",
                         "gaussian_rgb_residual_abs_x4": f"view_{idx:02d}_gaussian_rgb_residual_abs_x4.png",
                         "gaussian_rgb_residual_signed_x4": f"view_{idx:02d}_gaussian_rgb_residual_signed_x4.png",
                         "composite_psnr_without_gaussian_rgb_residual": float(base_psnr.detach().cpu()),
@@ -278,6 +288,7 @@ def main() -> None:
             else None
         ),
         "local_render_color": local_render_color_stats,
+        "guide_color": guide_color_stats,
         "records": records,
     }
     (output_dir / "render_report.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

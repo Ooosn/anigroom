@@ -64,6 +64,7 @@ from anigroom.flow.direction_geometry import (  # noqa: E402
 )
 from anigroom.grooming import (  # noqa: E402
     GaussianRGBResidualField,
+    GuideColorField,
     GroomParameterField,
     GroomRanges,
     RenderGeometryResidualField,
@@ -1025,6 +1026,7 @@ def root_graph_smoothness(
     bitangents: torch.Tensor | None = None,
     smooth_field_metric: str = "ambient",
     include_geometry: bool = True,
+    include_color: bool = True,
     appearance_only: bool = False,
 ) -> torch.Tensor:
     if edges.numel() == 0:
@@ -1048,11 +1050,14 @@ def root_graph_smoothness(
         return value.mean()
 
     terms = [
-        0.25 * weighted_mean((groom.root_color[src] - groom.root_color[dst]).square()),
-        0.15 * weighted_mean((groom.tip_color[src] - groom.tip_color[dst]).square()),
         0.5 * weighted_mean((groom.opacity[src] - groom.opacity[dst]).square()),
         0.25 * weighted_mean((groom.tip_opacity[src] - groom.tip_opacity[dst]).square()),
     ]
+    if include_color:
+        terms[:0] = [
+            0.25 * weighted_mean((groom.root_color[src] - groom.root_color[dst]).square()),
+            0.15 * weighted_mean((groom.tip_color[src] - groom.tip_color[dst]).square()),
+        ]
     if not appearance_only:
         terms[:0] = [
             2.0 * weighted_mean((torch.log(groom.root_width[src].clamp_min(1.0e-6)) - torch.log(groom.root_width[dst].clamp_min(1.0e-6))).square()),
@@ -1279,6 +1284,14 @@ def guide_root_graph_smoothness(
     if float(model.shape_frizz_scale) > 0.0:
         guide_frizz = GroomParameterField._decode_range(model.guide_frizz_raw, ranges.frizz)
         terms.append(0.5 * mean_edge(guide_frizz))
+    if model.guide_colors is not None:
+        guide_colors = model.guide_colors.decode()
+        terms.extend(
+            [
+                0.25 * mean_edge(guide_colors.root),
+                0.15 * mean_edge(guide_colors.tip),
+            ]
+        )
     guide_direction = model.guide_direction_world()
     if guide_direction is not None:
         guide_normals, guide_tangents, guide_bitangents = model.guide_normals_and_tangent_frames()
@@ -1799,6 +1812,7 @@ class Stage1Config:
     lr_high_frequency_shape_scale: float = 1.0
     lr_color: float = 2.0e-2
     color_freeze_until: int = 0
+    guide_color_support: bool = False
     gaussian_rgb_residual_support: bool = False
     gaussian_rgb_residual_control_points: int = 36
     gaussian_rgb_residual_scale: float = 0.20
@@ -1898,6 +1912,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         max_child_count: int = 8,
         local_child_color_support: bool = False,
         local_child_color_scale: float = 0.20,
+        guide_color_support: bool = False,
         gaussian_rgb_residual_support: bool = False,
         gaussian_rgb_residual_control_points: int = 36,
         gaussian_rgb_residual_scale: float = 0.20,
@@ -1928,7 +1943,12 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.strand_shape_normal_mode = strand_shape_normal_mode
         self.max_child_count = max(1, int(max_child_count))
         self.local_child_color_scale = float(local_child_color_scale)
+        self.guide_color_support = bool(guide_color_support)
         self.gaussian_rgb_residual_multiplier = 1.0
+        if self.guide_color_support and bool(local_child_color_support):
+            raise ValueError(
+                "guide color support and local render-root color residual are mutually exclusive"
+            )
         if bool(gaussian_rgb_residual_support) and self.max_child_count != 1:
             raise ValueError(
                 "Gaussian RGB residual currently requires child_count=1 so every "
@@ -2084,7 +2104,22 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.guide_direction_local_raw = torch.nn.Parameter(
                 torch.zeros((guide_count, 3), device=device)
             )
+            self.guide_colors = (
+                GuideColorField(guide_count, device=device)
+                if self.guide_color_support
+                else None
+            )
+            self.register_buffer(
+                "guide_color_observation_confidence",
+                (
+                    torch.zeros((guide_count,), device=device)
+                    if self.guide_colors is not None
+                    else torch.empty((0,), device=device)
+                ),
+            )
         else:
+            if self.guide_color_support:
+                raise ValueError("guide color support requires primary guide roots")
             self.register_buffer("guide_face_ids", torch.empty((0,), device=device, dtype=torch.long))
             self.register_buffer("guide_barycentric", torch.empty((0, 3), device=device))
             self.register_buffer("guide_points_local", torch.empty((0, 3), device=device))
@@ -2108,6 +2143,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.register_parameter("guide_child_radius_raw", None)
             self.register_parameter("guide_clump_strength_raw", None)
             self.register_parameter("guide_direction_local_raw", None)
+            self.guide_colors = None
+            self.register_buffer(
+                "guide_color_observation_confidence",
+                torch.empty((0,), device=device),
+            )
         if self.render_geometry_parameterization != "absolute_endpoint" and not self.guide_enabled():
             raise ValueError("zero-centered geometry requires primary guide roots")
         self.register_buffer(
@@ -2628,6 +2668,9 @@ class WhiteTigerStage1Model(torch.nn.Module):
         old_tip_width_ratio_reference = self.guide_tip_width_ratio_reference.detach()
         old_width_taper_reference = self.guide_width_taper_reference.detach()
         old_child_radius_reference = self.guide_child_radius_reference.detach()
+        old_guide_colors = (
+            self.guide_colors.decode() if self.guide_colors is not None else None
+        )
         child_length_reference = (
             interpolate_physical(
                 old_length_reference,
@@ -2810,10 +2853,36 @@ class WhiteTigerStage1Model(torch.nn.Module):
             child_local,
         )
 
+        if old_guide_colors is not None:
+            child_root_color = (
+                interpolate_physical(
+                    old_guide_colors.root.detach(), child_ids, child_weights
+                )
+                if child_count
+                else old_guide_colors.root.new_empty((0, 3))
+            )
+            child_tip_color = (
+                interpolate_physical(
+                    old_guide_colors.tip.detach(), child_ids, child_weights
+                )
+                if child_count
+                else old_guide_colors.tip.new_empty((0, 3))
+            )
+            new_params["guide_root_color"] = apply_attribute_update(
+                old_guide_colors.root.detach(), update, child_root_color
+            )
+            new_params["guide_tip_color"] = apply_attribute_update(
+                old_guide_colors.tip.detach(), update, child_tip_color
+            )
+
         evidence_sources = {
             "guide_region_weight": self.guide_region_weight.detach(),
             "guide_clean_flow_anchor_confidence": self.guide_clean_flow_anchor_confidence.detach().reshape(-1, 1),
         }
+        if self.guide_colors is not None:
+            evidence_sources["guide_color_observation_confidence"] = (
+                self.guide_color_observation_confidence.detach().reshape(-1, 1)
+            )
         for name, source in evidence_sources.items():
             child = (
                 interpolate_physical(source, child_ids, child_weights)
@@ -2890,7 +2959,22 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.guide_frizz_raw = torch.nn.Parameter(new_params["guide_frizz_raw"].to(device=device))
         self.guide_child_radius_raw = torch.nn.Parameter(new_params["guide_child_radius_raw"].to(device=device))
         self.guide_clump_strength_raw = torch.nn.Parameter(new_params["guide_clump_strength_raw"].to(device=device))
+        if old_guide_colors is not None:
+            guide_colors = GuideColorField(new_count, device=device)
+            guide_colors.set_decoded(
+                new_params["guide_root_color"].to(device=device),
+                new_params["guide_tip_color"].to(device=device),
+            )
+            self.guide_colors = guide_colors
         self.guide_region_weight = new_params["guide_region_weight"].to(device=device).detach().clamp(0.0, 1.0)
+        if self.guide_colors is not None:
+            self.guide_color_observation_confidence = (
+                new_params["guide_color_observation_confidence"]
+                .to(device=device)
+                .reshape(-1)
+                .detach()
+                .clamp(0.0, 1.0)
+            )
         self.guide_clean_flow_direction_target = F.normalize(
             new_params["guide_clean_flow_direction_target"].to(device=device), dim=-1, eps=1.0e-8
         ).detach()
@@ -2959,6 +3043,14 @@ class WhiteTigerStage1Model(torch.nn.Module):
             ),
             "clump_strength": GroomParameterField._decode_range(self.guide_clump_strength_raw, ranges.clump_strength),
         }
+        if self.guide_colors is not None:
+            decoded_guide_colors = self.guide_colors.decode()
+            guide_values.update(
+                {
+                    "root_color": decoded_guide_colors.root,
+                    "tip_color": decoded_guide_colors.tip,
+                }
+            )
         guide_direction = self.guide_direction_world()
         if guide_direction is not None:
             guide_normals, _, _ = self.guide_normals_and_tangent_frames()
@@ -3260,6 +3352,13 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "child_radius": child_radius,
             "clump_strength": clump_strength,
         }
+        if self.guide_colors is not None:
+            kwargs.update(
+                {
+                    "root_color": guide_interp["root_color"],
+                    "tip_color": guide_interp["tip_color"],
+                }
+            )
         if guide_direction is not None:
             effective_direction_residual_scale = (
                 float(self.guide_direction_residual_scale)
@@ -3915,6 +4014,24 @@ def initialize_groom_from_projections(
     root_count = int(roots.shape[0])
     color_sum = torch.zeros((root_count, 3), device=device)
     weight_sum = torch.zeros((root_count, 1), device=device)
+    if model.guide_colors is not None:
+        guide_points = (
+            model.guide_points_local
+            * torch.exp(model.log_scale.detach()).view(1, 1)
+            + model.translation.detach().view(1, 3)
+        )
+        guide_normals = model.guide_normals_and_tangent_frames()[0]
+        guide_color_sum = torch.zeros(
+            (guide_points.shape[0], 3), device=device, dtype=roots.dtype
+        )
+        guide_weight_sum = torch.zeros(
+            (guide_points.shape[0], 1), device=device, dtype=roots.dtype
+        )
+    else:
+        guide_points = None
+        guide_normals = None
+        guide_color_sum = None
+        guide_weight_sum = None
     chosen = train_indices[: max(1, min(int(config.projected_init_views), len(train_indices)))]
     mesh_for_visibility = TriangleMesh(
         vertices=(
@@ -3951,17 +4068,62 @@ def initialize_groom_from_projections(
         angle_weight = view_angle_weight(normals, viewmats[idx], config.projected_init_view_angle_power)
         weight = (sampled_mask * sampled_conf * angle_weight * root_vis.visible.to(sampled_mask.dtype)).clamp(0.0, 1.0)
         good = weight >= float(config.projected_init_min_confidence)
-        if not bool(good.any()):
-            continue
         sampled_color = bilinear_sample(image, root_vis.xy).clamp(0.0, 1.0)
         w = weight[:, None]
-        color_sum[good] += sampled_color[good] * w[good]
-        weight_sum[good] += w[good]
+        if bool(good.any()):
+            color_sum[good] += sampled_color[good] * w[good]
+            weight_sum[good] += w[good]
+
+        guide_good_count = 0
+        if guide_points is not None and guide_normals is not None:
+            if guide_color_sum is None or guide_weight_sum is None:
+                raise RuntimeError("guide color accumulation buffers are unavailable")
+            guide_vis = sample_mesh_visible_points(
+                guide_points,
+                guide_normals,
+                viewmats[idx],
+                ks[idx],
+                mesh_depth.depth,
+                depth_abs_tolerance=config.projected_init_depth_abs_tolerance,
+                depth_rel_tolerance=config.projected_init_depth_rel_tolerance,
+                local_depth_kernel=config.projected_init_local_depth_kernel,
+                front_normal_z=config.projected_init_front_normal_z,
+            )
+            guide_mask = bilinear_sample(mask, guide_vis.xy)[:, 0]
+            guide_mask_conf = bilinear_sample(mask_conf, guide_vis.xy)[:, 0]
+            guide_angle_weight = view_angle_weight(
+                guide_normals,
+                viewmats[idx],
+                config.projected_init_view_angle_power,
+            )
+            guide_weight = (
+                guide_mask
+                * guide_mask_conf
+                * guide_angle_weight
+                * guide_vis.visible.to(guide_mask.dtype)
+            ).clamp(0.0, 1.0)
+            guide_good = guide_weight >= float(config.projected_init_min_confidence)
+            guide_good_count = int(guide_good.sum().detach().cpu())
+            if bool(guide_good.any()):
+                sampled_guide_color = bilinear_sample(image, guide_vis.xy).clamp(
+                    0.0, 1.0
+                )
+                guide_w = guide_weight[:, None]
+                guide_color_sum[guide_good] += (
+                    sampled_guide_color[guide_good] * guide_w[guide_good]
+                )
+                guide_weight_sum[guide_good] += guide_w[guide_good]
         setup_progress(
             "projected_init_view_done",
             view_index=int(idx),
             good_roots=int(good.sum().detach().cpu()),
             observed_roots=int((weight_sum[:, 0] > 0.0).sum().detach().cpu()),
+            good_guide_roots=int(guide_good_count),
+            observed_guide_roots=(
+                int((guide_weight_sum[:, 0] > 0.0).sum().detach().cpu())
+                if guide_weight_sum is not None
+                else 0
+            ),
         )
 
     observed = weight_sum[:, 0] > 0.0
@@ -3971,30 +4133,76 @@ def initialize_groom_from_projections(
             observed_roots=int(observed.sum().detach().cpu()),
             root_count=int(root_count),
         )
-        groom = model.groom.decode()
         root_conf = weight_sum[:, 0]
         conf_norm = torch.quantile(root_conf[observed], 0.95).clamp_min(1.0e-6)
         root_conf = (root_conf / conf_norm).clamp(0.0, 1.0)
-        colors = groom.root_color.detach().clone()
-        colors[observed] = (color_sum[observed] / weight_sum[observed].clamp_min(EPS)).clamp(0.02, 0.98)
-        colors, filled_color = interpolate_unobserved_root_values(
-            roots,
-            colors,
-            observed,
-            root_conf,
-            neighbor_count=config.smooth_graph_k,
-            normalize_vectors=False,
-        )
-        filled = filled_color
-        model.groom.root_color_raw[filled] = inv_sigmoid(colors[filled].clamp(0.02, 0.98))
-        model.groom.tip_color_raw[filled] = inv_sigmoid((0.88 * colors[filled] + 0.12).clamp(0.02, 0.98))
+        if model.guide_colors is None:
+            groom = model.groom.decode()
+            colors = groom.root_color.detach().clone()
+            colors[observed] = (
+                color_sum[observed] / weight_sum[observed].clamp_min(EPS)
+            ).clamp(0.02, 0.98)
+            colors, filled = interpolate_unobserved_root_values(
+                roots,
+                colors,
+                observed,
+                root_conf,
+                neighbor_count=config.smooth_graph_k,
+                normalize_vectors=False,
+            )
+            model.groom.root_color_raw[filled] = inv_sigmoid(
+                colors[filled].clamp(0.02, 0.98)
+            )
+            model.groom.tip_color_raw[filled] = inv_sigmoid(
+                (0.88 * colors[filled] + 0.12).clamp(0.02, 0.98)
+            )
+        else:
+            filled = observed
         model.root_observation_confidence = root_conf.detach()
     else:
         filled = observed
+
+    guide_observed = torch.zeros((0,), device=device, dtype=torch.bool)
+    guide_filled = guide_observed
+    if model.guide_colors is not None:
+        if (
+            guide_points is None
+            or guide_color_sum is None
+            or guide_weight_sum is None
+        ):
+            raise RuntimeError("guide color projection state is unavailable")
+        guide_observed = guide_weight_sum[:, 0] > 0.0
+        if not bool(guide_observed.any()):
+            raise RuntimeError("projected initialization observed no guide-root colors")
+        guide_conf = guide_weight_sum[:, 0]
+        guide_conf_norm = torch.quantile(
+            guide_conf[guide_observed], 0.95
+        ).clamp_min(1.0e-6)
+        guide_conf = (guide_conf / guide_conf_norm).clamp(0.0, 1.0)
+        guide_colors = model.guide_colors.decode().root.detach().clone()
+        guide_colors[guide_observed] = (
+            guide_color_sum[guide_observed]
+            / guide_weight_sum[guide_observed].clamp_min(EPS)
+        ).clamp(0.02, 0.98)
+        guide_edges = model.guide_surface_smoothing_edges(
+            config.guide_interpolation_k
+        )
+        guide_colors = harmonic_inpaint_physical(
+            guide_colors,
+            guide_points,
+            guide_observed,
+            guide_edges,
+        ).clamp(0.02, 0.98)
+        guide_tip_colors = (0.88 * guide_colors + 0.12).clamp(0.02, 0.98)
+        model.guide_colors.set_decoded(guide_colors, guide_tip_colors)
+        model.guide_color_observation_confidence = guide_conf.detach()
+        guide_filled = torch.ones_like(guide_observed)
     setup_progress(
         "projected_init_done",
         observed_roots=int(observed.sum().detach().cpu()),
         filled_roots=int(filled.sum().detach().cpu()),
+        observed_guide_roots=int(guide_observed.sum().detach().cpu()),
+        filled_guide_roots=int(guide_filled.sum().detach().cpu()),
     )
     return {
         "projected_init_view_count": int(len(chosen)),
@@ -4002,6 +4210,17 @@ def initialize_groom_from_projections(
         "projected_init_observed_fraction": float(observed.float().mean().detach().cpu()),
         "projected_init_interpolated_roots": int((filled & ~observed).sum().detach().cpu()),
         "projected_init_filled_fraction": float(filled.float().mean().detach().cpu()),
+        "projected_init_observed_guide_roots": int(
+            guide_observed.sum().detach().cpu()
+        ),
+        "projected_init_interpolated_guide_roots": int(
+            (guide_filled & ~guide_observed).sum().detach().cpu()
+        ),
+        "projected_init_guide_filled_fraction": (
+            float(guide_filled.float().mean().detach().cpu())
+            if guide_filled.numel() > 0
+            else 0.0
+        ),
     }
 
 
@@ -4945,9 +5164,12 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
                 model.groom.direction_local_raw,
             ]
         )
-    color_params = [model.groom.root_color_raw, model.groom.tip_color_raw]
-    if model.child_color_delta_raw is not None:
-        color_params.append(model.child_color_delta_raw)
+    if model.guide_colors is not None:
+        color_params = [model.guide_colors.root_raw, model.guide_colors.tip_raw]
+    else:
+        color_params = [model.groom.root_color_raw, model.groom.tip_color_raw]
+        if model.child_color_delta_raw is not None:
+            color_params.append(model.child_color_delta_raw)
     if model.gaussian_rgb_residual is not None:
         color_params.append(model.gaussian_rgb_residual.raw)
     high_frequency_params = []
@@ -5057,9 +5279,12 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
                 "groom.direction_local_raw",
             ]
         )
-    color_names = ["groom.root_color_raw", "groom.tip_color_raw"]
-    if model.child_color_delta_raw is not None:
-        color_names.append("child_color_delta_raw")
+    if model.guide_colors is not None:
+        color_names = ["guide_colors.root_raw", "guide_colors.tip_raw"]
+    else:
+        color_names = ["groom.root_color_raw", "groom.tip_color_raw"]
+        if model.child_color_delta_raw is not None:
+            color_names.append("child_color_delta_raw")
     if model.gaussian_rgb_residual is not None:
         color_names.append("gaussian_rgb_residual.raw")
     high_frequency_names = []
@@ -5382,14 +5607,30 @@ def render_parameter_finite_detail(
 
 
 def zero_color_gradients(model: WhiteTigerStage1Model) -> None:
-    params = [model.groom.root_color_raw, model.groom.tip_color_raw]
-    if model.child_color_delta_raw is not None:
-        params.append(model.child_color_delta_raw)
+    if model.guide_colors is not None:
+        params = [model.guide_colors.root_raw, model.guide_colors.tip_raw]
+    else:
+        params = [model.groom.root_color_raw, model.groom.tip_color_raw]
+        if model.child_color_delta_raw is not None:
+            params.append(model.child_color_delta_raw)
     if model.gaussian_rgb_residual is not None:
         params.append(model.gaussian_rgb_residual.raw)
     for param in params:
         if param.grad is not None:
             param.grad.zero_()
+
+
+def zero_low_frequency_color_gradients(model: WhiteTigerStage1Model) -> None:
+    """Freeze the base color field while leaving Gaussian RGB residuals trainable."""
+
+    if model.guide_colors is not None:
+        params = [model.guide_colors.root_raw, model.guide_colors.tip_raw]
+    else:
+        params = [model.groom.root_color_raw, model.groom.tip_color_raw]
+        if model.child_color_delta_raw is not None:
+            params.append(model.child_color_delta_raw)
+    for param in params:
+        param.grad = None
 
 
 def zero_guide_gradients(model: WhiteTigerStage1Model) -> None:
@@ -5942,6 +6183,7 @@ def build_stage1_model_from_checkpoint(
         max_child_count=config.child_count,
         local_child_color_support=config.local_child_color_support,
         local_child_color_scale=config.local_child_color_scale,
+        guide_color_support=config.guide_color_support,
         gaussian_rgb_residual_support=config.gaussian_rgb_residual_support,
         gaussian_rgb_residual_control_points=config.gaussian_rgb_residual_control_points,
         gaussian_rgb_residual_scale=config.gaussian_rgb_residual_scale,
@@ -6461,6 +6703,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         max_child_count=config.child_count,
         local_child_color_support=config.local_child_color_support,
         local_child_color_scale=config.local_child_color_scale,
+        guide_color_support=config.guide_color_support,
         gaussian_rgb_residual_support=config.gaussian_rgb_residual_support,
         gaussian_rgb_residual_control_points=config.gaussian_rgb_residual_control_points,
         gaussian_rgb_residual_scale=config.gaussian_rgb_residual_scale,
@@ -6974,6 +7217,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 bitangents=bitangents_now,
                 smooth_field_metric=config.smooth_field_metric,
                 include_geometry=not model.uses_zero_centered_geometry(),
+                include_color=model.guide_colors is None,
                 appearance_only=model.secondary_guides_enabled(),
             )
             geometry_residual_smooth_loss = render_geometry_residual_graph_smoothness(
@@ -7099,6 +7343,12 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 zero_shape_detail_gradients(model)
             if int(config.color_freeze_until) > 0 and iteration <= int(config.color_freeze_until):
                 zero_color_gradients(model)
+            elif (
+                model.guide_colors is not None
+                and model.gaussian_rgb_residual is not None
+                and iteration > int(config.gaussian_rgb_residual_unlock_start)
+            ):
+                zero_low_frequency_color_gradients(model)
             optimizer.step()
             if trace_iteration or iteration % 20 == 0:
                 progress_event(
@@ -7333,6 +7583,38 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "shape_detail_multiplier": float(model.shape_detail_multiplier),
                     "gaussian_rgb_residual_multiplier": float(
                         model.gaussian_rgb_residual_multiplier
+                    ),
+                    "low_frequency_color_frozen": bool(
+                        model.guide_colors is not None
+                        and model.gaussian_rgb_residual is not None
+                        and iteration
+                        > int(config.gaussian_rgb_residual_unlock_start)
+                    ),
+                    "guide_color": (
+                        {
+                            "root_mean": model.guide_colors.decode()
+                            .root.detach()
+                            .mean(dim=0)
+                            .cpu()
+                            .tolist(),
+                            "tip_mean": model.guide_colors.decode()
+                            .tip.detach()
+                            .mean(dim=0)
+                            .cpu()
+                            .tolist(),
+                            "observed_fraction": float(
+                                (
+                                    model.guide_color_observation_confidence
+                                    > 0.0
+                                )
+                                .float()
+                                .mean()
+                                .detach()
+                                .cpu()
+                            ),
+                        }
+                        if model.guide_colors is not None
+                        else None
                     ),
                     "guide_frozen": bool(int(config.guide_freeze_until) > 0 and iteration <= int(config.guide_freeze_until)),
                     "shape_detail_frozen": bool(shape_detail_frozen),
@@ -7695,6 +7977,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr-high-frequency-shape-scale", type=float, default=0.35)
     parser.add_argument("--lr-color", type=float, default=2.0e-2)
     parser.add_argument("--color-freeze-until", type=int, default=0)
+    parser.add_argument("--guide-color-support", action="store_true")
     parser.add_argument("--gaussian-rgb-residual-support", action="store_true")
     parser.add_argument("--gaussian-rgb-residual-control-points", type=int, default=36)
     parser.add_argument("--gaussian-rgb-residual-scale", type=float, default=0.20)
@@ -7878,6 +8161,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         lr_high_frequency_shape_scale=args.lr_high_frequency_shape_scale,
         lr_color=args.lr_color,
         color_freeze_until=args.color_freeze_until,
+        guide_color_support=args.guide_color_support,
         gaussian_rgb_residual_support=args.gaussian_rgb_residual_support,
         gaussian_rgb_residual_control_points=args.gaussian_rgb_residual_control_points,
         gaussian_rgb_residual_scale=args.gaussian_rgb_residual_scale,

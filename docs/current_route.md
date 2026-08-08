@@ -50,16 +50,27 @@ audit removes every length above `0.15` and reduces maximum local turn from
 `14.89` to `2.73` degrees. The exact v4 target remains tracked under
 `baseline_inputs/` with unchanged content.
 
-R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
-geometry field and adds only a normalized arc-length Gaussian RGB residual
-profile. Final/best test composite reaches `32.12111/32.20936`, improving R049
-by `+0.51791/+0.46836` dB. In the same final checkpoint, disabling only the
-residual loses `0.88-2.73` dB over eight fixed full-resolution views. The fixed
-100k-strand audit retains R049's structural advantage: local relative-length
-mean/P95 is `0.02047/0.07741`, local direction P95 is `11.2959` degrees, and no
-backward segment appears. R049 remains the residual-free structural control;
-R043 remains the independent-root RGB metric control. See
-`docs/r050_gaussian_rgb_residual.md`.
+R050 is the frozen appearance diagnostic parent, not an accepted color
+decomposition. It keeps R049's 20k secondary geometry field and adds a
+normalized arc-length Gaussian RGB residual profile. Final/best test composite
+reaches `32.12111/32.20936`, improving R049 by `+0.51791/+0.46836` dB, and the
+fixed 100k-strand audit retains R049's structural advantage. However, the
+same-checkpoint four-layer ablation shows that the old render-root color field
+and the Gaussian residual both learn image noise and cancel one another.
+Disabling only the Gaussian residual loses `0.88-2.73` dB and visibly increases
+noise; disabling the old local color loses still more. R050 therefore proves
+that Gaussian-level RGB residuals are useful, but not that the intended
+low-frequency/high-frequency separation was achieved.
+
+R051 is the active appearance experiment. It makes sparse primary-guide
+root/tip colors the only low-frequency fur-color field, interpolates that field
+to render roots through the existing surface support, removes the competing
+local render-root color field, and retains the Gaussian RGB residual as the
+only high-frequency outlet. The guide color field learns through 10k and is
+then frozen with gradients set to `None`; the existing Gaussian residual ramp
+starts at the same boundary. Formal H100 validation is pending. See
+`docs/r050_gaussian_rgb_residual.md` and
+`docs/r051_guide_color_decomposition.md`.
 
 ## Active Entry Points
 
@@ -70,8 +81,10 @@ R043 remains the independent-root RGB metric control. See
 - active R043 lock: `configs/r043_density_matched_render_support.lock.json`
 - active R049 geometry-parent configuration:
   `configs/r049_secondary_guide_resume16k_30k.env`
-- active R050 appearance checkpoint configuration:
+- frozen R050 diagnostic-parent configuration:
   `configs/r050_gaussian_rgb_residual_0_30k.env`
+- active R051 appearance experiment configuration:
+  `configs/r051_guide_color_gaussian_residual_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
@@ -174,13 +187,17 @@ guide anchoring, and residual concentration. The length residual term keeps the
 accepted mean absolute prior and adds the population-stable concentration term
 `L4 - L2` during unlock.
 
-R050 retains smooth guide root/tip color and the existing local render-root
-color term, then adds one view-independent RGB profile per render root. Each
-generated Gaussian samples that profile at its normalized segment midpoint.
-The profile is exactly inactive through 10k and ramps with the common schedule
-to full strength at 20k. It has no TV or smoothness loss because it is the
-explicit high-frequency appearance outlet; pure-fur asset export intentionally
-omits it.
+R051 stores root/tip color only on sparse primary guide roots. The existing
+topology-safe guide support interpolates those colors to every render root;
+there is no trainable render-root color or local child-color term. Guide colors
+use the guide graph smoothness already applied to the parameter field. They
+learn the main fur color through 10k and are frozen thereafter.
+
+The view-independent Gaussian RGB profile from R050 remains. Each generated
+Gaussian samples that profile at its normalized segment midpoint. It is exactly
+inactive through 10k and ramps with the common schedule to full strength at
+20k. It has no TV or smoothness loss because its role is to absorb remaining
+high-frequency image evidence. Pure-fur asset export intentionally omits it.
 
 ## Representation Lineage
 

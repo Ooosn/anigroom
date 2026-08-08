@@ -2,9 +2,11 @@
 
 ## Status
 
-Completed and accepted as the appearance checkpoint. R049 remains the matched
-structural control and R043 remains the independent-render-root RGB metric
-control.
+Completed and frozen as the appearance diagnostic parent. Its numerical gain
+and structural result remain valid, but a later same-checkpoint layer ablation
+rejects the claim that it achieved a clean low-frequency/high-frequency color
+decomposition. R049 remains the matched structural control and R043 remains the
+independent-render-root RGB metric control.
 
 ## Method Question
 
@@ -116,6 +118,32 @@ The final decoded residual has absolute mean `0.061171`, RMS `0.092599`, and
 support and restore stripe contrast and fine fur/shadow variation; they do not
 change alpha, roots, or exported asset geometry.
 
+### Four-layer decomposition audit
+
+The two-layer ablation above proves that the Gaussian residual matters, but it
+does not prove that it alone stores noise. A second same-checkpoint audit also
+disables the existing local render-root color and the complete local color
+stack:
+
+| Variant | Mean eight-view PSNR | View09 PSNR |
+| --- | ---: | ---: |
+| full | 33.1913 | 32.5393 |
+| Gaussian residual off | 31.0777 | 29.8190 |
+| local render color off | 28.3788 | 27.1601 |
+| root/tip only | 27.1539 | 25.8152 |
+
+The decoded local render color has absolute mean `0.12466`, RMS `0.12960`, and
+absolute maximum `0.14988` under a `0.15` scale. It is not a small smooth
+correction. Frequency-separated error gives total/low/high RMSE of
+`0.04879/0.03002/0.03238` for the full model,
+`0.06476/0.04350/0.03776` with Gaussian residual off, and
+`0.09268/0.07799/0.03761` with local render color off.
+
+The user-visible result is consistent with these numbers: removing the
+Gaussian residual increases noise. The correct conclusion is that it performs
+useful cancellation, while the base and local color fields themselves also
+contain image noise. R050's layers are entangled.
+
 ### Fixed structural QA
 
 R043, R049, and R050 use the same deterministic 100k-strand, 32-sample,
@@ -151,11 +179,12 @@ D:\RTS\_tmp\r050_30k_final\r043_r049_r050_strand_audit.json
 
 ## Decision
 
-Accept and tag R050. It validates the intended separation: the smooth
-secondary geometry field remains structurally coherent, while generated-
-Gaussian RGB profiles recover image evidence that would otherwise pressure
-length and direction. Keep R049 as the residual-free structural control and
-R043 as the higher-capacity geometry/RGB metric control.
+Keep the existing R050 tag and checkpoint as immutable diagnostic evidence. It
+validates the Gaussian RGB residual mechanism and preserves the secondary
+geometry field, but it does not validate the intended color separation. Do not
+promote its layer ownership as the method. R051 tests the corrected contract:
+sparse guide-owned main color, no competing render-root local color, and the
+Gaussian RGB residual as the sole high-frequency outlet.
 
 Implementation verification also completed:
 

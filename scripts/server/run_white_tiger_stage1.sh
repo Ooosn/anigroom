@@ -184,6 +184,7 @@ for name in "${required_config[@]}"; do
 done
 
 GAUSSIAN_RGB_RESIDUAL_SUPPORT="${GAUSSIAN_RGB_RESIDUAL_SUPPORT:-0}"
+GUIDE_COLOR_SUPPORT="${GUIDE_COLOR_SUPPORT:-0}"
 if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
   for name in \
     GAUSSIAN_RGB_RESIDUAL_CONTROL_POINTS \
@@ -409,6 +410,9 @@ if [[ "$MESH_BACKING_COMPOSITING" == "0" ]]; then
 fi
 if [[ "$LOCAL_CHILD_COLOR_SUPPORT" == "1" ]]; then
   cmd+=(--local-child-color-support)
+fi
+if [[ "$GUIDE_COLOR_SUPPORT" == "1" ]]; then
+  cmd+=(--guide-color-support)
 fi
 if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
   cmd+=(--gaussian-rgb-residual-support)
