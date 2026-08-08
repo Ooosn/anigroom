@@ -2202,9 +2202,9 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.groom.direction_local_raw.copy_(
                 self.groom.direction_local_raw.new_tensor([0.92 * 0.86, -0.12 * 0.86, 0.018])
             )
-            set_range(self.groom.curl_radius_raw, 0.0030, ranges.curl_radius)
+            set_range(self.groom.curl_radius_raw, ranges.curl_radius[0], ranges.curl_radius)
             set_range(self.groom.curl_frequency_raw, 1.20, ranges.curl_frequency)
-            set_range(self.groom.frizz_raw, 0.0008, ranges.frizz)
+            set_range(self.groom.frizz_raw, ranges.frizz[0], ranges.frizz)
             self.groom.child_radius_reference.fill_(0.0028)
             self.groom.child_radius_raw.zero_()
             set_range(self.groom.clump_strength_raw, 0.25, ranges.clump_strength)
@@ -2225,8 +2225,12 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 self.guide_width_taper_raw.zero_()
                 self.guide_brush_stiffness_raw.zero_()
                 self.guide_child_radius_reference.fill_(0.0028)
-                set_range(self.guide_curl_radius_raw, 0.0030, ranges.curl_radius)
-                set_range(self.guide_frizz_raw, 0.0008, ranges.frizz)
+                set_range(
+                    self.guide_curl_radius_raw,
+                    ranges.curl_radius[0],
+                    ranges.curl_radius,
+                )
+                set_range(self.guide_frizz_raw, ranges.frizz[0], ranges.frizz)
                 self.guide_child_radius_raw.zero_()
                 set_range(self.guide_clump_strength_raw, 0.25, ranges.clump_strength)
                 self.guide_direction_local_raw.copy_(

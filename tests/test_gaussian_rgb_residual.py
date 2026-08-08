@@ -303,6 +303,15 @@ def test_r053_shape_and_appearance_handoffs_are_synchronized() -> None:
         assert gaussian_rgb_residual_multiplier_for_iteration(config, iteration) == expected
 
 
+def test_shape_detail_starts_from_the_neutral_physical_state() -> None:
+    model = make_model()
+    model.shape_detail_multiplier = 1.0
+    _, _, roots_local = model.roots_and_normals()
+    groom = model.apply_guide_controls(model.groom.decode(), roots_local)
+    assert float(groom.curl_radius.max()) < 1.0e-6
+    assert float(groom.frizz.max()) < 1.0e-6
+
+
 def test_shape_gate_is_zero_before_handoff_and_joint_controls_receive_gradients() -> None:
     model = make_model()
     config = replace(

@@ -23,6 +23,9 @@ optional explicit curl/frizz controls are allowed to learn.
 - The retired legacy bend parameter is not restored. Guide-owned
   `brush_stiffness` remains the ordinary one-turn base centerline control.
 - Guide and secondary-guide curl radius/frizz amplitude become optimizable.
+- Curl and frizz initialize at their semantic neutral value instead of exposing
+  the retired nonzero template when the gate opens. The secondary residual
+  remains zero-centered and supplies a nonsaturated learning path.
 - Effective curl and frizz remain exactly zero through 10k, then ramp from
   10k to 20k.
 - The treatment Gaussian RGB residual uses that exact 10k-20k ramp.
