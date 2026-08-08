@@ -80,6 +80,19 @@ def main() -> None:
     scene_bg = scene_background_color(config, device)
     residual_enabled = model.gaussian_rgb_residual is not None
     residual_multiplier = float(model.gaussian_rgb_residual_multiplier)
+    local_render_color_enabled = model.child_color_delta_raw is not None
+    local_render_color_stats = None
+    if local_render_color_enabled:
+        local_render_color = (
+            torch.tanh(model.child_color_delta_raw.detach())
+            * float(model.local_child_color_scale)
+        )
+        local_render_color_stats = {
+            "abs_mean": float(local_render_color.abs().mean().cpu()),
+            "rms": float(torch.sqrt(local_render_color.square().mean()).cpu()),
+            "abs_max": float(local_render_color.abs().max().cpu()),
+        }
+        del local_render_color
     records = []
     with torch.no_grad():
         for idx in view_ids:
@@ -161,10 +174,93 @@ def main() -> None:
                     }
                 )
                 del residual_delta, base_mse, base_psnr
+            without_local_render_color = None
+            root_tip_only = None
+            if local_render_color_enabled:
+                saved_local_render_color = model.child_color_delta_raw.detach().clone()
+                model.child_color_delta_raw.zero_()
+                try:
+                    without_local_render_color, _, _, _, without_local_stats, _ = render_view(
+                        model,
+                        viewmats[idx],
+                        ks[idx],
+                        width,
+                        height,
+                        config,
+                        background=mesh_color,
+                        mesh_depth=mesh_depth,
+                        backing_image=backing,
+                    )
+                    if residual_enabled:
+                        model.gaussian_rgb_residual_multiplier = 0.0
+                        try:
+                            root_tip_only, _, _, _, root_tip_stats, _ = render_view(
+                                model,
+                                viewmats[idx],
+                                ks[idx],
+                                width,
+                                height,
+                                config,
+                                background=mesh_color,
+                                mesh_depth=mesh_depth,
+                                backing_image=backing,
+                            )
+                        finally:
+                            model.gaussian_rgb_residual_multiplier = residual_multiplier
+                    else:
+                        root_tip_only = without_local_render_color
+                        root_tip_stats = without_local_stats
+                finally:
+                    model.child_color_delta_raw.copy_(saved_local_render_color)
+
+                without_local_mse = torch.mean(
+                    (without_local_render_color - target_eval).square()
+                ).clamp_min(1.0e-12)
+                root_tip_mse = torch.mean((root_tip_only - target_eval).square()).clamp_min(1.0e-12)
+                local_render_delta = pred - without_local_render_color
+                save_image(
+                    output_dir / f"view_{idx:02d}_pred_without_local_render_color.png",
+                    without_local_render_color,
+                )
+                save_image(
+                    output_dir / f"view_{idx:02d}_pred_root_tip_only.png",
+                    root_tip_only,
+                )
+                save_image(
+                    output_dir / f"view_{idx:02d}_local_render_color_abs_x4.png",
+                    (local_render_delta.abs() * 4.0).clamp(0.0, 1.0),
+                )
+                record.update(
+                    {
+                        "pred_without_local_render_color": (
+                            f"view_{idx:02d}_pred_without_local_render_color.png"
+                        ),
+                        "pred_root_tip_only": f"view_{idx:02d}_pred_root_tip_only.png",
+                        "local_render_color_abs_x4": (
+                            f"view_{idx:02d}_local_render_color_abs_x4.png"
+                        ),
+                        "composite_psnr_without_local_render_color": float(
+                            (-10.0 * torch.log10(without_local_mse)).cpu()
+                        ),
+                        "composite_psnr_root_tip_only": float(
+                            (-10.0 * torch.log10(root_tip_mse)).cpu()
+                        ),
+                        "without_local_render_color_stats": without_local_stats,
+                        "root_tip_only_stats": root_tip_stats,
+                    }
+                )
+                del (
+                    saved_local_render_color,
+                    without_local_mse,
+                    root_tip_mse,
+                    local_render_delta,
+                )
             records.append(record)
             del target, mask, mesh_depth, backing, pred, alpha, target_eval, raw_diff, composite_diff
             if base_pred is not None:
                 del base_pred, residual_abs, residual_signed
+            if without_local_render_color is not None:
+                del without_local_render_color, root_tip_only
             torch.cuda.empty_cache()
 
     summary = {
@@ -181,6 +277,7 @@ def main() -> None:
             if residual_enabled
             else None
         ),
+        "local_render_color": local_render_color_stats,
         "records": records,
     }
     (output_dir / "render_report.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
