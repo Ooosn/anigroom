@@ -47,6 +47,8 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--view-ids", default="0 5 9 14 18 21 27 32")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--data-root")
+    parser.add_argument("--mesh-path")
     args = parser.parse_args()
 
     if args.device == "cuda" and not torch.cuda.is_available():
@@ -57,8 +59,8 @@ def main() -> None:
     config = stage1_config_from_checkpoint_mapping(checkpoint["config"])
     model = build_stage1_model_from_checkpoint(checkpoint, config, device)
 
-    data_root = resolve_project_path(config.data_root)
-    mesh_path = resolve_project_path(config.mesh_path)
+    data_root = resolve_project_path(args.data_root or config.data_root)
+    mesh_path = resolve_project_path(args.mesh_path or config.mesh_path)
     report = build_stage1_input_report(data_root, mesh_path, test_stride=config.test_stride)
     if report.errors:
         raise RuntimeError(f"input report errors: {report.errors}")
@@ -275,6 +277,8 @@ def main() -> None:
 
     summary = {
         "checkpoint": str(checkpoint_path),
+        "data_root": str(data_root),
+        "mesh_path": str(mesh_path),
         "iteration": int(checkpoint.get("iteration", -1)),
         "view_ids": view_ids,
         "width": width,
