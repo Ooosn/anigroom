@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -57,10 +58,17 @@ def main() -> None:
     checkpoint_path = resolve_project_path(args.checkpoint)
     checkpoint = load_training_checkpoint(checkpoint_path)
     config = stage1_config_from_checkpoint_mapping(checkpoint["config"])
+    path_overrides = {}
+    if args.data_root:
+        path_overrides["data_root"] = args.data_root
+    if args.mesh_path:
+        path_overrides["mesh_path"] = args.mesh_path
+    if path_overrides:
+        config = replace(config, **path_overrides)
     model = build_stage1_model_from_checkpoint(checkpoint, config, device)
 
-    data_root = resolve_project_path(args.data_root or config.data_root)
-    mesh_path = resolve_project_path(args.mesh_path or config.mesh_path)
+    data_root = resolve_project_path(config.data_root)
+    mesh_path = resolve_project_path(config.mesh_path)
     report = build_stage1_input_report(data_root, mesh_path, test_stride=config.test_stride)
     if report.errors:
         raise RuntimeError(f"input report errors: {report.errors}")
