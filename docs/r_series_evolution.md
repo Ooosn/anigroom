@@ -1,7 +1,8 @@
 # R-Series Evolution
 
-Status date: 2026-08-07. Active structural/lifecycle baseline: R043. Frozen
-higher-PSNR metric control: R036.
+Status date: 2026-08-10. Active structural/lifecycle baseline: R043. Frozen
+higher-PSNR metric control: R036. Accepted appearance checkpoint: R050.
+Latest staged shape/appearance research checkpoint: R055.
 
 This document is the compact decision history. Detailed measurements and
 artifact paths remain in `docs/accept_line_recovery_ledger.md` and the
@@ -26,6 +27,10 @@ individual R-series documents.
 | R041 | Made the dense surface graph exact and practical by removing redundant rebuild work. |
 | R042 | Completed exact lifecycle-selection acceleration and passed the formal from-zero 30k gate. |
 | R043 | Restored density-matched K32 render support and removed the sparse long/sharp centerline tail without a physical cap. |
+| R049 | Added the smooth secondary-guide geometry field used by the appearance branch. |
+| R050 | Added generated-Gaussian RGB residual without degrading the R049 strand field. |
+| R054 | Moved curl/frizz ownership back to the smooth primary guide after R053 exposed dense residual noise. |
+| R055 | Staged primary shape/appearance before zero-centered secondary shape residual and reduced R054 foldback. |
 
 ## Recovery And Interpolation: R000-R007
 
@@ -141,6 +146,16 @@ final test metric, so
 R036 remains the metric control rather than being rewritten by the structural
 decision.
 
+## Appearance And Optional Shape: R049-R055
+
+| Run | Test | Decision and lasting result |
+| --- | --- | --- |
+| R049 | Secondary-guide geometry through 30k | Accepted as R050's structural parent. The 100k-strand audit reaches `0.02047/0.07741` local relative-length mean/P95 with zero backward segments. |
+| R050 | Generated-Gaussian RGB residual | Accepted appearance checkpoint: final/best test `32.12111/32.20936`; the residual adds `0.88-2.73 dB` over fixed views without changing strand geometry. |
+| R053 | Simultaneous primary and secondary curl/frizz | Rejected as a shape baseline. PSNR rises, but local turning and stripe-correlated shape noise worsen even with Gaussian RGB residual. |
+| R054 | Primary-guide-only curl/frizz | Retained as a cleaner ownership control. Backward strands fall from R053 `560` to `375`, but local-turn P95 remains `57.30 deg`. |
+| R055 | Primary shape plus Gaussian appearance at 20k-25k, then secondary shape residual at 25k-30k | Accepted as the latest controlled shape checkpoint, not the default baseline. Versus R054, backward strands fall `375 -> 159`, local-turn P95 falls `57.30 -> 50.03 deg`, and local length continuity improves, with `-0.132 dB` fixed-view mean PSNR. R050 remains the strict structural reference. |
+
 ## Effective Findings
 
 The strongest reusable findings are:
@@ -160,13 +175,16 @@ The strongest reusable findings are:
   an initialization-relative capacity multiplier;
 - judge every route with both composite reconstruction and fixed-protocol
   pure-fur structure.
+- hand off optional shape from the smooth primary guide before enabling a
+  zero-centered secondary residual; Gaussian RGB residual remains a separate
+  high-frequency appearance outlet.
 
 ## Current Boundary
 
-R043 contains the base brush curve, independent render roots, and an exact
-finite render-root lifecycle. It does not redesign or enable curl/frizz, and it
-does not add Gaussian-level RGB appearance residuals. Those remain separate
-future candidates and must not be described as part of this baseline. R043
-removes R042's sparse long/sharp residual tail through density-matched surface
-support, not through a sample-specific length cap. Exact per-iteration K32
-edge-pass acceleration is the next isolated execution candidate.
+R043 remains the base structural/lifecycle route and does not enable
+curl/frizz or Gaussian-level RGB residual. R050 is the accepted appearance
+checkpoint built on the smooth R049 geometry. R055 validates a more orderly
+optional-shape handoff, but its remaining foldback and mild long-tail strands
+prevent promotion into the default route. These roles must remain distinct:
+R043 for independent-root lifecycle, R050 for strict appearance/structure, and
+R055 for subsequent controlled curl/frizz research.

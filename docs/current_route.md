@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-08-08.
+Status date: 2026-08-10.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -61,6 +61,16 @@ backward segment appears. R049 remains the residual-free structural control;
 R043 remains the independent-root RGB metric control. See
 `docs/r050_gaussian_rgb_residual.md`.
 
+R055 is the latest accepted research checkpoint for optional curl/frizz
+handoff, not the default Stage 1 route. It first ramps smooth primary-guide
+curl/frizz together with Gaussian RGB residual from 20k to 25k, then ramps a
+zero-centered secondary-guide relative residual from 25k to 30k. Compared with
+R054 it reduces backward strands `375 -> 159`, local relative-length mean
+`0.02417 -> 0.02226`, and local-turn P95 `57.30 -> 50.03 deg`, while losing
+`0.132 dB` on the fixed eight-view mean. R050 therefore remains the strict
+structural/appearance reference; R055 is the next controlled shape branch. See
+`docs/r055_staged_primary_secondary_shape.md`.
+
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
@@ -72,6 +82,8 @@ R043 remains the independent-root RGB metric control. See
   `configs/r049_secondary_guide_resume16k_30k.env`
 - active R050 appearance checkpoint configuration:
   `configs/r050_gaussian_rgb_residual_0_30k.env`
+- latest R055 staged shape research configuration:
+  `configs/r055_staged_primary_secondary_shape_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
