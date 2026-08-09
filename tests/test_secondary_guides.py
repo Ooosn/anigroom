@@ -511,6 +511,7 @@ def test_formal_checkpoint_loader_restores_render_and_secondary_domains(
         assert restored.guide_residual_multiplier == pytest.approx(0.5)
         assert restored.guide_coverage_residual_multiplier == pytest.approx(0.6)
         assert restored.shape_detail_multiplier == pytest.approx(3.0 / 8.0)
+        assert restored.secondary_shape_residual_multiplier == pytest.approx(3.0 / 8.0)
         restored_state = restored.state_dict()
         source_state = source.state_dict()
         assert restored_state.keys() == source_state.keys()

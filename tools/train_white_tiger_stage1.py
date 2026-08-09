@@ -1781,6 +1781,9 @@ class Stage1Config:
     guide_coverage_residual_initial_multiplier: float = 1.0
     guide_freeze_until: int = 0
     shape_detail_freeze_until: int = 0
+    shape_detail_unlock_end: int = 0
+    secondary_shape_residual_unlock_start: int = 0
+    secondary_shape_residual_unlock_end: int = 0
     shape_curl_scale: float = 1.0
     shape_frizz_scale: float = 1.0
     guide_densify_start: int = 0
@@ -1971,6 +1974,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         self.guide_residual_multiplier = 1.0
         self.guide_coverage_residual_multiplier = 1.0
         self.shape_detail_multiplier = 1.0
+        self.secondary_shape_residual_multiplier = 1.0
         self.shape_curl_scale = max(0.0, float(shape_curl_scale))
         self.shape_frizz_scale = max(0.0, float(shape_frizz_scale))
         self.init_groom_length = float(init_groom_length)
@@ -3100,14 +3104,6 @@ class WhiteTigerStage1Model(torch.nn.Module):
         residual_raw = residual_sample.raw if residual_sample is not None else {}
         residual_physical = (
             {
-                "curl_radius": RenderGeometryResidualField.scalar_physical_delta(
-                    residual_decoded.curl_radius,
-                    ranges.curl_radius,
-                ),
-                "frizz": RenderGeometryResidualField.scalar_physical_delta(
-                    residual_decoded.frizz,
-                    ranges.frizz,
-                ),
                 "clump_strength": RenderGeometryResidualField.scalar_physical_delta(
                     residual_decoded.clump_strength,
                     ranges.clump_strength,
@@ -3224,18 +3220,35 @@ class WhiteTigerStage1Model(torch.nn.Module):
             )
             tip_ratio = groom.tip_width / groom.root_width.clamp_min(EPS)
             width_taper = groom.width_taper
-        curl_radius = mix_scalar(
-            "curl_radius",
-            groom.curl_radius,
-            self.guide_curl_residual_scale,
-            ranges.curl_radius,
-        )
-        frizz = mix_scalar(
-            "frizz",
-            groom.frizz,
-            self.guide_frizz_residual_scale,
-            ranges.frizz,
-        )
+        if residual_sample is not None:
+            secondary_shape_multiplier = float(
+                getattr(self, "secondary_shape_residual_multiplier", 1.0)
+            )
+            curl_radius = apply_asinh_log_ratio_residual(
+                guide_interp["curl_radius"],
+                residual_raw["curl_radius_raw"],
+                float(self.guide_curl_residual_scale)
+                * secondary_shape_multiplier,
+            )
+            frizz = apply_asinh_log_ratio_residual(
+                guide_interp["frizz"],
+                residual_raw["frizz_raw"],
+                float(self.guide_frizz_residual_scale)
+                * secondary_shape_multiplier,
+            )
+        else:
+            curl_radius = mix_scalar(
+                "curl_radius",
+                groom.curl_radius,
+                self.guide_curl_residual_scale,
+                ranges.curl_radius,
+            )
+            frizz = mix_scalar(
+                "frizz",
+                groom.frizz,
+                self.guide_frizz_residual_scale,
+                ranges.frizz,
+            )
         if residual_sample is not None:
             child_radius = apply_asinh_log_ratio_residual(
                 guide_interp["child_radius"],
@@ -5421,7 +5434,7 @@ def zero_guide_gradients(model: WhiteTigerStage1Model) -> None:
             param.grad.zero_()
 
 
-def zero_shape_detail_gradients(model: WhiteTigerStage1Model) -> None:
+def zero_primary_shape_detail_gradients(model: WhiteTigerStage1Model) -> None:
     params = [
         model.groom.curl_radius_raw,
         model.groom.curl_frequency_raw,
@@ -5430,16 +5443,17 @@ def zero_shape_detail_gradients(model: WhiteTigerStage1Model) -> None:
     ]
     if model.guide_enabled():
         params.extend([model.guide_curl_radius_raw, model.guide_frizz_raw])
-    residual = model.active_geometry_residual()
-    if residual is not None:
-        params.extend(
-            [
-                residual.curl_radius_raw,
-                residual.frizz_raw,
-            ]
-        )
     for param in params:
         if param is not None and param.grad is not None:
+            param.grad.zero_()
+
+
+def zero_secondary_shape_detail_gradients(model: WhiteTigerStage1Model) -> None:
+    residual = model.active_geometry_residual()
+    if residual is None:
+        return
+    for param in (residual.curl_radius_raw, residual.frizz_raw):
+        if param.grad is not None:
             param.grad.zero_()
 
 
@@ -5794,12 +5808,33 @@ def shape_detail_multiplier_for_iteration(config: Stage1Config, iteration: int) 
     freeze_until = int(config.shape_detail_freeze_until)
     if freeze_until <= 0:
         return 1.0
-    ramp_end = max(freeze_until + 1, int(config.guide_residual_unlock_end))
+    configured_end = int(config.shape_detail_unlock_end)
+    ramp_end = (
+        configured_end
+        if configured_end > freeze_until
+        else max(freeze_until + 1, int(config.guide_residual_unlock_end))
+    )
     return scheduled_multiplier(
         iteration,
         initial=0.0,
         start=freeze_until,
         end=ramp_end,
+    )
+
+
+def secondary_shape_residual_multiplier_for_iteration(
+    config: Stage1Config,
+    iteration: int,
+) -> float:
+    start = int(config.secondary_shape_residual_unlock_start)
+    end = int(config.secondary_shape_residual_unlock_end)
+    if end <= start:
+        return shape_detail_multiplier_for_iteration(config, iteration)
+    return scheduled_multiplier(
+        iteration,
+        initial=0.0,
+        start=start,
+        end=end,
     )
 
 
@@ -5993,6 +6028,9 @@ def build_stage1_model_from_checkpoint(
     model.shape_detail_multiplier = shape_detail_multiplier_for_iteration(
         config,
         iteration,
+    )
+    model.secondary_shape_residual_multiplier = (
+        secondary_shape_residual_multiplier_for_iteration(config, iteration)
     )
     model.gaussian_rgb_residual_multiplier = (
         gaussian_rgb_residual_multiplier_for_iteration(config, iteration)
@@ -6240,6 +6278,38 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         raise RuntimeError("White Tiger Stage 1 requires CUDA")
     if float(config.geometry_residual_smooth_scale) < 0.0:
         raise ValueError("geometry residual smooth scale must be non-negative")
+    shape_detail_enabled = (
+        float(config.shape_curl_scale) > 0.0
+        or float(config.shape_frizz_scale) > 0.0
+    )
+    if (
+        shape_detail_enabled
+        and int(config.shape_detail_freeze_until) > 0
+        and int(config.shape_detail_unlock_end)
+        <= int(config.shape_detail_freeze_until)
+    ):
+        raise ValueError(
+            "enabled primary shape detail requires SHAPE_DETAIL_UNLOCK_END "
+            "after SHAPE_DETAIL_FREEZE_UNTIL"
+        )
+    secondary_shape_enabled = (
+        int(config.guide_root_count) > 0
+        and config.render_geometry_parameterization != "absolute_endpoint"
+        and (
+            float(config.guide_curl_residual_scale) > 0.0
+            or float(config.guide_frizz_residual_scale) > 0.0
+        )
+    )
+    if (
+        secondary_shape_enabled
+        and int(config.secondary_shape_residual_unlock_end)
+        <= int(config.secondary_shape_residual_unlock_start)
+    ):
+        raise ValueError(
+            "enabled secondary shape residual requires "
+            "SECONDARY_SHAPE_RESIDUAL_UNLOCK_END after "
+            "SECONDARY_SHAPE_RESIDUAL_UNLOCK_START"
+        )
     device = torch.device("cuda")
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
@@ -6769,6 +6839,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             model.guide_residual_multiplier = guide_residual_multiplier_for_iteration(config, iteration)
             model.guide_coverage_residual_multiplier = guide_coverage_residual_multiplier_for_iteration(config, iteration)
             model.shape_detail_multiplier = shape_detail_multiplier_for_iteration(config, iteration)
+            model.secondary_shape_residual_multiplier = (
+                secondary_shape_residual_multiplier_for_iteration(config, iteration)
+            )
             model.gaussian_rgb_residual_multiplier = (
                 gaussian_rgb_residual_multiplier_for_iteration(config, iteration)
             )
@@ -7102,9 +7175,18 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 and iteration <= int(config.guide_residual_unlock_start)
             ):
                 zero_render_geometry_residual_gradients(model)
-            shape_detail_frozen = int(config.shape_detail_freeze_until) > 0 and iteration <= int(config.shape_detail_freeze_until)
+            shape_detail_frozen = (
+                int(config.shape_detail_freeze_until) > 0
+                and iteration <= int(config.shape_detail_freeze_until)
+            )
             if shape_detail_frozen:
-                zero_shape_detail_gradients(model)
+                zero_primary_shape_detail_gradients(model)
+            secondary_shape_residual_frozen = (
+                int(config.secondary_shape_residual_unlock_start) > 0
+                and iteration <= int(config.secondary_shape_residual_unlock_start)
+            )
+            if secondary_shape_residual_frozen:
+                zero_secondary_shape_detail_gradients(model)
             if int(config.color_freeze_until) > 0 and iteration <= int(config.color_freeze_until):
                 zero_color_gradients(model)
             optimizer.step()
@@ -7339,11 +7421,17 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "guide_residual_multiplier": float(model.guide_residual_multiplier),
                     "guide_coverage_residual_multiplier": float(model.guide_coverage_residual_multiplier),
                     "shape_detail_multiplier": float(model.shape_detail_multiplier),
+                    "secondary_shape_residual_multiplier": float(
+                        model.secondary_shape_residual_multiplier
+                    ),
                     "gaussian_rgb_residual_multiplier": float(
                         model.gaussian_rgb_residual_multiplier
                     ),
                     "guide_frozen": bool(int(config.guide_freeze_until) > 0 and iteration <= int(config.guide_freeze_until)),
                     "shape_detail_frozen": bool(shape_detail_frozen),
+                    "secondary_shape_residual_frozen": bool(
+                        secondary_shape_residual_frozen
+                    ),
                     "lifecycle_statistics_active": bool(lifecycle_stats_active),
                     "root_move_loss": float(root_move_loss.detach().cpu()),
                     "train": train_eval,
@@ -7557,6 +7645,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         "guide_residual_multiplier": float(model.guide_residual_multiplier),
                         "guide_coverage_residual_multiplier": float(model.guide_coverage_residual_multiplier),
                         "shape_detail_multiplier": float(model.shape_detail_multiplier),
+                        "secondary_shape_residual_multiplier": float(
+                            model.secondary_shape_residual_multiplier
+                        ),
                         "gaussian_rgb_residual_multiplier": float(
                             model.gaussian_rgb_residual_multiplier
                         ),
@@ -7681,6 +7772,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guide-coverage-residual-initial-multiplier", type=float, default=1.0)
     parser.add_argument("--guide-freeze-until", type=int, default=0)
     parser.add_argument("--shape-detail-freeze-until", type=int, default=0)
+    parser.add_argument("--shape-detail-unlock-end", type=int, default=0)
+    parser.add_argument("--secondary-shape-residual-unlock-start", type=int, default=0)
+    parser.add_argument("--secondary-shape-residual-unlock-end", type=int, default=0)
     parser.add_argument("--shape-curl-scale", type=float, default=1.0)
     parser.add_argument("--shape-frizz-scale", type=float, default=1.0)
     parser.add_argument("--guide-densify-start", type=int, default=0)
@@ -7868,6 +7962,11 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         guide_coverage_residual_initial_multiplier=args.guide_coverage_residual_initial_multiplier,
         guide_freeze_until=args.guide_freeze_until,
         shape_detail_freeze_until=args.shape_detail_freeze_until,
+        shape_detail_unlock_end=args.shape_detail_unlock_end,
+        secondary_shape_residual_unlock_start=(
+            args.secondary_shape_residual_unlock_start
+        ),
+        secondary_shape_residual_unlock_end=args.secondary_shape_residual_unlock_end,
         shape_curl_scale=args.shape_curl_scale,
         shape_frizz_scale=args.shape_frizz_scale,
         guide_densify_start=args.guide_densify_start,

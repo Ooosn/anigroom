@@ -35,6 +35,12 @@ if [[ -n "$EXPLICIT_CLEAN_FLOW_TARGET" ]]; then
   CLEAN_FLOW_TARGET="$CLEAN_FLOW_TARGET_OVERRIDE"
 fi
 
+# Historical locked configs predate the split primary/secondary shape clocks.
+# Explicit R055 values override these compatibility-preserving equivalents.
+SHAPE_DETAIL_UNLOCK_END="${SHAPE_DETAIL_UNLOCK_END:-${GUIDE_RESIDUAL_UNLOCK_END:-0}}"
+SECONDARY_SHAPE_RESIDUAL_UNLOCK_START="${SECONDARY_SHAPE_RESIDUAL_UNLOCK_START:-${GUIDE_RESIDUAL_UNLOCK_START:-0}}"
+SECONDARY_SHAPE_RESIDUAL_UNLOCK_END="${SECONDARY_SHAPE_RESIDUAL_UNLOCK_END:-${GUIDE_RESIDUAL_UNLOCK_END:-0}}"
+
 require_var() {
   local name="$1"
   if [[ -z "${!name:-}" ]]; then
@@ -302,6 +308,9 @@ cmd=(
   --guide-coverage-residual-initial-multiplier "$GUIDE_COVERAGE_RESIDUAL_INITIAL_MULTIPLIER"
   --guide-freeze-until "$GUIDE_FREEZE_UNTIL"
   --shape-detail-freeze-until "$SHAPE_DETAIL_FREEZE_UNTIL"
+  --shape-detail-unlock-end "$SHAPE_DETAIL_UNLOCK_END"
+  --secondary-shape-residual-unlock-start "$SECONDARY_SHAPE_RESIDUAL_UNLOCK_START"
+  --secondary-shape-residual-unlock-end "$SECONDARY_SHAPE_RESIDUAL_UNLOCK_END"
   --shape-curl-scale "$SHAPE_CURL_SCALE"
   --shape-frizz-scale "$SHAPE_FRIZZ_SCALE"
   --guide-densify-start "$GUIDE_DENSIFY_START"

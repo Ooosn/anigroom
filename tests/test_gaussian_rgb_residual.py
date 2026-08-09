@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 import torch
 
-from anigroom.grooming import GaussianRGBResidualField, GroomRanges
+from anigroom.grooming import (
+    GaussianRGBResidualField,
+    GroomRanges,
+    apply_asinh_log_ratio_residual,
+)
 from anigroom.mesh_roots import TriangleMesh
 from anigroom.roots.lifecycle import RootStructureUpdate
 from tools.train_white_tiger_stage1 import (
@@ -14,6 +18,7 @@ from tools.train_white_tiger_stage1 import (
     make_stage1_optimizer,
     optimizer_row_transition,
     rebuild_stage1_optimizer_with_state,
+    secondary_shape_residual_multiplier_for_iteration,
     shape_detail_multiplier_for_iteration,
     stage1_optimizer_param_names,
 )
@@ -305,6 +310,81 @@ def test_r053_shape_and_appearance_handoffs_are_synchronized() -> None:
     ):
         assert shape_detail_multiplier_for_iteration(config, iteration) == expected
         assert gaussian_rgb_residual_multiplier_for_iteration(config, iteration) == expected
+
+
+def test_r055_primary_appearance_then_secondary_shape_handoff() -> None:
+    config = replace(
+        make_config(),
+        shape_detail_freeze_until=20_000,
+        shape_detail_unlock_end=25_000,
+        secondary_shape_residual_unlock_start=25_000,
+        secondary_shape_residual_unlock_end=30_000,
+        gaussian_rgb_residual_unlock_start=20_000,
+        gaussian_rgb_residual_unlock_end=25_000,
+    )
+    expected = {
+        19_999: (0.0, 0.0, 0.0),
+        20_000: (0.0, 0.0, 0.0),
+        22_500: (0.5, 0.0, 0.5),
+        25_000: (1.0, 0.0, 1.0),
+        27_500: (1.0, 0.5, 1.0),
+        30_000: (1.0, 1.0, 1.0),
+    }
+    for iteration, multipliers in expected.items():
+        actual = (
+            shape_detail_multiplier_for_iteration(config, iteration),
+            secondary_shape_residual_multiplier_for_iteration(config, iteration),
+            gaussian_rgb_residual_multiplier_for_iteration(config, iteration),
+        )
+        assert actual == multipliers
+
+
+def test_shape_residual_is_zero_based_and_scale_relative() -> None:
+    raw = torch.tensor([[0.75], [-0.35]], dtype=torch.float32)
+    zero = torch.zeros_like(raw)
+    torch.testing.assert_close(
+        apply_asinh_log_ratio_residual(zero, raw, 1.0),
+        zero,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    guide = torch.tensor([[0.002], [0.006]], dtype=torch.float32)
+    effective = apply_asinh_log_ratio_residual(guide, raw, 0.6)
+    doubled = apply_asinh_log_ratio_residual(guide * 2.0, raw, 0.6)
+    torch.testing.assert_close(effective / guide, doubled / (guide * 2.0))
+
+
+def test_r055_shape_gradient_ownership_follows_the_two_handoffs() -> None:
+    model = make_model()
+    _, _, roots_local = model.roots_and_normals()
+
+    model.shape_detail_multiplier = 0.5
+    model.secondary_shape_residual_multiplier = 0.0
+    primary_stage = model.apply_guide_controls(model.groom.decode(), roots_local)
+    (primary_stage.curl_radius.mean() + primary_stage.frizz.mean()).backward()
+    assert bool((model.guide_curl_radius_raw.grad.abs() > 0.0).any())
+    assert bool((model.guide_frizz_raw.grad.abs() > 0.0).any())
+    torch.testing.assert_close(
+        model.render_geometry_residual.curl_radius_raw.grad,
+        torch.zeros_like(model.render_geometry_residual.curl_radius_raw.grad),
+    )
+    torch.testing.assert_close(
+        model.render_geometry_residual.frizz_raw.grad,
+        torch.zeros_like(model.render_geometry_residual.frizz_raw.grad),
+    )
+
+    model.zero_grad(set_to_none=True)
+    model.shape_detail_multiplier = 1.0
+    model.secondary_shape_residual_multiplier = 0.5
+    with torch.no_grad():
+        model.render_geometry_residual.curl_radius_raw.fill_(0.4)
+        model.render_geometry_residual.frizz_raw.fill_(-0.3)
+    _, _, roots_local = model.roots_and_normals()
+    secondary_stage = model.apply_guide_controls(model.groom.decode(), roots_local)
+    (secondary_stage.curl_radius.mean() + secondary_stage.frizz.mean()).backward()
+    assert bool((model.render_geometry_residual.curl_radius_raw.grad.abs() > 0.0).any())
+    assert bool((model.render_geometry_residual.frizz_raw.grad.abs() > 0.0).any())
 
 
 def test_shape_detail_gate_is_neutral_and_guide_coordinates_are_learnable() -> None:
