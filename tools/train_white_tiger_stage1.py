@@ -5518,27 +5518,6 @@ def optimizer_non_color_parameters(
     )
 
 
-def accumulate_restricted_gradient(
-    loss: torch.Tensor,
-    parameters: list[torch.nn.Parameter],
-    *,
-    retain_graph: bool,
-) -> None:
-    parameters = unique_trainable_parameters(parameters)
-    if not parameters or not loss.requires_grad:
-        return
-    gradients = torch.autograd.grad(
-        loss,
-        parameters,
-        retain_graph=retain_graph,
-        allow_unused=True,
-    )
-    for parameter, gradient in zip(parameters, gradients, strict=True):
-        if gradient is None:
-            continue
-        parameter.grad = gradient if parameter.grad is None else parameter.grad + gradient
-
-
 def backward_rgb_and_flow_without_color_flow_gradients(
     model: WhiteTigerStage1Model,
     optimizer: torch.optim.Optimizer,
@@ -5552,11 +5531,7 @@ def backward_rgb_and_flow_without_color_flow_gradients(
     route_flow = bool(flow_parameters) and flow_loss.requires_grad
     rgb_and_regularization_loss.backward(retain_graph=route_flow)
     if route_flow:
-        accumulate_restricted_gradient(
-            flow_loss,
-            flow_parameters,
-            retain_graph=False,
-        )
+        flow_loss.backward(inputs=flow_parameters)
 
 
 def raw_from_range(value: torch.Tensor, bounds: tuple[float, float]) -> torch.Tensor:
