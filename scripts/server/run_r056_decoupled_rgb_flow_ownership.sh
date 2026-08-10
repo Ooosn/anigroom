@@ -70,7 +70,7 @@ verify_active_path_preflight() {
     echo "[r056] missing active-path preflight checkpoint: $checkpoint" >&2
     exit 2
   }
-  [[ -s "$output_dir/iter_000002/view_00_flow_source_base_fur.png" ]] || {
+  compgen -G "$output_dir/iter_000002/view_*_flow_source_base_fur.png" >/dev/null || {
     echo "[r056] missing residual-free flow-source visualization" >&2
     exit 2
   }
