@@ -422,6 +422,9 @@ fi
 if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
   cmd+=(--gaussian-rgb-residual-support)
 fi
+if [[ "${DECOUPLED_RGB_FLOW_OWNERSHIP:-0}" == "1" ]]; then
+  cmd+=(--decoupled-rgb-flow-ownership)
+fi
 if [[ -n "${TRAIN_VIEWS:-}" ]]; then
   cmd+=(--train-views "$TRAIN_VIEWS")
 fi

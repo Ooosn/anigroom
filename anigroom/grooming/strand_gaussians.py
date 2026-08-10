@@ -129,6 +129,7 @@ class StrandGaussianOutput:
     opacities: torch.Tensor
     root_indices: torch.Tensor
     segment_indices: torch.Tensor
+    base_colors: torch.Tensor | None = None
 
 
 @dataclass

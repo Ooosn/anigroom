@@ -1808,6 +1808,7 @@ class Stage1Config:
     gaussian_rgb_residual_unlock_start: int = 10000
     gaussian_rgb_residual_unlock_end: int = 20000
     gaussian_rgb_residual_initial_multiplier: float = 0.0
+    decoupled_rgb_flow_ownership: bool = False
     lr_root: float = 7.5e-4
     lr_calibration: float = 5.0e-4
     rgb_weight: float = 1.0
@@ -3437,6 +3438,8 @@ class WhiteTigerStage1Model(torch.nn.Module):
         segments_per_unit_length: float,
         segments_per_unit_complexity: float,
         length_overlap: float,
+        *,
+        include_base_colors: bool = False,
     ):
         roots, normals, roots_local = self.roots_and_normals()
         tangents, bitangents = self.tangent_frames(normals)
@@ -3487,6 +3490,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 )
             gaussians = replace(
                 gaussians,
+                base_colors=gaussians.colors if include_base_colors else None,
                 colors=self.gaussian_rgb_residual.apply_to_colors(
                     gaussians.colors,
                     gaussians.root_indices,
@@ -4702,6 +4706,11 @@ def mesh_depth_clip_gaussians(
         opacities=gaussians.opacities[keep],
         root_indices=gaussians.root_indices[keep],
         segment_indices=gaussians.segment_indices[keep],
+        base_colors=(
+            gaussians.base_colors[keep]
+            if gaussians.base_colors is not None
+            else None
+        ),
     )
     stats = {
         "preclip_gaussian_count": int(gaussians.means.shape[0]),
@@ -4740,13 +4749,19 @@ def render_view(
     )
     if memory_constrained_activation_checkpointing(model.groom.length_raw.device):
         gaussians, roots, roots_local, stats = activation_checkpoint(
-            lambda _anchor: model.render_parameters(*render_args),
+            lambda _anchor: model.render_parameters(
+                *render_args,
+                include_base_colors=bool(config.decoupled_rgb_flow_ownership),
+            ),
             model.groom.length_raw,
             use_reentrant=False,
             preserve_rng_state=False,
         )
     else:
-        gaussians, roots, roots_local, stats = model.render_parameters(*render_args)
+        gaussians, roots, roots_local, stats = model.render_parameters(
+            *render_args,
+            include_base_colors=bool(config.decoupled_rgb_flow_ownership),
+        )
     preclip_gaussians = gaussians
     if config.mesh_depth_clipping:
         if mesh_depth is None:
@@ -4771,18 +4786,36 @@ def render_view(
         roots_local.retain_grad()
         gaussians.means.retain_grad()
         gaussians.scales.retain_grad()
+    render_base_fur = bool(config.decoupled_rgb_flow_ownership)
+    if render_base_fur and gaussians.base_colors is None:
+        raise RuntimeError(
+            "decoupled RGB/flow ownership requires Gaussian RGB residual support"
+        )
+    raster_colors = (
+        torch.cat([gaussians.colors, gaussians.base_colors], dim=-1)
+        if render_base_fur
+        else gaussians.colors
+    )
     if config.mesh_backing_compositing:
         if backing_image is None:
             raise RuntimeError("mesh_backing_compositing is enabled but render_view received no backing_image")
-        raster_background = torch.zeros((1, 3), device=background.device, dtype=background.dtype)
+        raster_background = torch.zeros(
+            (1, int(raster_colors.shape[-1])),
+            device=background.device,
+            dtype=background.dtype,
+        )
     else:
-        raster_background = background.view(1, 3)
+        raster_background = (
+            torch.cat([background, background], dim=0).view(1, 6)
+            if render_base_fur
+            else background.view(1, 3)
+        )
     image, alpha, info = rasterization(
         gaussians.means,
         gaussians.quats,
         gaussians.scales,
         gaussians.opacities.reshape(-1),
-        gaussians.colors,
+        raster_colors,
         viewmat.view(1, 4, 4),
         k.view(1, 3, 3),
         width,
@@ -4791,9 +4824,12 @@ def render_view(
         backgrounds=raster_background,
         rasterize_mode="antialiased",
     )
-    raw_image = image
+    raw_image = image[..., :3]
+    raw_base_fur_image = image[..., 3:6] if render_base_fur else None
     if config.mesh_backing_compositing:
-        image = image + (1.0 - alpha) * backing_image.view(1, height, width, 3)
+        image = raw_image + (1.0 - alpha) * backing_image.view(1, height, width, 3)
+    else:
+        image = raw_image
     radii = info["radii"].detach()
     tiles_per_gauss = info.get("tiles_per_gauss")
     if torch.is_tensor(tiles_per_gauss):
@@ -4819,6 +4855,8 @@ def render_view(
     info["mesh_depth_behind_mesh_mask"] = clip_masks["behind_mesh_mask"].detach()
     info["preclip_means"] = preclip_gaussians.means.detach()
     info["raw_fur_image"] = raw_image[0]
+    if raw_base_fur_image is not None:
+        info["raw_base_fur_image"] = raw_base_fur_image[0]
     return image[0].clamp(0.0, 1.0), alpha[0].clamp(0.0, 1.0), gaussians, roots_local, stats, info
 
 
@@ -5473,6 +5511,121 @@ def zero_render_geometry_residual_gradients(model: WhiteTigerStage1Model) -> Non
             continue
         if param.grad is not None:
             param.grad.zero_()
+
+
+def unique_trainable_parameters(
+    parameters: list[torch.nn.Parameter],
+) -> list[torch.nn.Parameter]:
+    unique: list[torch.nn.Parameter] = []
+    seen: set[int] = set()
+    for parameter in parameters:
+        if parameter is None or not parameter.requires_grad:
+            continue
+        identity = id(parameter)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(parameter)
+    return unique
+
+
+def appearance_parameters(model: WhiteTigerStage1Model) -> list[torch.nn.Parameter]:
+    parameters = [model.groom.root_color_raw, model.groom.tip_color_raw]
+    if model.child_color_delta_raw is not None:
+        parameters.append(model.child_color_delta_raw)
+    if model.gaussian_rgb_residual is not None:
+        parameters.append(model.gaussian_rgb_residual.raw)
+    return unique_trainable_parameters(parameters)
+
+
+def flow_geometry_parameters(model: WhiteTigerStage1Model) -> list[torch.nn.Parameter]:
+    """Geometry controls that image-flow evidence is allowed to update."""
+
+    if model.guide_enabled():
+        parameters = [
+            model.guide_direction_local_raw,
+            model.guide_brush_stiffness_raw,
+            model.guide_curl_radius_raw,
+            model.guide_frizz_raw,
+        ]
+        residual = model.active_geometry_residual()
+        if residual is not None:
+            parameters.extend(
+                [
+                    residual.direction_local_raw,
+                    residual.curl_radius_raw,
+                    residual.frizz_raw,
+                ]
+            )
+    else:
+        parameters = [
+            model.groom.direction_local_raw,
+            model.groom.brush_stiffness_raw,
+            model.groom.curl_radius_raw,
+            model.groom.curl_frequency_raw,
+            model.groom.curl_phase,
+            model.groom.frizz_raw,
+        ]
+    return unique_trainable_parameters(parameters)
+
+
+def accumulate_restricted_gradient(
+    loss: torch.Tensor,
+    parameters: list[torch.nn.Parameter],
+    *,
+    retain_graph: bool,
+) -> None:
+    parameters = unique_trainable_parameters(parameters)
+    if not parameters or not loss.requires_grad:
+        return
+    gradients = torch.autograd.grad(
+        loss,
+        parameters,
+        retain_graph=retain_graph,
+        allow_unused=True,
+    )
+    for parameter, gradient in zip(parameters, gradients, strict=True):
+        if gradient is None:
+            continue
+        parameter.grad = gradient if parameter.grad is None else parameter.grad + gradient
+
+
+def backward_decoupled_rgb_flow_losses(
+    model: WhiteTigerStage1Model,
+    *,
+    appearance_loss: torch.Tensor,
+    flow_loss: torch.Tensor,
+    remaining_loss: torch.Tensor,
+    geometry_rgb_multiplier: float,
+) -> None:
+    """Route appearance, structure, and pseudo-flow evidence to their owners."""
+
+    all_parameters = unique_trainable_parameters(list(model.parameters()))
+    appearance = appearance_parameters(model)
+    appearance_ids = {id(parameter) for parameter in appearance}
+    structure = [
+        parameter for parameter in all_parameters if id(parameter) not in appearance_ids
+    ]
+    routes: list[tuple[torch.Tensor, list[torch.nn.Parameter]]] = [
+        (remaining_loss, all_parameters),
+        (appearance_loss, appearance),
+    ]
+    if float(geometry_rgb_multiplier) > 0.0:
+        routes.append(
+            (appearance_loss * float(geometry_rgb_multiplier), structure)
+        )
+    routes.append((flow_loss, flow_geometry_parameters(model)))
+    active_routes = [
+        (route_loss, route_parameters)
+        for route_loss, route_parameters in routes
+        if route_loss.requires_grad and route_parameters
+    ]
+    for index, (route_loss, route_parameters) in enumerate(active_routes):
+        accumulate_restricted_gradient(
+            route_loss,
+            route_parameters,
+            retain_graph=index + 1 < len(active_routes),
+        )
 
 
 def raw_from_range(value: torch.Tensor, bounds: tuple[float, float]) -> torch.Tensor:
@@ -6278,6 +6431,18 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         raise RuntimeError("White Tiger Stage 1 requires CUDA")
     if float(config.geometry_residual_smooth_scale) < 0.0:
         raise ValueError("geometry residual smooth scale must be non-negative")
+    if config.decoupled_rgb_flow_ownership:
+        if not config.gaussian_rgb_residual_support:
+            raise ValueError(
+                "decoupled RGB/flow ownership requires Gaussian RGB residual support"
+            )
+        if (
+            float(config.rgb_flow_weight) <= 0.0
+            and float(config.rgb_flow_detail_weight) <= 0.0
+        ):
+            raise ValueError(
+                "decoupled RGB/flow ownership requires an active RGB-flow loss"
+            )
     shape_detail_enabled = (
         float(config.shape_curl_scale) > 0.0
         or float(config.shape_frizz_scale) > 0.0
@@ -6944,6 +7109,15 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 ) from exc
             fixed_bg = scene_background_color(config, device).view(1, 1, 3)
             pred_fixed = render_info["raw_fur_image"] + (1.0 - alpha) * fixed_bg
+            if config.decoupled_rgb_flow_ownership:
+                raw_base_fur_image = render_info.get("raw_base_fur_image")
+                if raw_base_fur_image is None:
+                    raise RuntimeError(
+                        "decoupled RGB/flow ownership render omitted base-fur RGB"
+                    )
+                flow_pred_fixed = raw_base_fur_image + (1.0 - alpha) * fixed_bg
+            else:
+                flow_pred_fixed = pred_fixed
             target_fixed = composite_target(target, mask, fixed_bg)
             edge_loss_weight = loss_mask_edge_weight(mask, int(config.loss_mask_edge_kernel))
             flow_supervision_mask = (mask * mask_edge_confidence(mask, int(config.loss_mask_edge_kernel))).detach().clamp(0.0, 1.0)
@@ -7008,7 +7182,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 flow_loss_mask_vis = (target_conf_cached.detach() * rgb_flow_target_valid.detach()).clamp(0.0, 1.0)
                 target_flow_vis = target_flow_cached.detach()
                 rgb_flow_loss, rgb_flow_detail_loss, rgb_flow_stats = image_structure_flow_losses(
-                    pred_fixed,
+                    flow_pred_fixed,
                     target_fixed,
                     flow_supervision_mask,
                     min_confidence=float(config.rgb_flow_min_confidence),
@@ -7117,11 +7291,13 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             else:
                 guide_clean_flow_loss = model.groom.length_raw.sum() * 0.0
             root_move_loss = torch.mean((roots_local - model.anchor_local).square())
-            loss = (
-                config.rgb_weight * rgb_loss
-                + config.mask_weight * mask_loss
-                + config.rgb_flow_weight * rgb_flow_loss
+            appearance_loss = config.rgb_weight * rgb_loss
+            flow_loss = (
+                config.rgb_flow_weight * rgb_flow_loss
                 + config.rgb_flow_detail_weight * rgb_flow_detail_loss
+            )
+            remaining_loss = (
+                config.mask_weight * mask_loss
                 + config.smooth_weight * smooth_loss
                 + config.guide_smooth_weight * guide_smooth_loss
                 + config.effective_smooth_weight * effective_smooth_loss
@@ -7130,6 +7306,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
                 + config.root_move_reg_weight * root_move_loss
             )
+            loss = appearance_loss + flow_loss + remaining_loss
             if not bool(torch.isfinite(loss).detach().cpu()):
                 raise RuntimeError(
                     "non-finite loss before backward: "
@@ -7151,7 +7328,21 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             optimizer.zero_grad(set_to_none=True)
             if trace_iteration:
                 progress_event("before_backward", iteration=int(iteration))
-            loss.backward()
+            rgb_geometry_gradient_multiplier = (
+                max(0.0, 1.0 - float(model.gaussian_rgb_residual_multiplier))
+                if config.decoupled_rgb_flow_ownership
+                else 1.0
+            )
+            if config.decoupled_rgb_flow_ownership:
+                backward_decoupled_rgb_flow_losses(
+                    model,
+                    appearance_loss=appearance_loss,
+                    flow_loss=flow_loss,
+                    remaining_loss=remaining_loss,
+                    geometry_rgb_multiplier=rgb_geometry_gradient_multiplier,
+                )
+            else:
+                loss.backward()
             if trace_iteration:
                 progress_event("after_backward", iteration=int(iteration))
             if memory_guard_due:
@@ -7427,6 +7618,19 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "gaussian_rgb_residual_multiplier": float(
                         model.gaussian_rgb_residual_multiplier
                     ),
+                    "loss_ownership": {
+                        "decoupled_rgb_flow": bool(
+                            config.decoupled_rgb_flow_ownership
+                        ),
+                        "flow_prediction_source": (
+                            "base_fur_rgb"
+                            if config.decoupled_rgb_flow_ownership
+                            else "final_rgb"
+                        ),
+                        "rgb_geometry_gradient_multiplier": float(
+                            rgb_geometry_gradient_multiplier
+                        ),
+                    },
                     "guide_frozen": bool(int(config.guide_freeze_until) > 0 and iteration <= int(config.guide_freeze_until)),
                     "shape_detail_frozen": bool(shape_detail_frozen),
                     "secondary_shape_residual_frozen": bool(
@@ -7466,6 +7670,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 eval_dir = output_dir / f"iter_{iteration:06d}"
                 save_image(eval_dir / f"view_{idx:02d}_train_pred.png", pred)
                 save_image(eval_dir / f"view_{idx:02d}_train_pred_fixed_bg.png", pred_fixed)
+                if config.decoupled_rgb_flow_ownership:
+                    save_image(
+                        eval_dir / f"view_{idx:02d}_flow_source_base_fur.png",
+                        flow_pred_fixed,
+                    )
                 save_image(eval_dir / f"view_{idx:02d}_train_alpha.png", alpha)
                 save_image(eval_dir / f"view_{idx:02d}_mesh_depth.png", depth_to_image(mesh_depth.depth))
                 save_image(eval_dir / f"view_{idx:02d}_mesh_valid.png", mesh_depth.valid[..., None].float())
@@ -7807,6 +8016,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
     )
+    parser.add_argument("--decoupled-rgb-flow-ownership", action="store_true")
     parser.add_argument("--lr-root", type=float, default=7.5e-4)
     parser.add_argument("--lr-calibration", type=float, default=5.0e-4)
     parser.add_argument("--rgb-weight", type=float, default=1.0)
@@ -7993,6 +8203,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         gaussian_rgb_residual_initial_multiplier=(
             args.gaussian_rgb_residual_initial_multiplier
         ),
+        decoupled_rgb_flow_ownership=args.decoupled_rgb_flow_ownership,
         lr_root=args.lr_root,
         lr_calibration=args.lr_calibration,
         rgb_weight=args.rgb_weight,

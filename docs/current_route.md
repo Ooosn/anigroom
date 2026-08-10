@@ -71,6 +71,13 @@ R054 it reduces backward strands `375 -> 159`, local relative-length mean
 structural/appearance reference; R055 is the next controlled shape branch. See
 `docs/r055_staged_primary_secondary_shape.md`.
 
+R056 is the active single-mechanism experiment on top of R055. It keeps the
+entire R055 schedule and changes only gradient ownership: RGB-flow sees
+residual-free base-fur RGB and updates explicit shape controls, while Gaussian
+RGB residual takes full-RGB ownership as its existing multiplier rises. R055
+remains accepted until the structural and residual audits finish. See
+`docs/r056_decoupled_rgb_flow_ownership.md`.
+
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
@@ -84,6 +91,8 @@ structural/appearance reference; R055 is the next controlled shape branch. See
   `configs/r050_gaussian_rgb_residual_0_30k.env`
 - latest R055 staged shape research configuration:
   `configs/r055_staged_primary_secondary_shape_0_30k.env`
+- active R056 decoupling experiment:
+  `configs/r056_decoupled_rgb_flow_ownership_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`

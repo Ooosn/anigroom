@@ -14,6 +14,7 @@ from anigroom.roots.lifecycle import RootStructureUpdate
 from tools.train_white_tiger_stage1 import (
     Stage1Config,
     WhiteTigerStage1Model,
+    backward_decoupled_rgb_flow_losses,
     gaussian_rgb_residual_multiplier_for_iteration,
     make_stage1_optimizer,
     optimizer_row_transition,
@@ -176,6 +177,78 @@ def test_gradient_reaches_only_profile_controls_supporting_the_gaussian() -> Non
     nonzero_controls = torch.nonzero(field.raw.grad[0].abs().sum(dim=-1) > 0.0).reshape(-1)
     # Position 0.45 maps to control coordinate 2.25.
     torch.testing.assert_close(nonzero_controls, torch.tensor([2, 3]))
+
+
+def test_render_parameters_preserve_base_colors_for_one_pass_flow_render() -> None:
+    model = make_model()
+    model.gaussian_rgb_residual_multiplier = 1.0
+    with torch.no_grad():
+        model.gaussian_rgb_residual.raw.fill_(0.35)
+    legacy_gaussians, _, _, _ = model.render_parameters(
+        samples=8,
+        child_count=1,
+        min_segments=2,
+        segment_length_origin=0.01,
+        segments_per_unit_length=20.0,
+        segments_per_unit_complexity=4.0,
+        length_overlap=1.2,
+    )
+    gaussians, _, _, _ = model.render_parameters(
+        samples=8,
+        child_count=1,
+        min_segments=2,
+        segment_length_origin=0.01,
+        segments_per_unit_length=20.0,
+        segments_per_unit_complexity=4.0,
+        length_overlap=1.2,
+        include_base_colors=True,
+    )
+
+    assert legacy_gaussians.base_colors is None
+    assert gaussians.base_colors is not None
+    assert gaussians.base_colors.shape == gaussians.colors.shape
+    assert bool((gaussians.colors - gaussians.base_colors).abs().max() > 0.0)
+
+
+def test_decoupled_backward_routes_rgb_and_flow_to_distinct_owners() -> None:
+    model = make_model()
+    appearance = model.gaussian_rgb_residual.raw
+    curl = model.guide_curl_radius_raw
+    stiffness = model.guide_brush_stiffness_raw
+    length = model.guide_length_raw
+
+    appearance_loss = appearance.sum() + curl.sum() + length.sum()
+    flow_loss = 3.0 * appearance.sum() + 5.0 * curl.sum() + 7.0 * stiffness.sum()
+    remaining_loss = 13.0 * length.sum()
+    backward_decoupled_rgb_flow_losses(
+        model,
+        appearance_loss=appearance_loss,
+        flow_loss=flow_loss,
+        remaining_loss=remaining_loss,
+        geometry_rgb_multiplier=0.0,
+    )
+
+    torch.testing.assert_close(appearance.grad, torch.ones_like(appearance))
+    torch.testing.assert_close(curl.grad, torch.full_like(curl, 5.0))
+    torch.testing.assert_close(stiffness.grad, torch.full_like(stiffness, 7.0))
+    torch.testing.assert_close(length.grad, torch.full_like(length, 13.0))
+
+    model.zero_grad(set_to_none=True)
+    appearance_loss = appearance.sum() + curl.sum() + length.sum()
+    flow_loss = 3.0 * appearance.sum() + 5.0 * curl.sum() + 7.0 * stiffness.sum()
+    remaining_loss = 13.0 * length.sum()
+    backward_decoupled_rgb_flow_losses(
+        model,
+        appearance_loss=appearance_loss,
+        flow_loss=flow_loss,
+        remaining_loss=remaining_loss,
+        geometry_rgb_multiplier=0.4,
+    )
+
+    torch.testing.assert_close(appearance.grad, torch.ones_like(appearance))
+    torch.testing.assert_close(curl.grad, torch.full_like(curl, 5.4))
+    torch.testing.assert_close(stiffness.grad, torch.full_like(stiffness, 7.0))
+    torch.testing.assert_close(length.grad, torch.full_like(length, 13.4))
 
 
 def test_chunked_statistics_are_exact() -> None:
