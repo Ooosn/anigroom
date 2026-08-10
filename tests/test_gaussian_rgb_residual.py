@@ -14,6 +14,7 @@ from anigroom.roots.lifecycle import RootStructureUpdate
 from tools.train_white_tiger_stage1 import (
     Stage1Config,
     WhiteTigerStage1Model,
+    backward_rgb_and_flow_without_color_flow_gradients,
     gaussian_rgb_residual_multiplier_for_iteration,
     make_stage1_optimizer,
     optimizer_row_transition,
@@ -176,6 +177,53 @@ def test_gradient_reaches_only_profile_controls_supporting_the_gaussian() -> Non
     nonzero_controls = torch.nonzero(field.raw.grad[0].abs().sum(dim=-1) > 0.0).reshape(-1)
     # Position 0.45 maps to control coordinate 2.25.
     torch.testing.assert_close(nonzero_controls, torch.tensor([2, 3]))
+
+
+def test_rgb_flow_backward_excludes_color_but_preserves_rgb_geometry_gradient() -> None:
+    model = make_model()
+    optimizer = make_stage1_optimizer(model, make_config())
+    geometry = model.guide_direction_local_raw
+    base_color = model.groom.root_color_raw
+    gaussian_residual = model.gaussian_rgb_residual.raw
+    assert geometry is not None
+
+    rendered_geometry = 2.0 * geometry
+    rendered_geometry.retain_grad()
+
+    rgb_loss = (
+        2.0 * rendered_geometry.sum()
+        + 3.0 * base_color.sum()
+        + 5.0 * gaussian_residual.sum()
+    )
+    flow_loss = (
+        7.0 * rendered_geometry.sum()
+        + 11.0 * base_color.sum()
+        + 13.0 * gaussian_residual.sum()
+    )
+
+    optimizer.zero_grad(set_to_none=True)
+    backward_rgb_and_flow_without_color_flow_gradients(
+        model,
+        optimizer,
+        rgb_and_regularization_loss=rgb_loss,
+        flow_loss=flow_loss,
+    )
+
+    torch.testing.assert_close(geometry.grad, torch.full_like(geometry, 18.0))
+    torch.testing.assert_close(
+        rendered_geometry.grad,
+        torch.full_like(rendered_geometry, 9.0),
+    )
+    torch.testing.assert_close(base_color.grad, torch.full_like(base_color, 3.0))
+    torch.testing.assert_close(
+        gaussian_residual.grad,
+        torch.full_like(gaussian_residual, 5.0),
+    )
+
+    optimizer.step()
+    assert float(optimizer.state[geometry]["step"]) == 1.0
+    assert float(optimizer.state[base_color]["step"]) == 1.0
+    assert float(optimizer.state[gaussian_residual]["step"]) == 1.0
 
 
 def test_chunked_statistics_are_exact() -> None:

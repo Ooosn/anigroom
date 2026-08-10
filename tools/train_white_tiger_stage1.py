@@ -1816,6 +1816,7 @@ class Stage1Config:
     rgb_flow_weight: float = 0.0
     rgb_flow_detail_weight: float = 0.0
     rgb_flow_min_confidence: float = 0.08
+    rgb_flow_exclude_color_gradients: bool = False
     loss_mask_edge_kernel: int = 1
     smooth_graph_mode: str = "euclidean_knn"
     smooth_graph_k: int = 8
@@ -5475,6 +5476,89 @@ def zero_render_geometry_residual_gradients(model: WhiteTigerStage1Model) -> Non
             param.grad.zero_()
 
 
+def unique_trainable_parameters(
+    parameters: list[torch.nn.Parameter],
+) -> list[torch.nn.Parameter]:
+    unique: list[torch.nn.Parameter] = []
+    seen: set[int] = set()
+    for parameter in parameters:
+        if parameter is None or not parameter.requires_grad:
+            continue
+        identity = id(parameter)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(parameter)
+    return unique
+
+
+def stage1_color_parameters(
+    model: WhiteTigerStage1Model,
+) -> list[torch.nn.Parameter]:
+    parameters = [model.groom.root_color_raw, model.groom.tip_color_raw]
+    if model.child_color_delta_raw is not None:
+        parameters.append(model.child_color_delta_raw)
+    if model.gaussian_rgb_residual is not None:
+        parameters.append(model.gaussian_rgb_residual.raw)
+    return unique_trainable_parameters(parameters)
+
+
+def optimizer_non_color_parameters(
+    model: WhiteTigerStage1Model,
+    optimizer: torch.optim.Optimizer,
+) -> list[torch.nn.Parameter]:
+    color_ids = {id(parameter) for parameter in stage1_color_parameters(model)}
+    return unique_trainable_parameters(
+        [
+            parameter
+            for group in optimizer.param_groups
+            for parameter in group["params"]
+            if id(parameter) not in color_ids
+        ]
+    )
+
+
+def accumulate_restricted_gradient(
+    loss: torch.Tensor,
+    parameters: list[torch.nn.Parameter],
+    *,
+    retain_graph: bool,
+) -> None:
+    parameters = unique_trainable_parameters(parameters)
+    if not parameters or not loss.requires_grad:
+        return
+    gradients = torch.autograd.grad(
+        loss,
+        parameters,
+        retain_graph=retain_graph,
+        allow_unused=True,
+    )
+    for parameter, gradient in zip(parameters, gradients, strict=True):
+        if gradient is None:
+            continue
+        parameter.grad = gradient if parameter.grad is None else parameter.grad + gradient
+
+
+def backward_rgb_and_flow_without_color_flow_gradients(
+    model: WhiteTigerStage1Model,
+    optimizer: torch.optim.Optimizer,
+    *,
+    rgb_and_regularization_loss: torch.Tensor,
+    flow_loss: torch.Tensor,
+) -> None:
+    """Backpropagate flow only to non-color optimizer parameters."""
+
+    flow_parameters = optimizer_non_color_parameters(model, optimizer)
+    route_flow = bool(flow_parameters) and flow_loss.requires_grad
+    rgb_and_regularization_loss.backward(retain_graph=route_flow)
+    if route_flow:
+        accumulate_restricted_gradient(
+            flow_loss,
+            flow_parameters,
+            retain_graph=False,
+        )
+
+
 def raw_from_range(value: torch.Tensor, bounds: tuple[float, float]) -> torch.Tensor:
     lo, hi = bounds
     rel = (value - lo) / max(hi - lo, EPS)
@@ -7130,6 +7214,21 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
                 + config.root_move_reg_weight * root_move_loss
             )
+            weighted_rgb_flow_loss = (
+                config.rgb_flow_weight * rgb_flow_loss
+                + config.rgb_flow_detail_weight * rgb_flow_detail_loss
+            )
+            rgb_and_regularization_loss = (
+                config.rgb_weight * rgb_loss
+                + config.mask_weight * mask_loss
+                + config.smooth_weight * smooth_loss
+                + config.guide_smooth_weight * guide_smooth_loss
+                + config.effective_smooth_weight * effective_smooth_loss
+                + config.guide_prior_weight * guide_prior_loss
+                + config.clean_flow_guide_anchor_weight * guide_clean_flow_loss
+                + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
+                + config.root_move_reg_weight * root_move_loss
+            )
             if not bool(torch.isfinite(loss).detach().cpu()):
                 raise RuntimeError(
                     "non-finite loss before backward: "
@@ -7151,7 +7250,15 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             optimizer.zero_grad(set_to_none=True)
             if trace_iteration:
                 progress_event("before_backward", iteration=int(iteration))
-            loss.backward()
+            if config.rgb_flow_exclude_color_gradients:
+                backward_rgb_and_flow_without_color_flow_gradients(
+                    model,
+                    optimizer,
+                    rgb_and_regularization_loss=rgb_and_regularization_loss,
+                    flow_loss=weighted_rgb_flow_loss,
+                )
+            else:
+                loss.backward()
             if trace_iteration:
                 progress_event("after_backward", iteration=int(iteration))
             if memory_guard_due:
@@ -7410,6 +7517,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "mask_l1": float(mask_loss.detach().cpu()),
                     "rgb_flow_loss": float(rgb_flow_loss.detach().cpu()),
                     "rgb_flow_detail_loss": float(rgb_flow_detail_loss.detach().cpu()),
+                    "rgb_flow_exclude_color_gradients": bool(
+                        config.rgb_flow_exclude_color_gradients
+                    ),
                     "smooth_loss": float(smooth_loss.detach().cpu()),
                     "geometry_residual_smooth_loss": float(geometry_residual_smooth_loss.detach().cpu()),
                     "guide_smooth_loss": float(guide_smooth_loss.detach().cpu()),
@@ -7815,6 +7925,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rgb-flow-weight", type=float, default=0.0)
     parser.add_argument("--rgb-flow-detail-weight", type=float, default=0.0)
     parser.add_argument("--rgb-flow-min-confidence", type=float, default=0.08)
+    parser.add_argument("--rgb-flow-exclude-color-gradients", action="store_true")
     parser.add_argument("--loss-mask-edge-kernel", type=int, default=1)
     parser.add_argument(
         "--smooth-graph-mode",
@@ -8001,6 +8112,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         rgb_flow_weight=args.rgb_flow_weight,
         rgb_flow_detail_weight=args.rgb_flow_detail_weight,
         rgb_flow_min_confidence=args.rgb_flow_min_confidence,
+        rgb_flow_exclude_color_gradients=args.rgb_flow_exclude_color_gradients,
         loss_mask_edge_kernel=args.loss_mask_edge_kernel,
         smooth_graph_mode=args.smooth_graph_mode,
         smooth_graph_k=args.smooth_graph_k,

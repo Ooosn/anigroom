@@ -84,6 +84,8 @@ structural/appearance reference; R055 is the next controlled shape branch. See
   `configs/r050_gaussian_rgb_residual_0_30k.env`
 - latest R055 staged shape research configuration:
   `configs/r055_staged_primary_secondary_shape_0_30k.env`
+- active R057 gradient-ownership experiment:
+  `configs/r057_rgb_flow_no_color_grad_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`

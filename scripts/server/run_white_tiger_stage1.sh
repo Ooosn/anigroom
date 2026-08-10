@@ -190,6 +190,7 @@ for name in "${required_config[@]}"; do
 done
 
 GAUSSIAN_RGB_RESIDUAL_SUPPORT="${GAUSSIAN_RGB_RESIDUAL_SUPPORT:-0}"
+RGB_FLOW_EXCLUDE_COLOR_GRADIENTS="${RGB_FLOW_EXCLUDE_COLOR_GRADIENTS:-0}"
 if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
   for name in \
     GAUSSIAN_RGB_RESIDUAL_CONTROL_POINTS \
@@ -421,6 +422,9 @@ if [[ "$LOCAL_CHILD_COLOR_SUPPORT" == "1" ]]; then
 fi
 if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
   cmd+=(--gaussian-rgb-residual-support)
+fi
+if [[ "$RGB_FLOW_EXCLUDE_COLOR_GRADIENTS" == "1" ]]; then
+  cmd+=(--rgb-flow-exclude-color-gradients)
 fi
 if [[ -n "${TRAIN_VIEWS:-}" ]]; then
   cmd+=(--train-views "$TRAIN_VIEWS")
