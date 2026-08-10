@@ -188,9 +188,13 @@ postprocess() {
   } 2>&1 | tee "$log_file"
 }
 
-run_stage1 \
-  "$PREFLIGHT_ID" \
-  r056_decoupled_rgb_flow_ownership_fullres_preflight.env
+if [[ ! -e "$OUTPUT_ROOT/$PREFLIGHT_ID" ]]; then
+  run_stage1 \
+    "$PREFLIGHT_ID" \
+    r056_decoupled_rgb_flow_ownership_fullres_preflight.env
+else
+  echo "[r056] verifying existing preflight output: $OUTPUT_ROOT/$PREFLIGHT_ID"
+fi
 verify_active_path_preflight
 touch "$CONTROL_ROOT/preflight_passed"
 echo "[r056] preflight passed; waiting for $CONTROL_ROOT/authorize_run"
