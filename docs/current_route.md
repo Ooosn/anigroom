@@ -62,14 +62,25 @@ R043 remains the independent-root RGB metric control. See
 `docs/r050_gaussian_rgb_residual.md`.
 
 R055 is the latest accepted research checkpoint for optional curl/frizz
-handoff, not the default Stage 1 route. It first ramps smooth primary-guide
-curl/frizz together with Gaussian RGB residual from 20k to 25k, then ramps a
-zero-centered secondary-guide relative residual from 25k to 30k. Compared with
+handoff and the exact parent of R057, not the default Stage 1 route. It first
+ramps smooth primary-guide curl/frizz together with Gaussian RGB residual from
+20k to 25k, then ramps a zero-centered secondary-guide relative residual from
+25k to 30k. Compared with
 R054 it reduces backward strands `375 -> 159`, local relative-length mean
 `0.02417 -> 0.02226`, and local-turn P95 `57.30 -> 50.03 deg`, while losing
 `0.132 dB` on the fixed eight-view mean. R050 therefore remains the strict
 structural/appearance reference; R055 is the next controlled shape branch. See
 `docs/r055_staged_primary_secondary_shape.md`.
+
+R057 is the active staged-shape training branch. It changes no forward render,
+loss source, weight, schedule, interpolation, lifecycle, capacity, or learning
+rate from R055. It only prevents the existing RGB-derived flow backward from
+updating root/tip color, optional child color, and Gaussian RGB residual. The
+formal from-zero run preserves reconstruction (`+0.01589 dB` final test versus
+R055), and the Gaussian residual retains a `+1.64675 dB` mean gain over eight
+fixed views. Its sparse extreme foldback tail is not better, so R057 is a
+gradient-ownership correction rather than a structural solution. See
+`docs/r057_rgb_flow_no_color_grad.md`.
 
 ## Active Entry Points
 
@@ -84,7 +95,7 @@ structural/appearance reference; R055 is the next controlled shape branch. See
   `configs/r050_gaussian_rgb_residual_0_30k.env`
 - latest R055 staged shape research configuration:
   `configs/r055_staged_primary_secondary_shape_0_30k.env`
-- active R057 gradient-ownership experiment:
+- active R057 staged-shape/gradient-ownership baseline:
   `configs/r057_rgb_flow_no_color_grad_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
