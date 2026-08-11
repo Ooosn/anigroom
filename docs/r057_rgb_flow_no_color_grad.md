@@ -123,6 +123,39 @@ coverage regression. R057 is therefore accepted for gradient ownership, while
 the remaining sparse foldback problem stays open and must be addressed by a
 geometry mechanism rather than by reverting flow-to-color gradients.
 
+## Curl/Frizz Ownership Ablation
+
+The final R057 checkpoint was exported three times without retraining. All
+three exports use the same deterministic 100k render-root subset, 32 samples
+per strand, seed 29, brush-stiffness field, lengths, directions, and widths.
+Only the contribution of the primary and secondary curl/frizz fields changes:
+
+| export | primary curl/frizz | secondary residual | backward strands | arc/chord P99 | maximum-turn P99 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| no curl/frizz | 0 | 0 | 0 | 1.01768 | 1.6988 deg |
+| primary only | 1 | 0 | 146 | 1.18094 | 62.6852 deg |
+| primary + secondary | 1 | 1 | 177 | 1.20297 | 68.6494 deg |
+
+All 146 foldbacks present in the primary-only export remain present in the
+full export. The secondary field adds 31 and removes none. Therefore the main
+source of R057's sparse foldback tail is the absolute curl/frizz field owned by
+the primary guides; the zero-centered secondary residual modestly amplifies
+that tail. This is not caused by brush stiffness, which is unchanged across
+the three exports, and R057 has no separate legacy bend parameter.
+
+The effect is sparse enough that the matched full-animal Blender renders are
+almost indistinguishable. The result does not justify removing curl/frizz from
+the representation: genuinely curly fur still needs these degrees of freedom.
+It does establish that a later structural fix must prevent unsupported sparse
+activation in the primary field before constraining the secondary residual.
+
+Local artifacts:
+
+- audit:
+  `D:/RTS/_tmp/r057_h100_postprocess_20260811/postprocess/r057_rgb_flow_no_color_grad/shape_ablation/strand_audit.json`
+- matched Blender assets:
+  `D:/RTS/_tmp/r057_h100_postprocess_20260811/postprocess/r057_rgb_flow_no_color_grad/shape_ablation/assets`
+
 ## Decision
 
 R057 replaces R055 as the active staged-shape training branch because its
