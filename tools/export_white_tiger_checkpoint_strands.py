@@ -31,6 +31,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-strands", type=int, default=0, help="0 exports all strands; positive value exports a deterministic subset.")
     parser.add_argument("--seed", type=int, default=29)
     parser.add_argument("--uniform-color", nargs=3, type=float, default=[0.82, 0.80, 0.72])
+    parser.add_argument(
+        "--shape-detail-multiplier",
+        type=float,
+        default=None,
+        help="Override the checkpoint curl/frizz multiplier for diagnostic export.",
+    )
+    parser.add_argument(
+        "--secondary-shape-residual-multiplier",
+        type=float,
+        default=None,
+        help="Override only the secondary curl/frizz residual multiplier.",
+    )
     return parser.parse_args()
 
 
@@ -45,6 +57,12 @@ def main() -> None:
     checkpoint = load_training_checkpoint(checkpoint_path)
     config = stage1_config_from_checkpoint_mapping(checkpoint["config"])
     model = build_stage1_model_from_checkpoint(checkpoint, config, device)
+    if args.shape_detail_multiplier is not None:
+        model.shape_detail_multiplier = float(args.shape_detail_multiplier)
+    if args.secondary_shape_residual_multiplier is not None:
+        model.secondary_shape_residual_multiplier = float(
+            args.secondary_shape_residual_multiplier
+        )
 
     with torch.no_grad():
         roots, normals, roots_local = model.roots_and_normals()
@@ -100,6 +118,9 @@ def main() -> None:
         "iteration": int(checkpoint.get("iteration", -1)),
         "guide_residual_multiplier": float(model.guide_residual_multiplier),
         "shape_detail_multiplier": float(model.shape_detail_multiplier),
+        "secondary_shape_residual_multiplier": float(
+            model.secondary_shape_residual_multiplier
+        ),
         "root_count": int(model.face_ids.shape[0]),
         "guide_root_count": int(model.guide_face_ids.shape[0]),
         "child_count": child_count,
