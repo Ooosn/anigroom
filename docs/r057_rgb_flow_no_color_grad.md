@@ -155,6 +155,19 @@ Local artifacts:
   `D:/RTS/_tmp/r057_h100_postprocess_20260811/postprocess/r057_rgb_flow_no_color_grad/shape_ablation/strand_audit.json`
 - matched Blender assets:
   `D:/RTS/_tmp/r057_h100_postprocess_20260811/postprocess/r057_rgb_flow_no_color_grad/shape_ablation/assets`
+- foldback-highlight Blender assets:
+  `D:/RTS/_tmp/r057_h100_postprocess_20260811/postprocess/r057_rgb_flow_no_color_grad/shape_ablation/foldback_highlights`
+
+The highlight render marks all 177 strict chord-reversing strands in red and
+uses four-times display width only to make them visible. The underlying strand
+geometry and 100k subset are unchanged. The three canonical views locate the
+main clusters around the head and ear/neck transition, with a second cluster
+near the hip/back transition and sparse points on the forepaws and back line.
+Most of the torso, abdomen, legs, and tail contain no detected foldbacks.
+
+With highlighting disabled, the extended visualizer reproduces the previous
+side-y-positive asset exactly (`max_abs = 0`, `changed_values = 0`). The new
+diagnostic path therefore does not change the canonical visualization output.
 
 ## Decision
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from pathlib import Path
 
@@ -32,6 +31,13 @@ def parse_args() -> argparse.Namespace:
         help="Maximum strands per Blender Curve object. Chunking avoids Blender 2.82 curve array limits.",
     )
     parser.add_argument("--material-color", nargs=3, type=float, default=[0.82, 0.80, 0.72])
+    parser.add_argument(
+        "--highlight-backward-strands",
+        action="store_true",
+        help="Highlight strands containing a segment that points against the strand chord.",
+    )
+    parser.add_argument("--highlight-color", nargs=3, type=float, default=[1.0, 0.0, 0.08])
+    parser.add_argument("--highlight-width-scale", type=float, default=4.0)
     parser.add_argument("--mesh-color", nargs=3, type=float, default=[0.52, 0.55, 0.60])
     parser.add_argument("--background-color", nargs=3, type=float, default=[0.18, 0.18, 0.18])
     parser.add_argument(
@@ -81,6 +87,69 @@ def map_coordinates(strands: np.ndarray, coord_system: str) -> np.ndarray:
         # body length. Blender is Z-up, so remap to length/depth/up.
         return strands[..., [2, 0, 1]]
     raise ValueError(f"Unsupported coord system: {coord_system}")
+
+
+def backward_strand_mask(strands: np.ndarray) -> np.ndarray:
+    segments = np.diff(strands, axis=1)
+    chord = strands[:, -1] - strands[:, 0]
+    chord_unit = chord / np.maximum(
+        np.linalg.norm(chord, axis=-1, keepdims=True), 1.0e-12
+    )
+    projection = np.einsum("nsd,nd->ns", segments, chord_unit)
+    return np.any(projection < -1.0e-10, axis=1)
+
+
+def add_strand_curve_objects(
+    *,
+    strands: np.ndarray,
+    widths: np.ndarray,
+    material,
+    base_width: float,
+    width_scale: float,
+    radius_multiplier: float,
+    chunk_size: int,
+    name_prefix: str,
+) -> int:
+    import bpy
+
+    object_count = 0
+    for chunk_start in range(0, int(strands.shape[0]), chunk_size):
+        chunk_end = min(chunk_start + chunk_size, int(strands.shape[0]))
+        curve = bpy.data.curves.new(
+            f"{name_prefix}_curves_{chunk_start:07d}", "CURVE"
+        )
+        curve.dimensions = "3D"
+        curve.resolution_u = 2
+        curve.bevel_resolution = 2
+        curve.bevel_depth = base_width
+        curve.use_path = False
+        obj = bpy.data.objects.new(f"{name_prefix}_{chunk_start:07d}", curve)
+        obj.data.materials.append(material)
+        bpy.context.collection.objects.link(obj)
+
+        for strand, width in zip(
+            strands[chunk_start:chunk_end], widths[chunk_start:chunk_end]
+        ):
+            spl = curve.splines.new("POLY")
+            spl.points.add(strand.shape[0] - 1)
+            radius = np.clip(
+                width.reshape(-1)
+                * width_scale
+                * radius_multiplier
+                / base_width,
+                0.05,
+                3.0 * radius_multiplier,
+            )
+            for point, co, rad in zip(spl.points, strand, radius):
+                point.co = (
+                    float(co[0]),
+                    float(co[1]),
+                    float(co[2]),
+                    1.0,
+                )
+                point.radius = float(rad)
+        object_count += 1
+    return object_count
 
 
 def read_obj_mesh(path: Path) -> tuple[np.ndarray, list[list[int]]]:
@@ -138,6 +207,11 @@ def main() -> None:
     if strands.ndim != 3 or strands.shape[-1] != 3:
         raise RuntimeError(f"strands must be [N,S,3], got {strands.shape}")
     strands = map_coordinates(strands, args.coord_system)
+    highlight_mask = (
+        backward_strand_mask(strands)
+        if bool(args.highlight_backward_strands)
+        else np.zeros(strands.shape[0], dtype=bool)
+    )
 
     import bpy
 
@@ -174,6 +248,15 @@ def main() -> None:
         if "Alpha" in bsdf.inputs:
             bsdf.inputs["Alpha"].default_value = 1.0
 
+    highlight_mat = bpy.data.materials.new("highlighted_fur_material")
+    highlight_mat.use_nodes = True
+    highlight_nodes = highlight_mat.node_tree.nodes
+    highlight_bsdf = highlight_nodes.get("Principled BSDF")
+    if highlight_bsdf is not None:
+        highlight_color = tuple(float(v) for v in args.highlight_color) + (1.0,)
+        highlight_bsdf.inputs["Base Color"].default_value = highlight_color
+        highlight_bsdf.inputs["Roughness"].default_value = 0.48
+
     mesh_mat = bpy.data.materials.new("furless_body_material")
     mesh_mat.use_nodes = True
     mesh_nodes = mesh_mat.node_tree.nodes
@@ -185,25 +268,28 @@ def main() -> None:
 
     base_width = max(float(np.percentile(widths, 60)) * float(args.width_scale), 1.0e-5)
     chunk_size = max(int(args.curve_chunk_size), 1)
-    for chunk_start in range(0, int(strands.shape[0]), chunk_size):
-        chunk_end = min(chunk_start + chunk_size, int(strands.shape[0]))
-        curve = bpy.data.curves.new(f"white_tiger_pure_fur_curves_{chunk_start:07d}", "CURVE")
-        curve.dimensions = "3D"
-        curve.resolution_u = 2
-        curve.bevel_resolution = 2
-        curve.bevel_depth = base_width
-        curve.use_path = False
-        obj = bpy.data.objects.new(f"white_tiger_pure_fur_{chunk_start:07d}", curve)
-        obj.data.materials.append(mat)
-        bpy.context.collection.objects.link(obj)
-
-        for strand, width in zip(strands[chunk_start:chunk_end], widths[chunk_start:chunk_end]):
-            spl = curve.splines.new("POLY")
-            spl.points.add(strand.shape[0] - 1)
-            radius = np.clip(width.reshape(-1) * float(args.width_scale) / base_width, 0.05, 3.0)
-            for point, co, rad in zip(spl.points, strand, radius):
-                point.co = (float(co[0]), float(co[1]), float(co[2]), 1.0)
-                point.radius = float(rad)
+    normal_mask = ~highlight_mask
+    curve_object_count = add_strand_curve_objects(
+        strands=strands[normal_mask],
+        widths=widths[normal_mask],
+        material=mat,
+        base_width=base_width,
+        width_scale=float(args.width_scale),
+        radius_multiplier=1.0,
+        chunk_size=chunk_size,
+        name_prefix="white_tiger_pure_fur",
+    )
+    if np.any(highlight_mask):
+        curve_object_count += add_strand_curve_objects(
+            strands=strands[highlight_mask],
+            widths=widths[highlight_mask],
+            material=highlight_mat,
+            base_width=base_width,
+            width_scale=float(args.width_scale),
+            radius_multiplier=float(args.highlight_width_scale),
+            chunk_size=chunk_size,
+            name_prefix="highlighted_backward_fur",
+        )
 
     bbox_min = strands.reshape(-1, 3).min(axis=0)
     bbox_max = strands.reshape(-1, 3).max(axis=0)
@@ -263,9 +349,12 @@ def main() -> None:
         "output": str(output_path),
         "strand_count": int(strands.shape[0]),
         "samples_per_strand": int(strands.shape[1]),
+        "highlight_backward_strands": bool(args.highlight_backward_strands),
+        "highlighted_strand_count": int(highlight_mask.sum()),
+        "highlight_width_scale": float(args.highlight_width_scale),
         "base_width": base_width,
         "curve_chunk_size": chunk_size,
-        "curve_object_count": int(math.ceil(int(strands.shape[0]) / chunk_size)),
+        "curve_object_count": int(curve_object_count),
         "camera": args.camera,
         "target_offset": [float(v) for v in args.target_offset],
         "coord_system": args.coord_system,
