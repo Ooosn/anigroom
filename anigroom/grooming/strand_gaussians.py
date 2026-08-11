@@ -84,7 +84,7 @@ class GroomRanges:
     """Physical ranges that remain intrinsic to bounded groom controls."""
 
     curl_radius: tuple[float, float] = (0.0, 0.030)
-    curl_frequency: tuple[float, float] = (0.0, 8.0)
+    curl_turns: tuple[float, float] = (0.0, 8.0)
     frizz: tuple[float, float] = (0.0, 0.018)
     clump_strength: tuple[float, float] = (0.0, 1.0)
 
@@ -107,10 +107,10 @@ class DecodedGroom:
     direction_local: torch.Tensor
     brush_stiffness: torch.Tensor
     curl_radius: torch.Tensor
-    curl_frequency: torch.Tensor
+    curl_turns: torch.Tensor
     curl_phase: torch.Tensor
     frizz: torch.Tensor
-    frizz_phase: torch.Tensor
+    frizz_seed_phase: torch.Tensor
     child_radius: torch.Tensor
     clump_strength: torch.Tensor
     root_color: torch.Tensor
@@ -203,15 +203,17 @@ class GroomParameterField(nn.Module):
             torch.tensor([[0.55, 0.04, 0.22]], dtype=torch.float32, device=dev).repeat(self.root_count, 1)
         )
         self.brush_stiffness_raw = repeated(0.0)
-        self.curl_radius_raw = repeated(raw_from_range(0.001, self.ranges.curl_radius))
-        self.curl_frequency_raw = repeated(raw_from_range(0.35, self.ranges.curl_frequency))
+        self.curl_radius_raw = repeated(
+            raw_from_range(self.ranges.curl_radius[0], self.ranges.curl_radius)
+        )
+        self.curl_turns_raw = repeated(raw_from_range(1.20, self.ranges.curl_turns))
         self.curl_phase = nn.Parameter(torch.zeros((self.root_count, 1), dtype=torch.float32, device=dev))
-        self.frizz_raw = repeated(raw_from_range(0.001, self.ranges.frizz))
+        self.frizz_raw = repeated(raw_from_range(self.ranges.frizz[0], self.ranges.frizz))
         frizz_seed = torch.frac(
             torch.arange(self.root_count, dtype=torch.float32, device=dev).view(-1, 1)
             * 0.6180339887498949
         ) * (2.0 * torch.pi)
-        self.register_buffer("frizz_phase", frizz_seed)
+        self.register_buffer("frizz_seed_phase", frizz_seed)
         self.register_buffer(
             "child_radius_reference",
             torch.full(
@@ -251,10 +253,10 @@ class GroomParameterField(nn.Module):
             direction_local=_normalize(self.direction_local_raw),
             brush_stiffness=torch.sigmoid(self.brush_stiffness_raw),
             curl_radius=self._decode_range(self.curl_radius_raw, ranges.curl_radius),
-            curl_frequency=self._decode_range(self.curl_frequency_raw, ranges.curl_frequency),
+            curl_turns=self._decode_range(self.curl_turns_raw, ranges.curl_turns),
             curl_phase=self.curl_phase,
             frizz=self._decode_range(self.frizz_raw, ranges.frizz),
-            frizz_phase=self.frizz_phase,
+            frizz_seed_phase=self.frizz_seed_phase,
             child_radius=decode_positive_asinh_ratio(
                 self.child_radius_raw,
                 self.child_radius_reference,
@@ -355,7 +357,6 @@ def build_strands(
     bitangents: torch.Tensor,
     groom: DecodedGroom,
     samples: int,
-    shape_normal_mode: str = "full",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate differentiable strand samples from mesh roots and groom controls.
 
@@ -379,8 +380,6 @@ def build_strands(
         + direction_local[:, [1]] * bitangents
         + direction_local[:, [2]] * normals
     )
-    if shape_normal_mode not in {"full", "outward", "tangent"}:
-        raise ValueError(f"unknown shape_normal_mode: {shape_normal_mode}")
     t = torch.linspace(0.0, 1.0, samples, device=roots.device, dtype=roots.dtype).view(1, samples, 1)
     points = build_brush_centerline(
         roots,
@@ -396,11 +395,10 @@ def build_strands(
         groom_direction,
         tangents,
         curl_radius=groom.curl_radius,
-        curl_turns=groom.curl_frequency,
+        curl_turns=groom.curl_turns,
         curl_phase=groom.curl_phase,
         frizz_amplitude=groom.frizz,
-        frizz_seed_phase=groom.frizz_phase,
-        shape_normal_mode=shape_normal_mode,
+        frizz_seed_phase=groom.frizz_seed_phase,
     )
 
     taper_t = t.clamp(0.0, 1.0).pow(groom.width_taper[:, None])

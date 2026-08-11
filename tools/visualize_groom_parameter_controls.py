@@ -31,6 +31,16 @@ def logit(values: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     return torch.log(values / (1.0 - values))
 
 
+def encode_range(
+    value: float,
+    bounds: tuple[float, float],
+    device: torch.device,
+) -> torch.Tensor:
+    lo, hi = bounds
+    relative = torch.tensor((float(value) - lo) / (hi - lo), device=device)
+    return logit(relative)
+
+
 def load_font(size: int) -> ImageFont.ImageFont:
     for path in [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\segoeui.ttf"]:
         if Path(path).exists():
@@ -83,15 +93,19 @@ def field_with_pattern(name: str, root_count: int, roots: torch.Tensor, device: 
             field.opacity_raw.add_(0.5)
         elif name == "curl":
             field.length_raw.add_(1.20)
-            field.curl_radius_raw.add_(4.0)
-            field.curl_frequency_raw.add_(2.6)
+            field.curl_radius_raw.fill_(
+                encode_range(0.024, ranges.curl_radius, device)
+            )
+            field.curl_turns_raw.fill_(
+                encode_range(3.05, ranges.curl_turns, device)
+            )
             field.curl_phase.copy_(phase)
             field.root_width_raw.add_(0.8)
             field.tip_width_ratio_raw.add_(0.1)
         elif name == "frizz":
             field.length_raw.add_(0.85)
-            field.frizz_raw.add_(4.3)
-            field.frizz_phase.copy_(1.7 * phase)
+            field.frizz_raw.fill_(encode_range(0.0159, ranges.frizz, device))
+            field.frizz_seed_phase.copy_(1.7 * phase)
         elif name == "root_tip_color_alpha":
             root_color = torch.tensor([0.09, 0.07, 0.045], device=device).view(1, 3)
             tip_color = torch.tensor([1.00, 0.86, 0.45], device=device).view(1, 3)
@@ -170,7 +184,7 @@ def render_field(
         "tip_width_mean": float(groom.tip_width.mean().detach().cpu()),
         "length_mean": float(groom.length.mean().detach().cpu()),
         "curl_radius_mean": float(groom.curl_radius.mean().detach().cpu()),
-        "curl_frequency_mean": float(groom.curl_frequency.mean().detach().cpu()),
+        "curl_turns_mean": float(groom.curl_turns.mean().detach().cpu()),
         "frizz_mean": float(groom.frizz.mean().detach().cpu()),
     }
     return render[0].clamp(0.0, 1.0), alpha[0].clamp(0.0, 1.0), stats
@@ -416,7 +430,7 @@ def gradient_report(
         "direction_local_raw",
         "brush_stiffness_raw",
         "curl_radius_raw",
-        "curl_frequency_raw",
+        "curl_turns_raw",
         "curl_phase",
         "frizz_raw",
         "root_color_raw",
@@ -519,10 +533,10 @@ def export_advanced_geometry_sweeps(output_dir: Path, *, samples: int) -> dict[s
             direction_local=direction_local,
             brush_stiffness=torch.full((root_count, 1), 0.65, device=device, dtype=dtype),
             curl_radius=curl_radius,
-            curl_frequency=curl_turns,
+            curl_turns=curl_turns,
             curl_phase=phase,
             frizz=frizz,
-            frizz_phase=phase + 0.91,
+            frizz_seed_phase=phase + 0.91,
             root_color=torch.full((root_count, 3), 0.22, device=device, dtype=dtype),
             tip_color=torch.full((root_count, 3), 0.42, device=device, dtype=dtype),
             root_opacity=torch.ones((root_count, 1), device=device, dtype=dtype),

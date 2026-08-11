@@ -128,21 +128,8 @@ def _shape_offset(
     outward_coefficient: torch.Tensor,
     side: torch.Tensor,
     outward: torch.Tensor,
-    *,
-    shape_normal_mode: str,
 ) -> torch.Tensor:
-    if shape_normal_mode == "outward":
-        # Squared half-wave rectification is C1 at zero. A plain ReLU creates a
-        # visible tangent kink whenever a curl crosses the surface plane.
-        outward_coefficient = torch.relu(outward_coefficient).square()
-    elif shape_normal_mode == "tangent":
-        outward_coefficient = torch.zeros_like(outward_coefficient)
-    elif shape_normal_mode != "full":
-        raise ValueError(f"unknown shape_normal_mode: {shape_normal_mode}")
-    return (
-        side_coefficient * side
-        + outward_coefficient * outward
-    )
+    return side_coefficient * side + outward_coefficient * outward
 
 
 def _curl_offset(
@@ -154,7 +141,6 @@ def _curl_offset(
     turns: torch.Tensor,
     phase: torch.Tensor,
     *,
-    shape_normal_mode: str,
     local_frames: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     t: torch.Tensor | None = None,
     envelope: torch.Tensor | None = None,
@@ -190,7 +176,6 @@ def _curl_offset(
         torch.cos(angle) - initial_outward,
         side,
         outward,
-        shape_normal_mode=shape_normal_mode,
     )
     return radius[:, None] * envelope * unit_offset
 
@@ -203,8 +188,6 @@ def curl_backbone(
     radius: torch.Tensor,
     turns: torch.Tensor,
     phase: torch.Tensor,
-    *,
-    shape_normal_mode: str = "full",
 ) -> torch.Tensor:
     """Add a root-pinned curl around a strand backbone.
 
@@ -225,7 +208,6 @@ def curl_backbone(
         radius,
         turns,
         phase,
-        shape_normal_mode=shape_normal_mode,
     )
 
 
@@ -297,7 +279,6 @@ def _frizz_offset(
     amplitude: torch.Tensor,
     seed_phase: torch.Tensor,
     *,
-    shape_normal_mode: str,
     local_frames: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     t: torch.Tensor | None = None,
     envelope: torch.Tensor | None = None,
@@ -341,7 +322,6 @@ def _frizz_offset(
         outward_noise,
         side,
         outward,
-        shape_normal_mode=shape_normal_mode,
     )
     return amplitude[:, None] * envelope * unit_offset
 
@@ -353,8 +333,6 @@ def frizz_backbone(
     tangents: torch.Tensor,
     amplitude: torch.Tensor,
     seed_phase: torch.Tensor,
-    *,
-    shape_normal_mode: str = "full",
 ) -> torch.Tensor:
     """Add root-pinned, band-limited frizz around a backbone.
 
@@ -372,7 +350,6 @@ def frizz_backbone(
         tangents,
         amplitude,
         seed_phase,
-        shape_normal_mode=shape_normal_mode,
     )
 
 
@@ -386,8 +363,6 @@ def deform_backbone(
     curl_phase: torch.Tensor,
     frizz_amplitude: torch.Tensor,
     frizz_seed_phase: torch.Tensor,
-    *,
-    shape_normal_mode: str = "full",
 ) -> torch.Tensor:
     """Compose independent curl and frizz offsets around one base backbone.
 
@@ -419,7 +394,6 @@ def deform_backbone(
         curl_radius,
         curl_turns,
         curl_phase,
-        shape_normal_mode=shape_normal_mode,
         local_frames=local_frames,
         t=t,
         envelope=envelope,
@@ -431,7 +405,6 @@ def deform_backbone(
         tangents,
         frizz_amplitude,
         frizz_seed_phase,
-        shape_normal_mode=shape_normal_mode,
         local_frames=local_frames,
         t=t,
         envelope=envelope,

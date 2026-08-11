@@ -154,7 +154,6 @@ required_config=(
   MESH_DEPTH_REL_TOLERANCE
   MESH_DEPTH_LOCAL_KERNEL
   MESH_BACKING_COMPOSITING
-  STRAND_SHAPE_NORMAL_MODE
   DENSIFY_WARMUP
   DENSIFY_INTERVAL
   DENSIFY_UNTIL
@@ -358,7 +357,6 @@ cmd=(
   --mesh-depth-abs-tolerance "$MESH_DEPTH_ABS_TOLERANCE"
   --mesh-depth-rel-tolerance "$MESH_DEPTH_REL_TOLERANCE"
   --mesh-depth-local-kernel "$MESH_DEPTH_LOCAL_KERNEL"
-  --strand-shape-normal-mode "$STRAND_SHAPE_NORMAL_MODE"
   --gpu-memory-limit-gb "${GPU_MEMORY_LIMIT_GB:-0}"
   --gpu-memory-check-interval "${GPU_MEMORY_CHECK_INTERVAL:-20}"
   --densify-warmup "$DENSIFY_WARMUP"

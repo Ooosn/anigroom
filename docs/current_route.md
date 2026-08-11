@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-08-10.
+Status date: 2026-08-11.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -121,7 +121,7 @@ The active explicit groom fields are:
 - root and tip width plus taper
 - normalized local 3D direction
 - guide-owned brush stiffness
-- curl radius, frequency, and phase
+- curl radius, turns, and phase
 - frizz
 - child radius and clump strength
 - root and tip color
@@ -131,10 +131,13 @@ Brush stiffness controls one quadratic normal-to-groom transition while
 preserving the root, tip, straight length, and 3D endpoint direction. The
 effective value is brush stiffness multiplied by the continuous tangential
 difference between the normal and endpoint direction. There is no second
-interior deformation field. Curl and frizz remain separate optional shape
-controls but stay disabled in R043. The active route has one strand per render
-root (`child_count=1`); density comes from independent render roots and their
-finite lifecycle, not deterministic child expansion.
+interior deformation field. R058 directly replaces the optional curl/frizz
+forward geometry with one local-3D-frame implementation: physical curl radius
+and turns plus independent band-limited frizz. No legacy formula, normal-mode
+switch, or checkpoint alias remains. Curl and frizz stay disabled in the R043
+training control. The active route has one strand per render root
+(`child_count=1`); density comes from independent render roots and their finite
+lifecycle, not deterministic child expansion.
 
 Render-root geometry is a zero-centered residual around the interpolated guide
 field. Direction residuals are local 3D vectors. Length uses the positive,

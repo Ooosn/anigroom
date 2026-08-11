@@ -75,7 +75,6 @@ def main() -> None:
             bitangents,
             groom,
             samples=int(args.samples),
-            shape_normal_mode=getattr(config, "strand_shape_normal_mode", "full"),
         )
         child_count = int(config.child_count if args.child_count < 0 else args.child_count)
         strands, widths, colors, opacities, root_ids = expand_child_strands(

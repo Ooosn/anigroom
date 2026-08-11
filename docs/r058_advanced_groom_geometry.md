@@ -2,9 +2,9 @@
 
 Status date: 2026-08-11.
 
-Status: geometry-only candidate. R057 remains the accepted staged-shape
-training branch. No Stage 1 training, checkpoint continuation, schedule change,
-or baseline replacement is part of R058.
+Status: accepted strand-geometry implementation. R057 remains the last trained
+staged-shape checkpoint, but its retired geometry schema is not executable in
+the R058 source. No Stage 1 training or schedule change is part of R058.
 
 ## Scope
 
@@ -124,8 +124,13 @@ This makes curl and frizz additive and order-independent. Frizz does not ride
 on a separately twisted curl frame, and changing curl controls cannot silently
 change the frizz realization.
 
-`full`, `outward`, and `tangent` normal modes remain explicit geometry choices.
-They are not selected by an animal-specific threshold in this candidate.
+There is one geometry path: both transverse axes are retained. R058 has no
+outward-only, tangent-only, legacy, or fallback deformation mode.
+
+The generic groom field initializes curl radius and frizz amplitude at their
+neutral lower bounds. Advanced geometry therefore changes no strand until its
+controls are explicitly enabled; the visualizer sets physical test values
+directly instead of relying on hidden nonzero defaults.
 
 ## Sampling And Differentiability
 
@@ -142,14 +147,14 @@ migrated through root lifecycle updates, but cannot enter an optimizer.
 
 ## Verification
 
-The local test suite passes with `131 passed` and covers:
+The local test suite passes with `132 passed` and covers:
 
 - orthonormal and no-twist frames;
 - exact root and root-tangent preservation;
 - zero-control and zero-turn identity;
 - transverse offsets;
 - curl/frizz independence and additive composition;
-- outward-only displacement mode;
+- signed displacement on both transverse axes;
 - no axial foldback for moderate controls;
 - finite real coils for deliberately extreme controls;
 - physical scale equivariance;
@@ -180,6 +185,11 @@ All intended trainable controls in that render path receive finite nonzero
 gradients. The visualizer uses the existing canonical rendering path; R058 did
 not add a second fake or private renderer.
 
+After removing the retired schema and mode switch, all five canonical NPZ
+exports were compared against the accepted R058 geometry output. Every strand,
+width, color, opacity, and root-id array had maximum absolute difference
+`0.0`.
+
 ## Implementation
 
 - advanced deformation: `anigroom/grooming/strand_deformations.py`
@@ -190,20 +200,20 @@ not add a second fake or private renderer.
   `tools/train_white_tiger_stage1.py`
 - tests: `tests/test_strand_deformations.py`
 
-The only change in the training entry is schema-consistent lifecycle migration
-for the fixed seed. No optimizer, loss, schedule, configuration, or training
-behavior was otherwise changed or executed.
+The training entry uses the same physical names and propagates the fixed seed
+through root lifecycle updates. The retired geometry mode is absent from the
+model, CLI, launcher, and configs. No optimizer, loss, or schedule was changed,
+and no training was executed.
 
 ## Checkpoint Boundary
 
-R058 adds persistent `frizz_phase` state. Existing R057 checkpoints do not have
-that key and must not be loaded with a silent non-strict fallback. Before a
-future R058 training experiment, an explicit one-time migration must derive
-and record deterministic seeds for existing render roots, then strict loading
-must be restored.
+R058 renames the physical curl coordinate to `curl_turns` and adds persistent
+`frizz_seed_phase` state. Existing R057 checkpoints use a different schema and
+must fail strict loading. There is no alias, key conversion, non-strict load,
+or one-time checkpoint migration; the first R058 training experiment starts
+from zero.
 
 R058 also does not accept or revise the existing curl/frizz decoder ranges,
 ownership hierarchy, regularization, or unlock schedule. Those are training
-questions and require separate controlled experiments after this geometry
-candidate is accepted. Until then, `docs/current_route.md` and R057 remain
-unchanged.
+questions and require separate controlled experiments. R057 remains historical
+training evidence, not a runtime compatibility path.

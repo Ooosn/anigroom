@@ -41,12 +41,18 @@ def chord_progress(points: torch.Tensor, direction: torch.Tensor) -> torch.Tenso
 
 def test_frizz_seed_is_persistent_state_but_not_a_trainable_parameter() -> None:
     field = GroomParameterField(7)
-    assert "frizz_phase" in dict(field.named_buffers())
-    assert "frizz_phase" not in dict(field.named_parameters())
+    assert "frizz_seed_phase" in dict(field.named_buffers())
+    assert "frizz_seed_phase" not in dict(field.named_parameters())
 
     clone = GroomParameterField(7)
     clone.load_state_dict(field.state_dict(), strict=True)
-    torch.testing.assert_close(clone.frizz_phase, field.frizz_phase)
+    torch.testing.assert_close(clone.frizz_seed_phase, field.frizz_seed_phase)
+
+
+def test_default_advanced_geometry_is_neutral() -> None:
+    groom = GroomParameterField(7).decode()
+    assert float(groom.curl_radius.max()) < 5.0e-8
+    assert float(groom.frizz.max()) < 5.0e-8
 
 
 def test_transverse_frame_is_orthonormal_when_direction_matches_normal() -> None:
@@ -231,9 +237,9 @@ def test_curl_and_frizz_are_additive_and_parameter_independent() -> None:
     torch.testing.assert_close(frizz_a, frizz_b, atol=0.0, rtol=0.0)
 
 
-def test_outward_mode_never_adds_inward_local_displacement() -> None:
+def test_curl_uses_both_transverse_axes() -> None:
     backbone, normals, directions, tangents = canonical_backbone()
-    _, _, outward = backbone_transverse_frames(
+    _, side, outward = backbone_transverse_frames(
         backbone,
         normals,
         directions,
@@ -247,12 +253,16 @@ def test_outward_mode_never_adds_inward_local_displacement() -> None:
         curl_radius=torch.tensor([[0.01]], dtype=torch.float64),
         curl_turns=torch.tensor([[2.5]], dtype=torch.float64),
         curl_phase=torch.tensor([[0.3]], dtype=torch.float64),
-        frizz_amplitude=torch.tensor([[0.006]], dtype=torch.float64),
+        frizz_amplitude=torch.zeros((1, 1), dtype=torch.float64),
         frizz_seed_phase=torch.tensor([[1.1]], dtype=torch.float64),
-        shape_normal_mode="outward",
     )
-    outward_displacement = ((shaped - backbone) * outward).sum(dim=-1)
-    assert bool((outward_displacement >= -1.0e-12).all())
+    displacement = shaped - backbone
+    side_displacement = (displacement * side).sum(dim=-1)
+    outward_displacement = (displacement * outward).sum(dim=-1)
+    assert float(side_displacement.abs().max()) > 0.0
+    assert float(outward_displacement.abs().max()) > 0.0
+    assert float(outward_displacement.min()) < 0.0
+    assert float(outward_displacement.max()) > 0.0
 
 
 def test_moderate_detail_does_not_create_axial_foldback() -> None:

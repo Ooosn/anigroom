@@ -16,9 +16,11 @@ K32 render support. Guide support remains K8.
 ## Strand-To-Gaussian Representation
 
 - Code: `anigroom/grooming/strand_gaussians.py`.
-- Geometry-only R058 candidate: optional curl/frizz deformation is isolated in
+- The R058 geometry implementation directly replaces the retired curl/frizz
+  formula and is isolated in
   `anigroom/grooming/strand_deformations.py` and documented in
-  `docs/r058_advanced_groom_geometry.md`. It is not an accepted training route.
+  `docs/r058_advanced_groom_geometry.md`. R057 remains the last trained shape
+  checkpoint, but there is no R057 geometry compatibility path in source.
 - It owns explicit groom decoding, strand construction, adaptive segment
   counts, and strand-to-Gaussian conversion.
 - R043 constructs one guide-owned quadratic normal-to-groom curve and allocates
