@@ -3570,6 +3570,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         ranges = self.groom.ranges
         device = self.vertices.device
         old_params = {name: param.detach() for name, param in self.groom.named_parameters()}
+        old_frizz_phase = self.groom.frizz_phase.detach()
         old_geometry_residual = (
             {name: param.detach() for name, param in self.render_geometry_residual.named_parameters()}
             if self.render_geometry_residual is not None
@@ -3687,6 +3688,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
             if child_count
             else self.groom.curl_phase.new_empty((0, 1))
         )
+        child_frizz_phase = (
+            interpolate_periodic(old_frizz_phase, child_ids, child_weights)
+            if child_count
+            else old_frizz_phase.new_empty((0, 1))
+        )
         if child_count:
             source_direction = groom_direction_3d(
                 decoded,
@@ -3803,6 +3809,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
             update,
             child_child_radius_reference,
         )
+        new_frizz_phase = apply_attribute_update(
+            old_frizz_phase,
+            update,
+            child_frizz_phase,
+        )
         new_groom = GroomParameterField(
             new_count,
             ranges=ranges,
@@ -3826,6 +3837,12 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 new_child_radius_reference.to(
                     device=device,
                     dtype=new_groom.child_radius_reference.dtype,
+                )
+            )
+            new_groom.frizz_phase.copy_(
+                new_frizz_phase.to(
+                    device=device,
+                    dtype=new_groom.frizz_phase.dtype,
                 )
             )
             new_params = dict(new_groom.named_parameters())

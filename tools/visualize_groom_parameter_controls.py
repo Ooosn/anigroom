@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import math
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
@@ -89,9 +91,7 @@ def field_with_pattern(name: str, root_count: int, roots: torch.Tensor, device: 
         elif name == "frizz":
             field.length_raw.add_(0.85)
             field.frizz_raw.add_(4.3)
-            field.curl_radius_raw.add_(2.2)
-            field.curl_frequency_raw.add_(1.8)
-            field.curl_phase.copy_(1.7 * phase)
+            field.frizz_phase.copy_(1.7 * phase)
         elif name == "root_tip_color_alpha":
             root_color = torch.tensor([0.09, 0.07, 0.045], device=device).view(1, 3)
             tip_color = torch.tensor([1.00, 0.86, 0.45], device=device).view(1, 3)
@@ -382,10 +382,30 @@ def render_brush_centerline_qa(
     return report
 
 
-def gradient_report(device: torch.device) -> dict[str, float]:
+def gradient_report(
+    device: torch.device,
+    *,
+    samples: int,
+    min_segments: int,
+    segment_length_origin: float,
+    segments_per_unit_length: float,
+    segments_per_unit_complexity: float,
+) -> dict[str, float]:
     roots, normals = make_roots(device, rows=5, cols=7)
     field = field_with_pattern("curl", int(roots.shape[0]), roots, device)
-    image, alpha, _ = render_field(field, roots, normals, 480, 320, 760.0, 36, 12, 56)
+    image, alpha, _ = render_field(
+        field,
+        roots,
+        normals,
+        480,
+        320,
+        760.0,
+        samples,
+        min_segments,
+        segment_length_origin,
+        segments_per_unit_length,
+        segments_per_unit_complexity,
+    )
     loss = ((image - 0.55) ** 2).mean() + 0.15 * alpha.mean()
     loss.backward()
     names = [
@@ -414,9 +434,151 @@ def gradient_report(device: torch.device) -> dict[str, float]:
     return report
 
 
+def export_advanced_geometry_sweeps(output_dir: Path, *, samples: int) -> dict[str, object]:
+    """Export isolated advanced-shape controls for the canonical Blender renderer."""
+
+    device = torch.device("cpu")
+    dtype = torch.float64
+    cases: dict[str, list[dict[str, float]]] = {
+        "curl_radius": [
+            {"length": 0.040, "curl_radius": radius, "curl_turns": 1.5, "frizz": 0.0, "phase": 0.35}
+            for radius in (0.0, 0.001, 0.002, 0.003, 0.004, 0.005, 0.006)
+        ],
+        "curl_turns": [
+            {"length": 0.040, "curl_radius": 0.004, "curl_turns": turns, "frizz": 0.0, "phase": 0.35}
+            for turns in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
+        ],
+        "frizz_amplitude": [
+            {"length": 0.040, "curl_radius": 0.0, "curl_turns": 1.2, "frizz": amplitude, "phase": 0.75}
+            for amplitude in (0.0, 0.0005, 0.0010, 0.0015, 0.0020, 0.0030, 0.0040)
+        ],
+        "combined": [
+            {
+                "length": 0.040,
+                "curl_radius": 0.0035,
+                "curl_turns": 1.5,
+                "frizz": amplitude,
+                "phase": phase,
+            }
+            for amplitude, phase in zip(
+                (0.0, 0.0004, 0.0008, 0.0012, 0.0016, 0.0020, 0.0024),
+                (0.15, 0.55, 0.95, 1.35, 1.75, 2.15, 2.55),
+            )
+        ],
+        "short_hair_stress": [
+            {
+                "length": length,
+                "curl_radius": radius,
+                "curl_turns": turns,
+                "frizz": frizz,
+                "phase": phase,
+            }
+            for length, radius, turns, frizz, phase in (
+                (0.012, 0.003, 1.2, 0.0015, 0.2),
+                (0.012, 0.006, 2.5, 0.0030, 0.6),
+                (0.015, 0.004, 1.2, 0.0020, 1.0),
+                (0.015, 0.008, 4.0, 0.0040, 1.4),
+                (0.030, 0.004, 1.2, 0.0020, 1.8),
+                (0.030, 0.008, 3.0, 0.0040, 2.2),
+                (0.060, 0.006, 1.2, 0.0030, 2.6),
+                (0.060, 0.012, 4.0, 0.0060, 3.0),
+            )
+        ],
+    }
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outputs: dict[str, object] = {}
+    for name, definitions in cases.items():
+        root_count = len(definitions)
+        roots = torch.zeros((root_count, 3), device=device, dtype=dtype)
+        columns = 4
+        indices = torch.arange(root_count, device=device)
+        column = (indices % columns).to(dtype=dtype)
+        row = torch.div(indices, columns, rounding_mode="floor").to(dtype=dtype)
+        roots[:, 0] = (column - 0.5 * float(columns - 1)) * 0.060
+        roots[:, 2] = (0.5 - row) * 0.095
+        normals = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).view(1, 3).expand_as(roots)
+        tangents, bitangents = make_tangent_frames(normals)
+        field = GroomParameterField(root_count, init_length=0.04, device=device)
+        decoded = field.decode()
+        lengths = torch.tensor([item["length"] for item in definitions], device=device, dtype=dtype).view(-1, 1)
+        curl_radius = torch.tensor([item["curl_radius"] for item in definitions], device=device, dtype=dtype).view(-1, 1)
+        curl_turns = torch.tensor([item["curl_turns"] for item in definitions], device=device, dtype=dtype).view(-1, 1)
+        frizz = torch.tensor([item["frizz"] for item in definitions], device=device, dtype=dtype).view(-1, 1)
+        phase = torch.tensor([item["phase"] for item in definitions], device=device, dtype=dtype).view(-1, 1)
+        direction_local = torch.nn.functional.normalize(
+            torch.tensor([0.72, 0.0, 0.69], device=device, dtype=dtype).view(1, 3).expand(root_count, -1),
+            dim=-1,
+        )
+        groom = replace(
+            decoded,
+            length=lengths,
+            root_width=torch.full((root_count, 1), 0.00034, device=device, dtype=dtype),
+            tip_width=torch.full((root_count, 1), 0.000055, device=device, dtype=dtype),
+            width_taper=torch.full((root_count, 1), 1.5, device=device, dtype=dtype),
+            direction_local=direction_local,
+            brush_stiffness=torch.full((root_count, 1), 0.65, device=device, dtype=dtype),
+            curl_radius=curl_radius,
+            curl_frequency=curl_turns,
+            curl_phase=phase,
+            frizz=frizz,
+            frizz_phase=phase + 0.91,
+            root_color=torch.full((root_count, 3), 0.22, device=device, dtype=dtype),
+            tip_color=torch.full((root_count, 3), 0.42, device=device, dtype=dtype),
+            root_opacity=torch.ones((root_count, 1), device=device, dtype=dtype),
+            tip_opacity=torch.ones((root_count, 1), device=device, dtype=dtype),
+            opacity=torch.ones((root_count, 1), device=device, dtype=dtype),
+        )
+        strands, widths, colors, opacities = build_strands(
+            roots,
+            normals,
+            tangents,
+            bitangents,
+            groom,
+            samples=samples,
+        )
+        axis = torch.nn.functional.normalize(strands[:, -1] - strands[:, 0], dim=-1)
+        progress = ((torch.diff(strands, dim=1)) * axis[:, None]).sum(dim=-1)
+        output_path = output_dir / f"advanced_geometry_{name}.npz"
+        np.savez(
+            output_path,
+            strands=strands.detach().cpu().float().numpy(),
+            widths=widths.detach().cpu().float().numpy(),
+            colors=colors.detach().cpu().float().numpy(),
+            opacities=opacities.detach().cpu().float().numpy(),
+            root_ids=np.arange(root_count, dtype=np.int64),
+        )
+        outputs[name] = {
+            "npz": str(output_path.resolve()),
+            "definitions_left_to_right": definitions,
+            "backward_strands": int((progress < -1.0e-9).any(dim=1).sum().item()),
+            "minimum_longitudinal_step": float(progress.min().item()),
+        }
+
+    report = {
+        "contract": {
+            "backbone": "fixed root, nominal length, 3D direction, and normal-to-direction brush turn",
+            "curl": "root-pinned physical transverse radius and turns around the backbone",
+            "frizz": "root-pinned independent band-limited transverse noise",
+            "root_position_and_tangent_preserved": True,
+            "tip_may_move_under_advanced_deformation": True,
+        },
+        "samples": int(samples),
+        "outputs": outputs,
+    }
+    report_path = output_dir / "advanced_geometry_report.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(json.dumps({"report": str(report_path.resolve()), **report}, indent=2))
+    return report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("controls", "brush_centerline"), default="controls")
+    parser.add_argument(
+        "--mode",
+        choices=("controls", "brush_centerline", "advanced_geometry"),
+        default="controls",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path(r"D:\petsgaussianhair\_downloads\groom_parameter_controls_formal"))
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
@@ -431,6 +593,10 @@ def main() -> None:
     if args.mode == "brush_centerline":
         output = args.output_dir / "brush_centerline_canonical.png"
         print(json.dumps(render_brush_centerline_qa(output, width=args.width, height=args.height), indent=2))
+        return
+
+    if args.mode == "advanced_geometry":
+        export_advanced_geometry_sweeps(args.output_dir, samples=args.samples)
         return
 
     if not torch.cuda.is_available():
@@ -462,7 +628,14 @@ def main() -> None:
         image_paths.append(path)
         stats[label] = stat
 
-    grad = gradient_report(device)
+    grad = gradient_report(
+        device,
+        samples=args.samples,
+        min_segments=args.min_segments,
+        segment_length_origin=args.segment_length_origin,
+        segments_per_unit_length=args.segments_per_unit_length,
+        segments_per_unit_complexity=args.segments_per_unit_complexity,
+    )
     report = {"stats": stats, "gradient_abs_mean": grad}
     (args.output_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     make_sheet(image_paths, labels, stats, args.output_dir / "groom_parameter_controls_sheet.png")

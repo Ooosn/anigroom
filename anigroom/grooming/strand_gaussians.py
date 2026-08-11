@@ -13,6 +13,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from .strand_deformations import deform_backbone
+
 
 EPS = 1e-8
 
@@ -108,6 +110,7 @@ class DecodedGroom:
     curl_frequency: torch.Tensor
     curl_phase: torch.Tensor
     frizz: torch.Tensor
+    frizz_phase: torch.Tensor
     child_radius: torch.Tensor
     clump_strength: torch.Tensor
     root_color: torch.Tensor
@@ -204,6 +207,11 @@ class GroomParameterField(nn.Module):
         self.curl_frequency_raw = repeated(raw_from_range(0.35, self.ranges.curl_frequency))
         self.curl_phase = nn.Parameter(torch.zeros((self.root_count, 1), dtype=torch.float32, device=dev))
         self.frizz_raw = repeated(raw_from_range(0.001, self.ranges.frizz))
+        frizz_seed = torch.frac(
+            torch.arange(self.root_count, dtype=torch.float32, device=dev).view(-1, 1)
+            * 0.6180339887498949
+        ) * (2.0 * torch.pi)
+        self.register_buffer("frizz_phase", frizz_seed)
         self.register_buffer(
             "child_radius_reference",
             torch.full(
@@ -246,6 +254,7 @@ class GroomParameterField(nn.Module):
             curl_frequency=self._decode_range(self.curl_frequency_raw, ranges.curl_frequency),
             curl_phase=self.curl_phase,
             frizz=self._decode_range(self.frizz_raw, ranges.frizz),
+            frizz_phase=self.frizz_phase,
             child_radius=decode_positive_asinh_ratio(
                 self.child_radius_raw,
                 self.child_radius_reference,
@@ -370,14 +379,8 @@ def build_strands(
         + direction_local[:, [1]] * bitangents
         + direction_local[:, [2]] * normals
     )
-    tangent_component = groom_direction - (groom_direction * normals).sum(dim=-1, keepdim=True) * normals
-    tangent_norm = torch.linalg.norm(tangent_component, dim=-1, keepdim=True)
-    flow = torch.where(tangent_norm > EPS, tangent_component / tangent_norm.clamp_min(EPS), tangents)
-
     if shape_normal_mode not in {"full", "outward", "tangent"}:
         raise ValueError(f"unknown shape_normal_mode: {shape_normal_mode}")
-    side = _normalize(torch.cross(normals, flow, dim=-1))
-    curl_up = _normalize(torch.cross(flow, side, dim=-1))
     t = torch.linspace(0.0, 1.0, samples, device=roots.device, dtype=roots.dtype).view(1, samples, 1)
     points = build_brush_centerline(
         roots,
@@ -387,29 +390,18 @@ def build_strands(
         groom.brush_stiffness,
         samples,
     )
-    phase = 2.0 * torch.pi * groom.curl_frequency[:, None] * t + groom.curl_phase[:, None]
-    curl_envelope = torch.sin(0.5 * torch.pi * t).clamp(0.0, 1.0)
-    curl_side = torch.sin(phase)
-    curl_normal = torch.cos(phase)
-    if shape_normal_mode == "outward":
-        curl_normal = torch.relu(curl_normal)
-    elif shape_normal_mode == "tangent":
-        curl_normal = torch.zeros_like(curl_normal)
-    curl_offset = groom.curl_radius[:, None] * curl_envelope * (
-        curl_side * side[:, None] + curl_normal * curl_up[:, None]
+    points = deform_backbone(
+        points,
+        normals,
+        groom_direction,
+        tangents,
+        curl_radius=groom.curl_radius,
+        curl_turns=groom.curl_frequency,
+        curl_phase=groom.curl_phase,
+        frizz_amplitude=groom.frizz,
+        frizz_seed_phase=groom.frizz_phase,
+        shape_normal_mode=shape_normal_mode,
     )
-    frizz_phase = 2.0 * torch.pi * (3.0 * groom.curl_frequency[:, None] + 1.0) * t + 1.618 * groom.curl_phase[:, None]
-    frizz_envelope = (t * (1.0 - 0.35 * t)).clamp(0.0, 1.0)
-    frizz_normal = torch.sin(1.7 * frizz_phase + 0.3)
-    if shape_normal_mode == "outward":
-        frizz_normal = torch.relu(frizz_normal)
-    elif shape_normal_mode == "tangent":
-        frizz_normal = torch.zeros_like(frizz_normal)
-    frizz_offset = groom.frizz[:, None] * frizz_envelope * (
-        0.65 * torch.sin(frizz_phase) * side[:, None]
-        + 0.35 * frizz_normal * curl_up[:, None]
-    )
-    points = points + curl_offset + frizz_offset
 
     taper_t = t.clamp(0.0, 1.0).pow(groom.width_taper[:, None])
     widths = groom.root_width[:, None] * (1.0 - taper_t) + groom.tip_width[:, None] * taper_t
