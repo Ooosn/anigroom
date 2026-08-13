@@ -35,10 +35,10 @@ ambiguous.
 The nominal strand tip is
 
 $$
-\mathbf{x}_{tip}=\mathbf{x}_r+\ell_r\mathbf{d}_r,
+\mathbf{x}_{tip}=\mathbf{x}_r+L_r\mathbf{d}_r,
 $$
 
-where $\ell_r>0$ is the editable straight endpoint length. A straight segment
+where $L_r>0$ is the editable straight endpoint length. A straight segment
 is insufficient for brushed fur: real fibers leave the skin along the normal
 and turn smoothly toward the local grooming direction. We therefore construct
 a quadratic Bezier backbone
@@ -54,7 +54,7 @@ $$
 \begin{aligned}
 \mathbf{c}^{straight}_r &= \tfrac{1}{2}(\mathbf{x}_r+\mathbf{x}_{tip}),\\
 \mathbf{c}^{corner}_r &= \mathbf{x}_r+
-\langle\ell_r\mathbf{d}_r,\mathbf{n}_r\rangle\mathbf{n}_r,\\
+\langle L_r\mathbf{d}_r,\mathbf{n}_r\rangle\mathbf{n}_r,\\
 \mathbf{c}_r &= \mathbf{c}^{straight}_r+
 s_r\,\|\mathbf{d}_r-\langle\mathbf{d}_r,\mathbf{n}_r\rangle\mathbf{n}_r\|_2
 (\mathbf{c}^{corner}_r-\mathbf{c}^{straight}_r).
@@ -155,8 +155,8 @@ functions of the underlying groom parameters.
 **Figure X. Interpretable differentiable groom controls.** Single-variable
 sweeps show the effects of 3D direction, length, brush stiffness, width
 profile, curl radius, curl turns, geometric micro-frizz, and root-to-tip color.
-The displayed geometric sweeps use $\hat{\ell}=\ell/\ell_{\mathrm{ref}}$,
-$\hat r=r/\ell$, and $\hat a=a/\ell$. Each strand is rendered over a shallow
+The displayed geometric sweeps use $\hat L=L/L_{\mathrm{ref}}$,
+$\hat r=r/L$, and $\hat a=a/L$. Each strand is rendered over a shallow
 convex receiver to expose its
 three-dimensional shape and contact shadow. The composed examples combine
 multiple controls; the aligned lower row shows the corresponding adaptive

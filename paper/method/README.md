@@ -3,6 +3,13 @@
 This directory is the single source of truth for the parametric groom method
 text and its paper figure.
 
+## Frozen figure contract
+
+`fig_parametric_groom_controls.{pdf,svg,png}` is the accepted paper figure.
+Its geometry, camera, lighting, material, typography, spacing, and panel layout
+are frozen as of 2026-08-13. Do not change the figure or its two rendering
+scripts unless a later paper revision explicitly reopens this artifact.
+
 ## Retained artifacts
 
 - `parametric_fur_representation.tex`: manuscript-ready method section.

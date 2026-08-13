@@ -21,8 +21,8 @@ This defines a genuine 3D direction field rather than an image-plane flow,
 which is essential around limbs, the belly, and the tail.
 
 \paragraph{Normal-to-flow brush backbone.}
-Given positive endpoint length $\ell_r$, the nominal strand tip is
-$\mathbf{x}^{\mathrm{tip}}_r=\mathbf{x}_r+\ell_r\mathbf{d}_r$.
+Given positive endpoint length $L_r$, the nominal strand tip is
+$\mathbf{x}^{\mathrm{tip}}_r=\mathbf{x}_r+L_r\mathbf{d}_r$.
 We model the smooth turn from the skin normal toward the groom direction using
 a quadratic Bezier backbone
 \begin{equation}
@@ -36,7 +36,7 @@ Let
         &=\tfrac{1}{2}(\mathbf{x}_r+\mathbf{x}^{\mathrm{tip}}_r),\\
     \mathbf{c}^{\mathrm{corner}}_r
         &=\mathbf{x}_r+
-        \langle\ell_r\mathbf{d}_r,\mathbf{n}_r\rangle\mathbf{n}_r.
+        \langle L_r\mathbf{d}_r,\mathbf{n}_r\rangle\mathbf{n}_r.
 \end{align}
 The control point is
 \begin{equation}
@@ -117,8 +117,8 @@ opacities remain differentiable functions of the continuous groom parameters.
     Single-variable sweeps show the effects of 3D direction, length, brush
     stiffness, width profile, curl radius, curl turns, geometric micro-frizz,
     and root-to-tip color. The displayed geometric sweeps use
-    $\hat{\ell}=\ell/\ell_{\mathrm{ref}}$, $\hat{r}=r/\ell$, and
-    $\hat{a}=a/\ell$. Each strand is rendered over a shallow convex
+    $\hat{L}=L/L_{\mathrm{ref}}$, $\hat{r}=r/L$, and
+    $\hat{a}=a/L$. Each strand is rendered over a shallow convex
     receiver to expose its three-dimensional shape and contact shadow. The
     composed examples combine multiple controls; the aligned lower row shows
     the corresponding adaptive anisotropic Gaussian initialization after all
