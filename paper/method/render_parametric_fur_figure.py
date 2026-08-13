@@ -257,22 +257,13 @@ def palette_colors(
 def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
     root_color, tip_color = palette_colors(palette)
     base = StrandSpec(root_color=root_color, tip_color=tip_color)
-    if palette == "copper":
-        appearance_specs = (
-            replace(base, root_color=(0.68, 0.67, 0.63), tip_color=(0.68, 0.67, 0.63)),
-            replace(base, root_color=(0.08, 0.09, 0.10), tip_color=(0.66, 0.68, 0.70)),
-            replace(base, root_color=(0.45, 0.42, 0.35), tip_color=(0.91, 0.89, 0.82)),
-        )
-    else:
-        root = np.asarray(root_color, dtype=np.float64)
-        tip = np.asarray(tip_color, dtype=np.float64)
-        dark = tuple(float(value) for value in np.clip(root * 0.58, 0.0, 1.0))
-        light = tuple(float(value) for value in np.clip(tip * 1.18, 0.0, 0.92))
-        appearance_specs = (
-            replace(base, root_color=root_color, tip_color=root_color),
-            replace(base, root_color=dark, tip_color=tip_color),
-            replace(base, root_color=root_color, tip_color=light),
-        )
+    # Keep appearance examples independent from the presentation hair palette:
+    # these three neutral profiles are the established root-tip color controls.
+    appearance_specs = (
+        replace(base, root_color=(0.68, 0.67, 0.63), tip_color=(0.68, 0.67, 0.63)),
+        replace(base, root_color=(0.08, 0.09, 0.10), tip_color=(0.66, 0.68, 0.70)),
+        replace(base, root_color=(0.45, 0.42, 0.35), tip_color=(0.91, 0.89, 0.82)),
+    )
     return (
         Panel(
             "direction",
@@ -384,66 +375,111 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
 def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
     root_color, tip_color = palette_colors(palette)
     base = StrandSpec(root_color=root_color, tip_color=tip_color)
+    if palette == "smoked_champagne":
+        composed_colors = (
+            ((0.080, 0.055, 0.035), (0.420, 0.310, 0.200)),
+            ((0.145, 0.105, 0.070), (0.660, 0.550, 0.400)),
+            ((0.540, 0.430, 0.300), (0.120, 0.085, 0.055)),
+            ((0.100, 0.065, 0.040), (0.460, 0.340, 0.220)),
+            ((0.150, 0.110, 0.075), (0.700, 0.620, 0.480)),
+        )
+    else:
+        composed_colors = (
+            (root_color, tip_color),
+            ((0.120, 0.050, 0.018), (0.625, 0.285, 0.060)),
+            ((0.170, 0.075, 0.025), (0.780, 0.465, 0.135)),
+            ((0.215, 0.095, 0.025), (0.620, 0.275, 0.055)),
+            ((0.135, 0.060, 0.025), (0.800, 0.530, 0.190)),
+        )
     return Panel(
         "composed",
         "Composed grooms",
         "",
         "multiple controls act on one editable strand model",
-        ("brushed", "soft wave", "loose curl", "spring curl", "fine frizz"),
+        ("sleek taper", "swept plume", "ribbon wave", "compact coil", "airy frizz"),
         (
             replace(
                 base,
-                length=0.060,
-                angle_deg=74.0,
-                stiffness=0.96,
-                root_width=0.00145,
-                tip_width=0.00011,
-                frizz=0.00055,
+                length=0.059,
+                angle_deg=76.0,
+                azimuth_deg=0.0,
+                stiffness=0.84,
+                root_width=0.00185,
+                tip_width=0.000055,
+                width_taper=2.25,
+                curl_radius=0.0038,
+                curl_turns=0.72,
+                curl_phase=0.15,
+                frizz=0.0009,
+                root_color=composed_colors[0][0],
+                tip_color=composed_colors[0][1],
             ),
             replace(
                 base,
-                length=0.064,
-                angle_deg=57.0,
-                stiffness=0.70,
-                root_width=0.00165,
-                tip_width=0.00016,
-                curl_radius=0.0048,
-                curl_turns=1.05,
-                frizz=0.00070,
+                length=0.068,
+                angle_deg=58.0,
+                azimuth_deg=4.0,
+                stiffness=0.42,
+                root_width=0.00205,
+                tip_width=0.00018,
+                width_taper=0.90,
+                curl_radius=0.0062,
+                curl_turns=1.10,
+                curl_phase=0.0,
+                frizz=0.0018,
+                root_color=composed_colors[1][0],
+                tip_color=composed_colors[1][1],
+            ),
+            replace(
+                base,
+                length=0.066,
+                angle_deg=72.0,
+                azimuth_deg=-3.0,
+                stiffness=0.67,
+                root_width=0.00158,
+                tip_width=0.000085,
+                width_taper=1.72,
+                curl_radius=0.0078,
+                curl_turns=1.70,
+                curl_phase=1.05,
+                frizz=0.0030,
+                frizz_seed=0.73,
+                root_color=composed_colors[2][0],
+                tip_color=composed_colors[2][1],
             ),
             replace(
                 base,
                 length=0.062,
-                angle_deg=66.0,
-                stiffness=0.80,
-                root_width=0.00180,
-                tip_width=0.00011,
-                curl_radius=0.0068,
-                curl_turns=1.55,
-                frizz=0.0018,
+                angle_deg=55.0,
+                azimuth_deg=2.0,
+                stiffness=0.35,
+                root_width=0.00212,
+                tip_width=0.000050,
+                width_taper=2.30,
+                curl_radius=0.0105,
+                curl_turns=2.65,
+                curl_phase=0.20,
+                frizz=0.0026,
+                frizz_seed=1.61,
+                root_color=composed_colors[3][0],
+                tip_color=composed_colors[3][1],
             ),
             replace(
                 base,
-                length=0.064,
-                angle_deg=62.0,
-                stiffness=0.72,
-                root_width=0.00172,
-                tip_width=0.00009,
-                curl_radius=0.0084,
-                curl_turns=2.60,
-                frizz=0.0025,
-            ),
-            replace(
-                base,
-                length=0.058,
-                angle_deg=52.0,
-                stiffness=0.58,
-                root_width=0.00120,
-                tip_width=0.00007,
-                curl_radius=0.0030,
-                curl_turns=1.35,
-                frizz=0.0060,
+                length=0.062,
+                angle_deg=59.0,
+                azimuth_deg=0.0,
+                stiffness=0.46,
+                root_width=0.00128,
+                tip_width=0.000040,
+                width_taper=1.95,
+                curl_radius=0.0045,
+                curl_turns=1.25,
+                curl_phase=0.50,
+                frizz=0.0090,
                 frizz_seed=2.17,
+                root_color=composed_colors[4][0],
+                tip_color=composed_colors[4][1],
             ),
         ),
         resolution=(4320, 700),
