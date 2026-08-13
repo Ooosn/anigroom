@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-08-11.
+Status date: 2026-08-13.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -82,6 +82,14 @@ fixed views. Its sparse extreme foldback tail is not better, so R057 is a
 gradient-ownership correction rather than a structural solution. See
 `docs/r057_rgb_flow_no_color_grad.md`.
 
+R058 is the accepted replacement for the optional curl/frizz forward geometry,
+but it has not yet produced a trained checkpoint. R059 is the active formal
+validation: it inherits the complete R057 behavior contract and starts from
+zero under the strict R058 schema. No schedule, loss, lifecycle, density,
+learning rate, or attribute ownership changes in R059. See
+`docs/r058_advanced_groom_geometry.md` and
+`docs/r059_redesigned_groom_geometry_training.md`.
+
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
@@ -97,6 +105,8 @@ gradient-ownership correction rather than a structural solution. See
   `configs/r055_staged_primary_secondary_shape_0_30k.env`
 - active R057 staged-shape/gradient-ownership baseline:
   `configs/r057_rgb_flow_no_color_grad_0_30k.env`
+- active R059 redesigned-geometry validation:
+  `configs/r059_redesigned_groom_geometry_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`

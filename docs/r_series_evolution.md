@@ -1,8 +1,9 @@
 # R-Series Evolution
 
-Status date: 2026-08-10. Active structural/lifecycle baseline: R043. Frozen
+Status date: 2026-08-13. Active structural/lifecycle baseline: R043. Frozen
 higher-PSNR metric control: R036. Accepted appearance checkpoint: R050.
-Latest staged shape/appearance research checkpoint: R055.
+Latest trained staged shape/appearance checkpoint: R057. Accepted advanced
+geometry implementation: R058. Active from-zero geometry validation: R059.
 
 This document is the compact decision history. Detailed measurements and
 artifact paths remain in `docs/accept_line_recovery_ledger.md` and the
@@ -31,6 +32,8 @@ individual R-series documents.
 | R050 | Added generated-Gaussian RGB residual without degrading the R049 strand field. |
 | R054 | Moved curl/frizz ownership back to the smooth primary guide after R053 exposed dense residual noise. |
 | R055 | Staged primary shape/appearance before zero-centered secondary shape residual and reduced R054 foldback. |
+| R057 | Corrected RGB-flow gradient ownership without changing the staged-shape forward contract. |
+| R058 | Replaced invalid curl/frizz deformation with physical curl and independent band-limited frizz. |
 
 ## Recovery And Interpolation: R000-R007
 
@@ -155,6 +158,9 @@ decision.
 | R053 | Simultaneous primary and secondary curl/frizz | Rejected as a shape baseline. PSNR rises, but local turning and stripe-correlated shape noise worsen even with Gaussian RGB residual. |
 | R054 | Primary-guide-only curl/frizz | Retained as a cleaner ownership control. Backward strands fall from R053 `560` to `375`, but local-turn P95 remains `57.30 deg`. |
 | R055 | Primary shape plus Gaussian appearance at 20k-25k, then secondary shape residual at 25k-30k | Accepted as the latest controlled shape checkpoint, not the default baseline. Versus R054, backward strands fall `375 -> 159`, local-turn P95 falls `57.30 -> 50.03 deg`, and local length continuity improves, with `-0.132 dB` fixed-view mean PSNR. R050 remains the strict structural reference. |
+| R057 | Exclude color parameters only from the existing RGB-flow backward | Accepted gradient-ownership correction. Reconstruction is metric-neutral versus R055; the sparse foldback tail is not improved. |
+| R058 | Redesign curl/frizz forward geometry | Accepted implementation with 133 passing tests after the R059 lifecycle/schema gates were added. No training result yet. |
+| R059 | Train the strict R058 schema on the complete R057 contract | Active formal from-zero H100 validation; results pending. |
 
 ## Effective Findings
 

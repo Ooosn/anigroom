@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from anigroom.grooming.strand_deformations import (
@@ -47,6 +48,16 @@ def test_frizz_seed_is_persistent_state_but_not_a_trainable_parameter() -> None:
     clone = GroomParameterField(7)
     clone.load_state_dict(field.state_dict(), strict=True)
     torch.testing.assert_close(clone.frizz_seed_phase, field.frizz_seed_phase)
+
+
+def test_retired_advanced_geometry_checkpoint_schema_is_rejected() -> None:
+    field = GroomParameterField(7)
+    retired_state = dict(field.state_dict())
+    retired_state["curl_frequency_raw"] = retired_state.pop("curl_turns_raw")
+    retired_state.pop("frizz_seed_phase")
+
+    with pytest.raises(RuntimeError, match="Missing key|Unexpected key"):
+        GroomParameterField(7).load_state_dict(retired_state, strict=True)
 
 
 def test_default_advanced_geometry_is_neutral() -> None:

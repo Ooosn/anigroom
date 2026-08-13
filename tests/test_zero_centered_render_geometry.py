@@ -308,6 +308,7 @@ def test_structure_update_transports_residual_state_and_strict_checkpoint() -> N
         )
         model.groom.tip_width_ratio_raw.fill_(torch.logit(torch.tensor(0.95)))
         model.groom.width_taper_raw.fill_(encode_positive_asinh(torch.tensor(8.0)))
+        model.groom.frizz_seed_phase.fill_(1.234)
     update = RootStructureUpdate(
         parent_indices=torch.tensor([0], dtype=torch.long),
         child_parent_indices=torch.tensor([0], dtype=torch.long),
@@ -321,6 +322,10 @@ def test_structure_update_transports_residual_state_and_strict_checkpoint() -> N
     assert model.render_geometry_residual.root_count == 4
     assert model.groom.length_reference.shape == (4, 1)
     assert bool((model.groom.length_reference > 0.0).all())
+    torch.testing.assert_close(
+        model.groom.frizz_seed_phase,
+        torch.full_like(model.groom.frizz_seed_phase, 1.234),
+    )
     decoded = model.groom.decode()
     torch.testing.assert_close(
         decoded.tip_width / decoded.root_width,
@@ -350,6 +355,10 @@ def test_structure_update_transports_residual_state_and_strict_checkpoint() -> N
     torch.testing.assert_close(
         clone.groom.length_reference,
         model.groom.length_reference,
+    )
+    torch.testing.assert_close(
+        clone.groom.frizz_seed_phase,
+        model.groom.frizz_seed_phase,
     )
 
 
