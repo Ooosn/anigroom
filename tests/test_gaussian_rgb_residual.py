@@ -410,29 +410,29 @@ def test_r055_shape_gradient_ownership_follows_the_two_handoffs() -> None:
     model.shape_detail_multiplier = 0.5
     model.secondary_shape_residual_multiplier = 0.0
     primary_stage = model.apply_guide_controls(model.groom.decode(), roots_local)
-    (primary_stage.curl_radius.mean() + primary_stage.frizz.mean()).backward()
-    assert bool((model.guide_curl_radius_raw.grad.abs() > 0.0).any())
-    assert bool((model.guide_frizz_raw.grad.abs() > 0.0).any())
+    (primary_stage.curl_radius_ratio.mean() + primary_stage.frizz_amplitude_ratio.mean()).backward()
+    assert bool((model.guide_curl_radius_ratio_raw.grad.abs() > 0.0).any())
+    assert bool((model.guide_frizz_amplitude_ratio_raw.grad.abs() > 0.0).any())
     torch.testing.assert_close(
-        model.render_geometry_residual.curl_radius_raw.grad,
-        torch.zeros_like(model.render_geometry_residual.curl_radius_raw.grad),
+        model.render_geometry_residual.curl_radius_ratio_raw.grad,
+        torch.zeros_like(model.render_geometry_residual.curl_radius_ratio_raw.grad),
     )
     torch.testing.assert_close(
-        model.render_geometry_residual.frizz_raw.grad,
-        torch.zeros_like(model.render_geometry_residual.frizz_raw.grad),
+        model.render_geometry_residual.frizz_amplitude_ratio_raw.grad,
+        torch.zeros_like(model.render_geometry_residual.frizz_amplitude_ratio_raw.grad),
     )
 
     model.zero_grad(set_to_none=True)
     model.shape_detail_multiplier = 1.0
     model.secondary_shape_residual_multiplier = 0.5
     with torch.no_grad():
-        model.render_geometry_residual.curl_radius_raw.fill_(0.4)
-        model.render_geometry_residual.frizz_raw.fill_(-0.3)
+        model.render_geometry_residual.curl_radius_ratio_raw.fill_(0.4)
+        model.render_geometry_residual.frizz_amplitude_ratio_raw.fill_(-0.3)
     _, _, roots_local = model.roots_and_normals()
     secondary_stage = model.apply_guide_controls(model.groom.decode(), roots_local)
-    (secondary_stage.curl_radius.mean() + secondary_stage.frizz.mean()).backward()
-    assert bool((model.render_geometry_residual.curl_radius_raw.grad.abs() > 0.0).any())
-    assert bool((model.render_geometry_residual.frizz_raw.grad.abs() > 0.0).any())
+    (secondary_stage.curl_radius_ratio.mean() + secondary_stage.frizz_amplitude_ratio.mean()).backward()
+    assert bool((model.render_geometry_residual.curl_radius_ratio_raw.grad.abs() > 0.0).any())
+    assert bool((model.render_geometry_residual.frizz_amplitude_ratio_raw.grad.abs() > 0.0).any())
 
 
 def test_shape_detail_gate_is_neutral_and_guide_coordinates_are_learnable() -> None:
@@ -440,29 +440,60 @@ def test_shape_detail_gate_is_neutral_and_guide_coordinates_are_learnable() -> N
     model.shape_detail_multiplier = 0.0
     _, _, roots_local = model.roots_and_normals()
     neutral = model.apply_guide_controls(model.groom.decode(), roots_local)
-    torch.testing.assert_close(neutral.curl_radius, torch.zeros_like(neutral.curl_radius))
-    torch.testing.assert_close(neutral.frizz, torch.zeros_like(neutral.frizz))
+    torch.testing.assert_close(neutral.curl_radius_ratio, torch.zeros_like(neutral.curl_radius_ratio))
+    torch.testing.assert_close(neutral.frizz_amplitude_ratio, torch.zeros_like(neutral.frizz_amplitude_ratio))
 
     model.shape_detail_multiplier = 1.0
     groom = model.apply_guide_controls(model.groom.decode(), roots_local)
+    expected_ratio = (
+        model.guide_root_width_reference
+        / model.guide_length_reference
+    )
     torch.testing.assert_close(
-        groom.curl_radius,
-        model.guide_root_width_reference,
+        groom.curl_radius_ratio,
+        expected_ratio,
         rtol=1.0e-4,
         atol=1.0e-8,
     )
     torch.testing.assert_close(
-        groom.frizz,
+        groom.frizz_amplitude_ratio,
+        expected_ratio,
+        rtol=1.0e-4,
+        atol=1.0e-8,
+    )
+    torch.testing.assert_close(
+        groom.length * groom.curl_radius_ratio,
         model.guide_root_width_reference,
         rtol=1.0e-4,
         atol=1.0e-8,
     )
 
-    (groom.curl_radius.mean() + groom.frizz.mean()).backward()
-    assert model.guide_curl_radius_raw.grad is not None
-    assert model.guide_frizz_raw.grad is not None
-    assert bool((model.guide_curl_radius_raw.grad.abs() > 1.0e-8).any())
-    assert bool((model.guide_frizz_raw.grad.abs() > 1.0e-8).any())
+    (groom.curl_radius_ratio.mean() + groom.frizz_amplitude_ratio.mean()).backward()
+    assert model.guide_curl_radius_ratio_raw.grad is not None
+    assert model.guide_frizz_amplitude_ratio_raw.grad is not None
+    assert bool((model.guide_curl_radius_ratio_raw.grad.abs() > 1.0e-8).any())
+    assert bool((model.guide_frizz_amplitude_ratio_raw.grad.abs() > 1.0e-8).any())
+
+
+def test_guide_shape_initialization_tracks_final_clean_flow_length_scale() -> None:
+    model = make_model()
+    with torch.no_grad():
+        model.guide_length_reference.copy_(
+            torch.tensor([[0.010], [0.020], [0.040], [0.080]])
+        )
+        model.guide_length_raw.zero_()
+        model.initialize_guide_shape_ratios_from_current_scale()
+
+    guide_length = model.guide_length_reference
+    curl_ratio = torch.nn.functional.softplus(
+        model.guide_curl_radius_ratio_raw
+    )
+    frizz_ratio = torch.nn.functional.softplus(
+        model.guide_frizz_amplitude_ratio_raw
+    )
+    expected_physical = model.guide_root_width_reference
+    torch.testing.assert_close(guide_length * curl_ratio, expected_physical)
+    torch.testing.assert_close(guide_length * frizz_ratio, expected_physical)
 
 
 def test_shape_gate_is_zero_before_handoff_and_joint_controls_receive_gradients() -> None:
@@ -479,30 +510,30 @@ def test_shape_gate_is_zero_before_handoff_and_joint_controls_receive_gradients(
         for group in stage1_optimizer_param_names(model, config)
         for name in group
     }
-    assert "guide_curl_radius_raw" in names
-    assert "guide_frizz_raw" in names
-    assert "render_geometry_residual.curl_radius_raw" in names
-    assert "render_geometry_residual.frizz_raw" in names
+    assert "guide_curl_radius_ratio_raw" in names
+    assert "guide_frizz_amplitude_ratio_raw" in names
+    assert "render_geometry_residual.curl_radius_ratio_raw" in names
+    assert "render_geometry_residual.frizz_amplitude_ratio_raw" in names
     assert "gaussian_rgb_residual.raw" in names
 
     _, _, roots_local = model.roots_and_normals()
     model.shape_detail_multiplier = 0.0
     frozen = model.apply_guide_controls(model.groom.decode(), roots_local)
-    torch.testing.assert_close(frozen.curl_radius, torch.zeros_like(frozen.curl_radius))
-    torch.testing.assert_close(frozen.frizz, torch.zeros_like(frozen.frizz))
+    torch.testing.assert_close(frozen.curl_radius_ratio, torch.zeros_like(frozen.curl_radius_ratio))
+    torch.testing.assert_close(frozen.frizz_amplitude_ratio, torch.zeros_like(frozen.frizz_amplitude_ratio))
 
     model.shape_detail_multiplier = 0.5
     active = model.apply_guide_controls(model.groom.decode(), roots_local)
-    (active.curl_radius.mean() + active.frizz.mean()).backward()
-    assert model.guide_curl_radius_raw.grad is not None
-    assert model.guide_frizz_raw.grad is not None
-    assert model.render_geometry_residual.curl_radius_raw.grad is not None
-    assert model.render_geometry_residual.frizz_raw.grad is not None
+    (active.curl_radius_ratio.mean() + active.frizz_amplitude_ratio.mean()).backward()
+    assert model.guide_curl_radius_ratio_raw.grad is not None
+    assert model.guide_frizz_amplitude_ratio_raw.grad is not None
+    assert model.render_geometry_residual.curl_radius_ratio_raw.grad is not None
+    assert model.render_geometry_residual.frizz_amplitude_ratio_raw.grad is not None
     for parameter in (
-        model.guide_curl_radius_raw,
-        model.guide_frizz_raw,
-        model.render_geometry_residual.curl_radius_raw,
-        model.render_geometry_residual.frizz_raw,
+        model.guide_curl_radius_ratio_raw,
+        model.guide_frizz_amplitude_ratio_raw,
+        model.render_geometry_residual.curl_radius_ratio_raw,
+        model.render_geometry_residual.frizz_amplitude_ratio_raw,
     ):
         assert bool(torch.isfinite(parameter.grad).all())
         assert bool((parameter.grad.abs() > 0.0).any())
@@ -525,18 +556,18 @@ def test_primary_guide_shape_ownership_excludes_render_residuals() -> None:
         for group in stage1_optimizer_param_names(model, config)
         for name in group
     }
-    assert "guide_curl_radius_raw" in names
-    assert "guide_frizz_raw" in names
-    assert "render_geometry_residual.curl_radius_raw" not in names
-    assert "render_geometry_residual.frizz_raw" not in names
+    assert "guide_curl_radius_ratio_raw" in names
+    assert "guide_frizz_amplitude_ratio_raw" in names
+    assert "render_geometry_residual.curl_radius_ratio_raw" not in names
+    assert "render_geometry_residual.frizz_amplitude_ratio_raw" not in names
     assert "gaussian_rgb_residual.raw" in names
 
     model.shape_detail_multiplier = 1.0
     _, _, roots_local = model.roots_and_normals()
     before = model.apply_guide_controls(model.groom.decode(), roots_local)
     with torch.no_grad():
-        model.render_geometry_residual.curl_radius_raw.fill_(8.0)
-        model.render_geometry_residual.frizz_raw.fill_(-8.0)
+        model.render_geometry_residual.curl_radius_ratio_raw.fill_(8.0)
+        model.render_geometry_residual.frizz_amplitude_ratio_raw.fill_(-8.0)
     after = model.apply_guide_controls(model.groom.decode(), roots_local)
-    torch.testing.assert_close(after.curl_radius, before.curl_radius)
-    torch.testing.assert_close(after.frizz, before.frizz)
+    torch.testing.assert_close(after.curl_radius_ratio, before.curl_radius_ratio)
+    torch.testing.assert_close(after.frizz_amplitude_ratio, before.frizz_amplitude_ratio)

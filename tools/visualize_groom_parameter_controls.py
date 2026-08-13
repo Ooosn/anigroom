@@ -21,6 +21,7 @@ from anigroom.grooming import (  # noqa: E402
     adaptive_resample_strands,
     build_brush_centerline,
     build_strands,
+    encode_positive_softplus,
     make_tangent_frames,
     strands_to_gaussians,
 )
@@ -58,10 +59,7 @@ def make_roots(device: torch.device, rows: int = 4, cols: int = 6) -> tuple[torc
 
 
 def field_with_pattern(name: str, root_count: int, roots: torch.Tensor, device: torch.device) -> GroomParameterField:
-    ranges = GroomRanges(
-        curl_radius=(0.0, 0.045),
-        frizz=(0.0, 0.020),
-    )
+    ranges = GroomRanges()
     field = GroomParameterField(
         root_count,
         ranges=ranges,
@@ -93,8 +91,9 @@ def field_with_pattern(name: str, root_count: int, roots: torch.Tensor, device: 
             field.opacity_raw.add_(0.5)
         elif name == "curl":
             field.length_raw.add_(1.20)
-            field.curl_radius_raw.fill_(
-                encode_range(0.024, ranges.curl_radius, device)
+            curl_length = field.decode().length.detach()
+            field.curl_radius_ratio_raw.copy_(
+                encode_positive_softplus(0.024 / curl_length)
             )
             field.curl_turns_raw.fill_(
                 encode_range(3.05, ranges.curl_turns, device)
@@ -104,7 +103,10 @@ def field_with_pattern(name: str, root_count: int, roots: torch.Tensor, device: 
             field.tip_width_ratio_raw.add_(0.1)
         elif name == "frizz":
             field.length_raw.add_(0.85)
-            field.frizz_raw.fill_(encode_range(0.0159, ranges.frizz, device))
+            frizz_length = field.decode().length.detach()
+            field.frizz_amplitude_ratio_raw.copy_(
+                encode_positive_softplus(0.0159 / frizz_length)
+            )
             field.frizz_seed_phase.copy_(1.7 * phase)
         elif name == "root_tip_color_alpha":
             root_color = torch.tensor([0.09, 0.07, 0.045], device=device).view(1, 3)
@@ -183,9 +185,11 @@ def render_field(
         "root_width_mean": float(groom.root_width.mean().detach().cpu()),
         "tip_width_mean": float(groom.tip_width.mean().detach().cpu()),
         "length_mean": float(groom.length.mean().detach().cpu()),
-        "curl_radius_mean": float(groom.curl_radius.mean().detach().cpu()),
+        "curl_radius_ratio_mean": float(groom.curl_radius_ratio.mean().detach().cpu()),
+        "curl_radius_mean": float((groom.length * groom.curl_radius_ratio).mean().detach().cpu()),
         "curl_turns_mean": float(groom.curl_turns.mean().detach().cpu()),
-        "frizz_mean": float(groom.frizz.mean().detach().cpu()),
+        "frizz_amplitude_ratio_mean": float(groom.frizz_amplitude_ratio.mean().detach().cpu()),
+        "frizz_mean": float((groom.length * groom.frizz_amplitude_ratio).mean().detach().cpu()),
     }
     return render[0].clamp(0.0, 1.0), alpha[0].clamp(0.0, 1.0), stats
 
@@ -429,10 +433,10 @@ def gradient_report(
         "width_taper_raw",
         "direction_local_raw",
         "brush_stiffness_raw",
-        "curl_radius_raw",
+        "curl_radius_ratio_raw",
         "curl_turns_raw",
         "curl_phase",
-        "frizz_raw",
+        "frizz_amplitude_ratio_raw",
         "root_color_raw",
         "tip_color_raw",
         "opacity_raw",
@@ -532,10 +536,10 @@ def export_advanced_geometry_sweeps(output_dir: Path, *, samples: int) -> dict[s
             width_taper=torch.full((root_count, 1), 1.5, device=device, dtype=dtype),
             direction_local=direction_local,
             brush_stiffness=torch.full((root_count, 1), 0.65, device=device, dtype=dtype),
-            curl_radius=curl_radius,
+            curl_radius_ratio=curl_radius / lengths,
             curl_turns=curl_turns,
             curl_phase=phase,
-            frizz=frizz,
+            frizz_amplitude_ratio=frizz / lengths,
             frizz_seed_phase=phase + 0.91,
             root_color=torch.full((root_count, 3), 0.22, device=device, dtype=dtype),
             tip_color=torch.full((root_count, 3), 0.42, device=device, dtype=dtype),
@@ -586,11 +590,102 @@ def export_advanced_geometry_sweeps(output_dir: Path, *, samples: int) -> dict[s
     return report
 
 
+def export_relative_shape_scale(output_dir: Path, *, samples: int) -> dict[str, object]:
+    """Export one canonical scene with identical curl/frizz shape ratios.
+
+    The three strands differ only in nominal length.  Their normalized point
+    coordinates must match, while their physical curl/frizz amplitudes scale
+    linearly with length.
+    """
+
+    device = torch.device("cpu")
+    dtype = torch.float64
+    lengths = torch.tensor([[0.012], [0.024], [0.048]], device=device, dtype=dtype)
+    curl_ratio = torch.full_like(lengths, 0.16)
+    frizz_ratio = torch.full_like(lengths, 0.055)
+    root_count = int(lengths.shape[0])
+    roots = torch.tensor(
+        [[-0.050, 0.0, 0.0], [0.0, 0.0, 0.0], [0.068, 0.0, 0.0]],
+        device=device,
+        dtype=dtype,
+    )
+    normals = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).view(1, 3).expand_as(roots)
+    tangents, bitangents = make_tangent_frames(normals)
+    decoded = GroomParameterField(root_count, init_length=0.024, device=device).decode()
+    direction_local = torch.nn.functional.normalize(
+        torch.tensor([0.76, 0.0, 0.65], device=device, dtype=dtype).view(1, 3).expand(root_count, -1),
+        dim=-1,
+    )
+    groom = replace(
+        decoded,
+        length=lengths,
+        root_width=0.014 * lengths,
+        tip_width=0.0025 * lengths,
+        width_taper=torch.full_like(lengths, 1.5),
+        direction_local=direction_local,
+        brush_stiffness=torch.full_like(lengths, 0.65),
+        curl_radius_ratio=curl_ratio,
+        curl_turns=torch.full_like(lengths, 1.75),
+        curl_phase=torch.full_like(lengths, 0.2),
+        frizz_amplitude_ratio=frizz_ratio,
+        frizz_seed_phase=torch.full_like(lengths, 0.9),
+        child_radius=torch.zeros_like(lengths),
+        clump_strength=torch.zeros_like(lengths),
+        root_color=torch.full((root_count, 3), 0.22, device=device, dtype=dtype),
+        tip_color=torch.full((root_count, 3), 0.42, device=device, dtype=dtype),
+        root_opacity=torch.ones_like(lengths),
+        tip_opacity=torch.ones_like(lengths),
+        opacity=torch.ones_like(lengths),
+    )
+    strands, widths, colors, opacities = build_strands(
+        roots,
+        normals,
+        tangents,
+        bitangents,
+        groom,
+        samples=samples,
+    )
+    normalized = (strands - roots[:, None]) / lengths[:, None]
+    normalized_difference = float(
+        (normalized - normalized[:1]).abs().amax().detach().cpu()
+    )
+    if normalized_difference > 1.0e-9:
+        raise RuntimeError(
+            "length-relative shape visualization is not scale equivariant: "
+            f"max normalized difference={normalized_difference}"
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "relative_shape_scale.npz"
+    np.savez(
+        output_path,
+        strands=strands.detach().cpu().float().numpy(),
+        widths=widths.detach().cpu().float().numpy(),
+        colors=colors.detach().cpu().float().numpy(),
+        opacities=opacities.detach().cpu().float().numpy(),
+        root_ids=np.arange(root_count, dtype=np.int64),
+    )
+    report = {
+        "contract": "same dimensionless curl/frizz controls at three nominal lengths",
+        "lengths": lengths[:, 0].tolist(),
+        "curl_radius_ratio": float(curl_ratio[0, 0]),
+        "frizz_amplitude_ratio": float(frizz_ratio[0, 0]),
+        "physical_curl_radii": (lengths * curl_ratio)[:, 0].tolist(),
+        "physical_frizz_amplitudes": (lengths * frizz_ratio)[:, 0].tolist(),
+        "max_normalized_shape_difference": normalized_difference,
+        "npz": str(output_path.resolve()),
+    }
+    report_path = output_dir / "relative_shape_scale_report.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(json.dumps({"report": str(report_path.resolve()), **report}, indent=2))
+    return report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=("controls", "brush_centerline", "advanced_geometry"),
+        choices=("controls", "brush_centerline", "advanced_geometry", "relative_shape_scale"),
         default="controls",
     )
     parser.add_argument("--output-dir", type=Path, default=Path(r"D:\petsgaussianhair\_downloads\groom_parameter_controls_formal"))
@@ -611,6 +706,10 @@ def main() -> None:
 
     if args.mode == "advanced_geometry":
         export_advanced_geometry_sweeps(args.output_dir, samples=args.samples)
+        return
+
+    if args.mode == "relative_shape_scale":
+        export_relative_shape_scale(args.output_dir, samples=args.samples)
         return
 
     if not torch.cuda.is_available():

@@ -8,9 +8,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from .strand_gaussians import GroomRanges
-
-
 EPS = 1.0e-8
 
 
@@ -22,8 +19,8 @@ class DecodedGeometryResiduals:
     root_width_log_ratio: torch.Tensor
     tip_width_logit_delta: torch.Tensor
     width_taper_log_ratio: torch.Tensor
-    curl_radius: torch.Tensor
-    frizz: torch.Tensor
+    curl_radius_log_ratio: torch.Tensor
+    frizz_amplitude_log_ratio: torch.Tensor
     child_radius_log_ratio: torch.Tensor
     clump_strength: torch.Tensor
     direction_local: torch.Tensor
@@ -43,8 +40,8 @@ class RenderGeometryResidualField(nn.Module):
         "root_width",
         "tip_width_ratio",
         "width_taper",
-        "curl_radius",
-        "frizz",
+        "curl_radius_ratio",
+        "frizz_amplitude_ratio",
         "child_radius",
         "clump_strength",
     )
@@ -70,30 +67,21 @@ class RenderGeometryResidualField(nn.Module):
             root_width_log_ratio=torch.asinh(self.root_width_raw),
             tip_width_logit_delta=torch.asinh(self.tip_width_ratio_raw),
             width_taper_log_ratio=torch.asinh(self.width_taper_raw),
-            curl_radius=torch.tanh(self.curl_radius_raw),
-            frizz=torch.tanh(self.frizz_raw),
+            curl_radius_log_ratio=torch.asinh(self.curl_radius_ratio_raw),
+            frizz_amplitude_log_ratio=torch.asinh(
+                self.frizz_amplitude_ratio_raw
+            ),
             child_radius_log_ratio=torch.asinh(self.child_radius_raw),
             clump_strength=torch.tanh(self.clump_strength_raw),
             direction_local=torch.tanh(self.direction_local_raw),
         )
 
     @staticmethod
-    def scalar_physical_delta(
+    def scalar_domain_delta(
         normalized_delta: torch.Tensor,
         bounds: tuple[float, float],
     ) -> torch.Tensor:
         return normalized_delta * float(bounds[1] - bounds[0])
-
-    def physical_scalar_deltas(self, ranges: GroomRanges) -> dict[str, torch.Tensor]:
-        decoded = self.decode()
-        return {
-            "curl_radius": self.scalar_physical_delta(decoded.curl_radius, ranges.curl_radius),
-            "frizz": self.scalar_physical_delta(decoded.frizz, ranges.frizz),
-            "clump_strength": self.scalar_physical_delta(
-                decoded.clump_strength,
-                ranges.clump_strength,
-            ),
-        }
 
 
 def direction_to_local_components(

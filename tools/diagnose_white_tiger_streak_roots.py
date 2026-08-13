@@ -199,8 +199,10 @@ def run_diagnostics(args: argparse.Namespace) -> None:
     opacity = groom.opacity.reshape(-1).float()
     clump = groom.clump_strength.reshape(-1).float()
     child_radius = groom.child_radius.reshape(-1).float()
-    curl = groom.curl_radius.reshape(-1).float()
-    frizz = groom.frizz.reshape(-1).float()
+    curl_ratio = groom.curl_radius_ratio.reshape(-1).float()
+    frizz_ratio = groom.frizz_amplitude_ratio.reshape(-1).float()
+    curl = length * curl_ratio
+    frizz = length * frizz_ratio
     luma = (
         0.2126 * groom.root_color[:, 0]
         + 0.7152 * groom.root_color[:, 1]
@@ -263,7 +265,9 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         "clump_strength": summarize_tensor(clump),
         "child_radius": summarize_tensor(child_radius),
         "curl_radius": summarize_tensor(curl),
+        "curl_radius_ratio": summarize_tensor(curl_ratio),
         "frizz": summarize_tensor(frizz),
+        "frizz_amplitude_ratio": summarize_tensor(frizz_ratio),
         "root_luma": summarize_tensor(luma),
         "gaussian_count_per_root": summarize_tensor(gaussian_count),
         "visible_gaussian_count_per_root": summarize_tensor(visible_gaussian_count),

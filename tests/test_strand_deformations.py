@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -10,7 +12,12 @@ from anigroom.grooming.strand_deformations import (
     deform_backbone,
     frizz_backbone,
 )
-from anigroom.grooming.strand_gaussians import GroomParameterField, build_brush_centerline
+from anigroom.grooming.strand_gaussians import (
+    GroomParameterField,
+    build_brush_centerline,
+    build_strands,
+    make_tangent_frames,
+)
 
 
 def canonical_backbone(
@@ -60,10 +67,20 @@ def test_retired_advanced_geometry_checkpoint_schema_is_rejected() -> None:
         GroomParameterField(7).load_state_dict(retired_state, strict=True)
 
 
+def test_r059_absolute_shape_checkpoint_schema_is_rejected() -> None:
+    field = GroomParameterField(7)
+    r059_state = dict(field.state_dict())
+    r059_state["curl_radius_raw"] = r059_state.pop("curl_radius_ratio_raw")
+    r059_state["frizz_raw"] = r059_state.pop("frizz_amplitude_ratio_raw")
+
+    with pytest.raises(RuntimeError, match="Missing key|Unexpected key"):
+        GroomParameterField(7).load_state_dict(r059_state, strict=True)
+
+
 def test_default_advanced_geometry_is_neutral() -> None:
     groom = GroomParameterField(7).decode()
-    assert float(groom.curl_radius.max()) < 5.0e-8
-    assert float(groom.frizz.max()) < 5.0e-8
+    assert float(groom.curl_radius_ratio.max()) < 5.0e-7
+    assert float(groom.frizz_amplitude_ratio.max()) < 5.0e-7
 
 
 def test_transverse_frame_is_orthonormal_when_direction_matches_normal() -> None:
@@ -339,6 +356,113 @@ def test_physical_shape_is_scale_equivariant() -> None:
         frizz_seed_phase=torch.tensor([[0.9]], dtype=torch.float64),
     )
     torch.testing.assert_close(scaled, shaped * scale, atol=2.0e-11, rtol=1.0e-10)
+
+
+def test_groom_shape_ratios_are_scale_equivariant() -> None:
+    dtype = torch.float64
+    roots = torch.zeros((2, 3), dtype=dtype)
+    normals = torch.tensor([[0.0, 0.0, 1.0]], dtype=dtype).expand_as(roots)
+    tangents, bitangents = make_tangent_frames(normals)
+    base = GroomParameterField(2).decode()
+    lengths = torch.tensor([[0.025], [0.075]], dtype=dtype)
+    groom = replace(
+        base,
+        length=lengths,
+        root_width=torch.full((2, 1), 0.0004, dtype=dtype),
+        tip_width=torch.full((2, 1), 0.00008, dtype=dtype),
+        width_taper=torch.full((2, 1), 1.4, dtype=dtype),
+        direction_local=torch.tensor(
+            [[0.82, 0.0, 0.57], [0.82, 0.0, 0.57]],
+            dtype=dtype,
+        ),
+        brush_stiffness=torch.full((2, 1), 0.65, dtype=dtype),
+        curl_radius_ratio=torch.full((2, 1), 0.16, dtype=dtype),
+        curl_turns=torch.full((2, 1), 1.75, dtype=dtype),
+        curl_phase=torch.full((2, 1), 0.2, dtype=dtype),
+        frizz_amplitude_ratio=torch.full((2, 1), 0.08, dtype=dtype),
+        frizz_seed_phase=torch.full((2, 1), 0.9, dtype=dtype),
+        child_radius=torch.zeros((2, 1), dtype=dtype),
+        clump_strength=torch.zeros((2, 1), dtype=dtype),
+        root_color=torch.zeros((2, 3), dtype=dtype),
+        tip_color=torch.zeros((2, 3), dtype=dtype),
+        root_opacity=torch.ones((2, 1), dtype=dtype),
+        tip_opacity=torch.ones((2, 1), dtype=dtype),
+        opacity=torch.ones((2, 1), dtype=dtype),
+    )
+    strands, _, _, _ = build_strands(
+        roots,
+        normals,
+        tangents,
+        bitangents,
+        groom,
+        samples=129,
+    )
+
+    normalized = (strands - roots[:, None]) / lengths[:, None]
+    torch.testing.assert_close(
+        normalized[0],
+        normalized[1],
+        atol=2.0e-11,
+        rtol=1.0e-10,
+    )
+    torch.testing.assert_close(
+        strands[1],
+        strands[0] * 3.0,
+        atol=2.0e-11,
+        rtol=1.0e-10,
+    )
+
+
+def test_groom_shape_ratio_geometry_has_finite_nonzero_gradients() -> None:
+    dtype = torch.float64
+    roots = torch.zeros((1, 3), dtype=dtype)
+    normals = torch.tensor([[0.0, 0.0, 1.0]], dtype=dtype)
+    tangents, bitangents = make_tangent_frames(normals)
+    base = GroomParameterField(1).decode()
+    length = torch.tensor([[0.04]], dtype=dtype, requires_grad=True)
+    curl_ratio = torch.tensor([[0.10]], dtype=dtype, requires_grad=True)
+    frizz_ratio = torch.tensor([[0.04]], dtype=dtype, requires_grad=True)
+    groom = replace(
+        base,
+        length=length,
+        root_width=torch.full((1, 1), 0.0004, dtype=dtype),
+        tip_width=torch.full((1, 1), 0.00008, dtype=dtype),
+        width_taper=torch.full((1, 1), 1.4, dtype=dtype),
+        direction_local=torch.tensor([[0.82, 0.0, 0.57]], dtype=dtype),
+        brush_stiffness=torch.full((1, 1), 0.65, dtype=dtype),
+        curl_radius_ratio=curl_ratio,
+        curl_turns=torch.full((1, 1), 1.6, dtype=dtype),
+        curl_phase=torch.full((1, 1), 0.3, dtype=dtype),
+        frizz_amplitude_ratio=frizz_ratio,
+        frizz_seed_phase=torch.full((1, 1), 1.1, dtype=dtype),
+        child_radius=torch.zeros((1, 1), dtype=dtype),
+        clump_strength=torch.zeros((1, 1), dtype=dtype),
+        root_color=torch.zeros((1, 3), dtype=dtype),
+        tip_color=torch.zeros((1, 3), dtype=dtype),
+        root_opacity=torch.ones((1, 1), dtype=dtype),
+        tip_opacity=torch.ones((1, 1), dtype=dtype),
+        opacity=torch.ones((1, 1), dtype=dtype),
+    )
+    strands, _, _, _ = build_strands(
+        roots,
+        normals,
+        tangents,
+        bitangents,
+        groom,
+        samples=129,
+    )
+    weights = torch.linspace(
+        0.2,
+        1.3,
+        strands.numel(),
+        dtype=dtype,
+    ).reshape_as(strands)
+    (strands * weights).sum().backward()
+
+    for gradient in (length.grad, curl_ratio.grad, frizz_ratio.grad):
+        assert gradient is not None
+        assert bool(torch.isfinite(gradient).all())
+        assert float(gradient.abs().sum()) > 0.0
 
 
 def test_frizz_is_stable_across_sampling_density() -> None:

@@ -396,8 +396,10 @@ def interpolate_secondary_geometry_residuals(
         root_width_log_ratio=torch.asinh(raw["root_width_raw"]),
         tip_width_logit_delta=torch.asinh(raw["tip_width_ratio_raw"]),
         width_taper_log_ratio=torch.asinh(raw["width_taper_raw"]),
-        curl_radius=torch.tanh(raw["curl_radius_raw"]),
-        frizz=torch.tanh(raw["frizz_raw"]),
+        curl_radius_log_ratio=torch.asinh(raw["curl_radius_ratio_raw"]),
+        frizz_amplitude_log_ratio=torch.asinh(
+            raw["frizz_amplitude_ratio_raw"]
+        ),
         child_radius_log_ratio=torch.asinh(raw["child_radius_raw"]),
         clump_strength=torch.tanh(raw["clump_strength_raw"]),
         direction_local=direction_local,

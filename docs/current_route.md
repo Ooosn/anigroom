@@ -96,6 +96,16 @@ reference, and R043 remains the default structural/lifecycle baseline. See
 `docs/r058_advanced_groom_geometry.md` and
 `docs/r059_redesigned_groom_geometry_training.md`.
 
+R060 is the current unaccepted one-variable candidate. It retains the complete
+R059 training contract but replaces absolute curl radius and frizz amplitude
+with positive dimensionless ratios to current strand length. Physical offsets
+are formed only in `build_strands` as `length * ratio`; guide interpolation,
+secondary/render residuals, smoothing, and lifecycle inheritance all use the
+same ratio semantics. Checkpoint schema `7` intentionally rejects R059 state,
+so the formal comparison must train from zero. Local scale-equivariance and
+gradient tests pass; formal H100 training and fixed-protocol structural QA are
+pending. See `docs/r060_relative_shape_amplitudes.md`.
+
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
@@ -113,6 +123,8 @@ reference, and R043 remains the default structural/lifecycle baseline. See
   `configs/r057_rgb_flow_no_color_grad_0_30k.env`
 - latest trained R059 advanced-geometry research configuration:
   `configs/r059_redesigned_groom_geometry_0_30k.env`
+- unaccepted R060 length-relative shape candidate:
+  `configs/r060_relative_shape_amplitudes_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
@@ -138,8 +150,8 @@ The active explicit groom fields are:
 - root and tip width plus taper
 - normalized local 3D direction
 - guide-owned brush stiffness
-- curl radius, turns, and phase
-- frizz
+- dimensionless curl-radius ratio, turns, and phase
+- dimensionless frizz-amplitude ratio
 - child radius and clump strength
 - root and tip color
 - root and tip opacity
@@ -151,7 +163,9 @@ difference between the normal and endpoint direction. There is no second
 interior deformation field. R058 directly replaces the optional curl/frizz
 forward geometry with one local-3D-frame implementation: physical curl radius
 and turns plus independent band-limited frizz. No legacy formula, normal-mode
-switch, or checkpoint alias remains. Curl and frizz stay disabled in the R043
+switch, or checkpoint alias remains. R060 further decodes the two physical
+amplitudes from current strand length, so equal controls produce equal
+normalized geometry across short and long fur. Curl and frizz stay disabled in the R043
 training control. The active route has one strand per render root
 (`child_count=1`); density comes from independent render roots and their finite
 lifecycle, not deterministic child expansion.

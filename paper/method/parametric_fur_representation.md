@@ -81,8 +81,10 @@ $$
 \right],
 $$
 
-where $\theta_r(u)=\phi_r+2\pi f_ru$, $r_r$ is a physical curl radius,
-$f_r$ is the number of turns per strand, and $\phi_r$ is the curl phase.
+where $\theta_r(u)=\phi_r+2\pi f_ru$, $f_r$ is the number of turns per
+strand, and $\phi_r$ is the curl phase. We optimize the dimensionless curl
+ratio $\rho_r$ and decode the physical radius as $r_r=L_r\rho_r$. This keeps
+the same control geometrically comparable across short and long fur.
 Small-scale geometric roughness is represented as band-limited micro-frizz,
 
 $$
@@ -91,8 +93,9 @@ $$
 \right],
 $$
 
-where $a_r$ is the frizz amplitude and $\eta^s_r,\eta^o_r$ are deterministic
-smooth noise signals generated from a persistent per-strand seed. Both offsets
+where the optimized dimensionless amplitude $\alpha_r$ is decoded as
+$a_r=L_r\alpha_r$, and $\eta^s_r,\eta^o_r$ are deterministic smooth noise
+signals generated from a persistent per-strand seed. Both offsets
 are evaluated around the same undeformed backbone,
 
 $$

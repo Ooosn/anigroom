@@ -191,8 +191,9 @@ def build_value_strands(
     tangents = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64).repeat(strand_count, 1)
     bitangents = torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float64).repeat(strand_count, 1)
     length_scales = (0.982, 1.0, 1.018)
+    lengths = tensor_column([spec.length * scale for scale in length_scales])
     groom = DecodedGroom(
-        length=tensor_column([spec.length * scale for scale in length_scales]),
+        length=lengths,
         root_width=tensor_column([spec.root_width] * strand_count),
         tip_width=tensor_column([spec.tip_width] * strand_count),
         width_taper=tensor_column([spec.width_taper] * strand_count),
@@ -200,10 +201,12 @@ def build_value_strands(
             [direction_local(spec)] * strand_count, dtype=torch.float64
         ),
         brush_stiffness=tensor_column([spec.stiffness] * strand_count),
-        curl_radius=tensor_column([spec.curl_radius] * strand_count),
+        curl_radius_ratio=tensor_column([spec.curl_radius] * strand_count)
+        / lengths,
         curl_turns=tensor_column([spec.curl_turns] * strand_count),
         curl_phase=tensor_column([spec.curl_phase] * strand_count),
-        frizz=tensor_column([spec.frizz] * strand_count),
+        frizz_amplitude_ratio=tensor_column([spec.frizz] * strand_count)
+        / lengths,
         frizz_seed_phase=tensor_column([spec.frizz_seed] * strand_count),
         child_radius=torch.zeros((strand_count, 1), dtype=torch.float64),
         clump_strength=torch.zeros((strand_count, 1), dtype=torch.float64),

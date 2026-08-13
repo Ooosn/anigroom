@@ -368,7 +368,9 @@ def deform_backbone(
 
     Both layers use the same undeformed local frame. This makes their meaning
     independent and avoids the order-dependent behavior of applying frizz to
-    an already curled curve.
+    an already curled curve. ``curl_radius`` and ``frizz_amplitude`` are the
+    physical offsets already decoded by the caller; the learnable groom field
+    stores their dimensionless ratios to nominal strand length.
     """
 
     samples = int(backbone.shape[1])

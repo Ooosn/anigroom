@@ -63,15 +63,18 @@ root-preserving envelope $E(u)=u^2(3-2u)$, curl is
     &+(\cos\theta_r(u)-\cos\phi_r)\mathbf{o}_r(u)\big],
 \end{split}
 \end{equation}
-where $\theta_r(u)=\phi_r+2\pi f_ru$, $r_r$ is physical curl radius,
-$f_r$ is turns per strand, and $\phi_r$ is phase. Band-limited geometric
+where $\theta_r(u)=\phi_r+2\pi f_ru$, $f_r$ is turns per strand, and $\phi_r$
+is phase. We optimize the dimensionless curl ratio $\rho_r$ and decode
+$r_r=L_r\rho_r$, so one control has comparable geometry across short and long
+fur. Band-limited geometric
 micro-frizz is
 \begin{equation}
     \mathbf{R}_r(u)=a_rE(u)
     \left[\eta^s_r(u)\mathbf{s}_r(u)+\eta^o_r(u)\mathbf{o}_r(u)\right],
 \end{equation}
-where $a_r$ is amplitude and $\eta^s_r,\eta^o_r$ are deterministic smooth
-noise signals generated from a persistent per-strand seed. Both details are
+where the optimized dimensionless amplitude $\alpha_r$ is decoded as
+$a_r=L_r\alpha_r$, and $\eta^s_r,\eta^o_r$ are deterministic smooth noise
+signals generated from a persistent per-strand seed. Both details are
 evaluated around the same undeformed backbone,
 \begin{equation}
     \mathbf{P}_r(u)=\mathbf{B}_r(u)+\mathbf{C}_r(u)+\mathbf{R}_r(u),

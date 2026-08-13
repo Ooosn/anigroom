@@ -9,6 +9,7 @@ from anigroom.grooming import (
     apply_log_ratio_residual,
     direction_to_local_components,
     encode_positive_asinh,
+    encode_positive_softplus,
     fourth_moment_norm,
     population_stable_residual_norm,
     length_residual_prior_coordinate,
@@ -117,8 +118,8 @@ def test_zero_residual_ignores_render_endpoint_geometry() -> None:
                 model.groom.direction_local_raw
             )
         )
-        model.groom.curl_radius_raw.fill_(20.0)
-        model.groom.frizz_raw.fill_(20.0)
+        model.groom.curl_radius_ratio_raw.fill_(20.0)
+        model.groom.frizz_amplitude_ratio_raw.fill_(20.0)
         model.groom.clump_strength_raw.fill_(20.0)
     after = effective_groom(model)
     for name in (
@@ -128,8 +129,8 @@ def test_zero_residual_ignores_render_endpoint_geometry() -> None:
         "width_taper",
         "brush_stiffness",
         "direction_local",
-        "curl_radius",
-        "frizz",
+        "curl_radius_ratio",
+        "frizz_amplitude_ratio",
         "clump_strength",
     ):
         torch.testing.assert_close(getattr(after, name), getattr(before, name))
@@ -279,8 +280,8 @@ def test_disabled_curl_and_frizz_are_not_optimized() -> None:
         for name in group
     }
 
-    assert "guide_curl_radius_raw" not in names
-    assert "guide_frizz_raw" not in names
+    assert "guide_curl_radius_ratio_raw" not in names
+    assert "guide_frizz_amplitude_ratio_raw" not in names
 
 
 def test_late_geometry_freeze_preserves_early_child_spread_gradient() -> None:
@@ -308,6 +309,12 @@ def test_structure_update_transports_residual_state_and_strict_checkpoint() -> N
         )
         model.groom.tip_width_ratio_raw.fill_(torch.logit(torch.tensor(0.95)))
         model.groom.width_taper_raw.fill_(encode_positive_asinh(torch.tensor(8.0)))
+        model.groom.curl_radius_ratio_raw.fill_(
+            encode_positive_softplus(torch.tensor(0.17))
+        )
+        model.groom.frizz_amplitude_ratio_raw.fill_(
+            encode_positive_softplus(torch.tensor(0.06))
+        )
         model.groom.frizz_seed_phase.fill_(1.234)
     update = RootStructureUpdate(
         parent_indices=torch.tensor([0], dtype=torch.long),
@@ -336,6 +343,18 @@ def test_structure_update_transports_residual_state_and_strict_checkpoint() -> N
     torch.testing.assert_close(
         decoded.width_taper,
         torch.full_like(decoded.width_taper, 8.0),
+        atol=1.0e-5,
+        rtol=1.0e-5,
+    )
+    torch.testing.assert_close(
+        decoded.curl_radius_ratio,
+        torch.full_like(decoded.curl_radius_ratio, 0.17),
+        atol=1.0e-5,
+        rtol=1.0e-5,
+    )
+    torch.testing.assert_close(
+        decoded.frizz_amplitude_ratio,
+        torch.full_like(decoded.frizz_amplitude_ratio, 0.06),
         atol=1.0e-5,
         rtol=1.0e-5,
     )
@@ -513,6 +532,8 @@ def test_guide_densification_updates_direct_direction_and_loads_strict_state() -
         "tip_width_ratio",
         "width_taper",
         "brush_stiffness",
+        "curl_radius_ratio",
+        "frizz_amplitude_ratio",
         "child_radius",
     ):
         torch.testing.assert_close(

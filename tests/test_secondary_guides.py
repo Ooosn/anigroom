@@ -316,8 +316,8 @@ def test_model_secondary_zero_state_matches_direct_primary_interpolation() -> No
         "width_taper",
         "direction_local",
         "brush_stiffness",
-        "curl_radius",
-        "frizz",
+        "curl_radius_ratio",
+        "frizz_amplitude_ratio",
         "child_radius",
         "clump_strength",
     ):

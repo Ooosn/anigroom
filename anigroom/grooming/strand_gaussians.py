@@ -79,13 +79,29 @@ def encode_positive_asinh(value: torch.Tensor) -> torch.Tensor:
     return torch.sinh(torch.log(value.clamp_min(tiny)))
 
 
+def decode_positive_softplus(raw: torch.Tensor) -> torch.Tensor:
+    """Decode an unbounded non-negative shape ratio."""
+
+    return F.softplus(raw)
+
+
+def encode_positive_softplus(value: torch.Tensor) -> torch.Tensor:
+    """Inverse of :func:`decode_positive_softplus` for positive values."""
+
+    tiny = torch.as_tensor(
+        torch.finfo(value.dtype).tiny,
+        device=value.device,
+        dtype=value.dtype,
+    )
+    value = value.clamp_min(tiny)
+    return value + torch.log(-torch.expm1(-value))
+
+
 @dataclass(frozen=True)
 class GroomRanges:
-    """Physical ranges that remain intrinsic to bounded groom controls."""
+    """Intrinsic ranges for bounded, scale-independent groom controls."""
 
-    curl_radius: tuple[float, float] = (0.0, 0.030)
     curl_turns: tuple[float, float] = (0.0, 8.0)
-    frizz: tuple[float, float] = (0.0, 0.018)
     clump_strength: tuple[float, float] = (0.0, 1.0)
 
 
@@ -106,10 +122,10 @@ class DecodedGroom:
     width_taper: torch.Tensor
     direction_local: torch.Tensor
     brush_stiffness: torch.Tensor
-    curl_radius: torch.Tensor
+    curl_radius_ratio: torch.Tensor
     curl_turns: torch.Tensor
     curl_phase: torch.Tensor
-    frizz: torch.Tensor
+    frizz_amplitude_ratio: torch.Tensor
     frizz_seed_phase: torch.Tensor
     child_radius: torch.Tensor
     clump_strength: torch.Tensor
@@ -203,12 +219,19 @@ class GroomParameterField(nn.Module):
             torch.tensor([[0.55, 0.04, 0.22]], dtype=torch.float32, device=dev).repeat(self.root_count, 1)
         )
         self.brush_stiffness_raw = repeated(0.0)
-        self.curl_radius_raw = repeated(
-            raw_from_range(self.ranges.curl_radius[0], self.ranges.curl_radius)
+        neutral_shape_ratio = torch.as_tensor(
+            torch.finfo(torch.float32).eps,
+            dtype=torch.float32,
+            device=dev,
+        )
+        self.curl_radius_ratio_raw = repeated(
+            encode_positive_softplus(neutral_shape_ratio)
         )
         self.curl_turns_raw = repeated(raw_from_range(1.20, self.ranges.curl_turns))
         self.curl_phase = nn.Parameter(torch.zeros((self.root_count, 1), dtype=torch.float32, device=dev))
-        self.frizz_raw = repeated(raw_from_range(self.ranges.frizz[0], self.ranges.frizz))
+        self.frizz_amplitude_ratio_raw = repeated(
+            encode_positive_softplus(neutral_shape_ratio)
+        )
         frizz_seed = torch.frac(
             torch.arange(self.root_count, dtype=torch.float32, device=dev).view(-1, 1)
             * 0.6180339887498949
@@ -252,10 +275,14 @@ class GroomParameterField(nn.Module):
             width_taper=decode_positive_asinh(self.width_taper_raw),
             direction_local=_normalize(self.direction_local_raw),
             brush_stiffness=torch.sigmoid(self.brush_stiffness_raw),
-            curl_radius=self._decode_range(self.curl_radius_raw, ranges.curl_radius),
+            curl_radius_ratio=decode_positive_softplus(
+                self.curl_radius_ratio_raw,
+            ),
             curl_turns=self._decode_range(self.curl_turns_raw, ranges.curl_turns),
             curl_phase=self.curl_phase,
-            frizz=self._decode_range(self.frizz_raw, ranges.frizz),
+            frizz_amplitude_ratio=decode_positive_softplus(
+                self.frizz_amplitude_ratio_raw,
+            ),
             frizz_seed_phase=self.frizz_seed_phase,
             child_radius=decode_positive_asinh_ratio(
                 self.child_radius_raw,
@@ -389,15 +416,20 @@ def build_strands(
         groom.brush_stiffness,
         samples,
     )
+    # Curl and frizz are learned and interpolated as dimensionless shape
+    # ratios.  This is the sole conversion into physical offsets, so the same
+    # control produces the same relative shape on short and long strands.
+    curl_radius = groom.length * groom.curl_radius_ratio
+    frizz_amplitude = groom.length * groom.frizz_amplitude_ratio
     points = deform_backbone(
         points,
         normals,
         groom_direction,
         tangents,
-        curl_radius=groom.curl_radius,
+        curl_radius=curl_radius,
         curl_turns=groom.curl_turns,
         curl_phase=groom.curl_phase,
-        frizz_amplitude=groom.frizz,
+        frizz_amplitude=frizz_amplitude,
         frizz_seed_phase=groom.frizz_seed_phase,
     )
 
