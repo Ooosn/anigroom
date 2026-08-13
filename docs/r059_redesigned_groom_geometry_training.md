@@ -84,6 +84,14 @@ constraint, not the sole objective.
 
 ## Runtime
 
-The formal runtime will be recorded after launch under a new immutable HGC
-project checkout and runtime directory. Results and artifact hashes must be
-added here before R059 can become a checkpoint.
+The formal execution uses:
+
+- clean project checkout:
+  `/home/wangyy/anigroom-r059-groom-geometry-20260813`;
+- isolated runtime:
+  `/home/wangyy/anigroom-r059-groom-geometry-runtime-20260813`;
+- formal output:
+  `/home/wangyy/anigroom-r059-groom-geometry-runtime-20260813/outputs/r059_redesigned_groom_geometry_0_30k_h100_20260813`.
+
+Results and artifact hashes must be added here before R059 can become a
+checkpoint.
