@@ -22,7 +22,6 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager
 from matplotlib.collections import LineCollection
 from matplotlib.offsetbox import AnchoredOffsetbox, HPacker, TextArea
-from matplotlib.patches import Rectangle
 import numpy as np
 from PIL import Image
 import torch
@@ -63,7 +62,6 @@ def font_property(filename: str, *, size: float, style: str = "normal") -> font_
 TITLE_FONT = font_property("arialbd.ttf", size=12.5)
 SYMBOL_FONT = font_property("arialbi.ttf", size=12.5, style="italic")
 VALUE_FONT = font_property("arial.ttf", size=10.6)
-COMPOSED_VALUE_FONT = font_property("arialbd.ttf", size=11.4)
 
 
 @dataclass(frozen=True)
@@ -383,16 +381,8 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
         "Composed grooms",
         "",
         "multiple controls act on one editable strand model",
-        ("sleek", "brushed", "soft wave", "loose curl", "spring curl", "fine frizz"),
+        ("brushed", "soft wave", "loose curl", "spring curl", "fine frizz"),
         (
-            replace(
-                base,
-                length=0.044,
-                angle_deg=55.0,
-                stiffness=0.24,
-                root_width=0.00075,
-                tip_width=0.00010,
-            ),
             replace(
                 base,
                 length=0.060,
@@ -649,8 +639,9 @@ def add_composed_panel(
     panel: Panel,
     work_dir: Path,
 ) -> None:
-    positions = np.linspace(1.0 / 12.0, 11.0 / 12.0, len(panel.labels))
-    half_width = 1.0 / 12.0
+    column_count = len(panel.labels)
+    half_width = 0.5 / column_count
+    positions = np.linspace(half_width, 1.0 - half_width, column_count)
     for value_index, position in enumerate(positions):
         upper = Image.open(work_dir / f"{panel.key}_{value_index}.png").convert("RGB")
         lower = Image.open(work_dir / f"{panel.key}_{value_index}_gaussians.png").convert("RGB")
@@ -658,30 +649,8 @@ def add_composed_panel(
         lower = lower.crop((0, int(0.025 * lower.height), lower.width, int(0.975 * lower.height)))
         x0 = position - half_width
         x1 = position + half_width
-        ax.imshow(upper, extent=(x0, x1, 0.545, 0.910), aspect="auto")
-        ax.imshow(lower, extent=(x0, x1, 0.075, 0.445), aspect="auto")
-        ax.add_patch(
-            Rectangle(
-                (x0, 0.445),
-                x1 - x0,
-                0.100,
-                transform=ax.transAxes,
-                facecolor=(0.94, 0.945, 0.95, 0.88),
-                edgecolor="none",
-                zorder=4,
-            )
-        )
-        ax.text(
-            position,
-            0.495,
-            panel.labels[value_index],
-            transform=ax.transAxes,
-            fontproperties=COMPOSED_VALUE_FONT,
-            ha="center",
-            va="center",
-            color="#30363d",
-            zorder=6,
-        )
+        ax.imshow(upper, extent=(x0, x1, 0.500, 0.910), aspect="auto")
+        ax.imshow(lower, extent=(x0, x1, 0.090, 0.500), aspect="auto")
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
