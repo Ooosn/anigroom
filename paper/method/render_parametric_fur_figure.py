@@ -427,7 +427,7 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
             ),
             replace(
                 base,
-                length=0.062,
+                length=0.058,
                 angle_deg=52.0,
                 stiffness=0.58,
                 root_width=0.00120,
@@ -478,10 +478,17 @@ def render_panel(
         target_x_shift = (
             panel.target_x_shifts[value_index] if panel.target_x_shifts else 0.0
         )
+        if panel.key == "composed":
+            # Keep the root and the underside of the receiver inside each tall cell.
+            target_x = 0.25 + target_x_shift
+            target_z = 0.23
+        else:
+            target_x = 0.32 + target_x_shift
+            target_z = 0.30
         root_target_offset = (
-            (0.32 + target_x_shift) * panel.ortho_scale * item_aspect,
+            target_x * panel.ortho_scale * item_aspect,
             0.0,
-            0.30 * panel.ortho_scale,
+            target_z * panel.ortho_scale,
         )
         command = [
             str(blender), "--background", "--python", str(renderer), "--",
@@ -516,7 +523,7 @@ def render_panel(
                 "--ground-relief", "0.040",
                 "--ground-width-scale", "2.40",
                 "--ground-depth-scale", "0.55",
-                "--ground-screen-height", "0.10",
+                "--ground-screen-height", "0.075" if panel.key == "composed" else "0.10",
             ]
         )
         if not gaussian_outlines:
@@ -645,8 +652,12 @@ def add_composed_panel(
     for value_index, position in enumerate(positions):
         upper = Image.open(work_dir / f"{panel.key}_{value_index}.png").convert("RGB")
         lower = Image.open(work_dir / f"{panel.key}_{value_index}_gaussians.png").convert("RGB")
-        upper = upper.crop((0, int(0.025 * upper.height), upper.width, int(0.975 * upper.height)))
-        lower = lower.crop((0, int(0.025 * lower.height), lower.width, int(0.975 * lower.height)))
+        upper = upper.crop(
+            (0, int(0.015 * upper.height), upper.width, int(0.960 * upper.height))
+        )
+        lower = lower.crop(
+            (0, int(0.015 * lower.height), lower.width, int(0.960 * lower.height))
+        )
         x0 = position - half_width
         x1 = position + half_width
         ax.imshow(upper, extent=(x0, x1, 0.500, 0.910), aspect="auto")
