@@ -61,8 +61,8 @@ backward segment appears. R049 remains the residual-free structural control;
 R043 remains the independent-root RGB metric control. See
 `docs/r050_gaussian_rgb_residual.md`.
 
-R055 is the latest accepted research checkpoint for optional curl/frizz
-handoff and the exact parent of R057, not the default Stage 1 route. It first
+R055 is the accepted scheduling parent for optional curl/frizz handoff and the
+exact parent of R057, not the default Stage 1 route. It first
 ramps smooth primary-guide curl/frizz together with Gaussian RGB residual from
 20k to 25k, then ramps a zero-centered secondary-guide relative residual from
 25k to 30k. Compared with
@@ -72,7 +72,7 @@ R054 it reduces backward strands `375 -> 159`, local relative-length mean
 structural/appearance reference; R055 is the next controlled shape branch. See
 `docs/r055_staged_primary_secondary_shape.md`.
 
-R057 is the active staged-shape training branch. It changes no forward render,
+R057 is the accepted gradient-ownership parent of R059. It changes no forward render,
 loss source, weight, schedule, interpolation, lifecycle, capacity, or learning
 rate from R055. It only prevents the existing RGB-derived flow backward from
 updating root/tip color, optional child color, and Gaussian RGB residual. The
@@ -82,11 +82,17 @@ fixed views. Its sparse extreme foldback tail is not better, so R057 is a
 gradient-ownership correction rather than a structural solution. See
 `docs/r057_rgb_flow_no_color_grad.md`.
 
-R058 is the accepted replacement for the optional curl/frizz forward geometry,
-but it has not yet produced a trained checkpoint. R059 is the active formal
-validation: it inherits the complete R057 behavior contract and starts from
-zero under the strict R058 schema. No schedule, loss, lifecycle, density,
-learning rate, or attribute ownership changes in R059. See
+R059 is the latest trained advanced-geometry research checkpoint. It inherits
+the complete R057 behavior contract and changes only the R058 curl/frizz
+forward geometry under a strict from-zero schema. Final/best test composite is
+`32.25537/32.33647`, and fixed eight-view mean is `33.32501`; all differ from
+R057 by at most `0.0202 dB`. The Gaussian RGB residual still contributes
+`+1.60937 dB`. In the matched 100k-strand audit, backward strands fall
+`177 -> 34`, maximum-turn P95 falls `50.309 -> 10.265` degrees, and arc/chord
+P99 falls `1.20297 -> 1.14865`. The remaining 34 hooks form one compact
+head-crown patch. R059 therefore replaces R057 only as the advanced-geometry
+research parent. R050 remains the strict zero-foldback structural/appearance
+reference, and R043 remains the default structural/lifecycle baseline. See
 `docs/r058_advanced_groom_geometry.md` and
 `docs/r059_redesigned_groom_geometry_training.md`.
 
@@ -103,9 +109,9 @@ learning rate, or attribute ownership changes in R059. See
   `configs/r050_gaussian_rgb_residual_0_30k.env`
 - latest R055 staged shape research configuration:
   `configs/r055_staged_primary_secondary_shape_0_30k.env`
-- active R057 staged-shape/gradient-ownership baseline:
+- accepted R057 staged-shape/gradient-ownership parent:
   `configs/r057_rgb_flow_no_color_grad_0_30k.env`
-- active R059 redesigned-geometry validation:
+- latest trained R059 advanced-geometry research configuration:
   `configs/r059_redesigned_groom_geometry_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
@@ -113,6 +119,7 @@ learning rate, or attribute ownership changes in R059. See
 - Gaussian export: `tools/export_white_tiger_checkpoint_gaussians_ply.py`
 - checkpoint rendering: `tools/render_white_tiger_stage1_checkpoint_views.py`
 - groom diagnostics: `tools/visualize_white_tiger_groom_attributes.py`
+- fixed-protocol strand audit: `tools/audit_strand_structure.py`
 
 The launcher requires an explicit `CONFIG_PATH`. There is no fallback route,
 retired configuration migration, or alternate executable baseline.

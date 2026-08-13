@@ -1,9 +1,8 @@
 # R-Series Evolution
 
 Status date: 2026-08-13. Active structural/lifecycle baseline: R043. Frozen
-higher-PSNR metric control: R036. Accepted appearance checkpoint: R050.
-Latest trained staged shape/appearance checkpoint: R057. Accepted advanced
-geometry implementation: R058. Active from-zero geometry validation: R059.
+higher-PSNR metric control: R036. Accepted appearance and strict zero-foldback
+reference: R050. Latest trained advanced-geometry research checkpoint: R059.
 
 This document is the compact decision history. Detailed measurements and
 artifact paths remain in `docs/accept_line_recovery_ledger.md` and the
@@ -34,6 +33,7 @@ individual R-series documents.
 | R055 | Staged primary shape/appearance before zero-centered secondary shape residual and reduced R054 foldback. |
 | R057 | Corrected RGB-flow gradient ownership without changing the staged-shape forward contract. |
 | R058 | Replaced invalid curl/frizz deformation with physical curl and independent band-limited frizz. |
+| R059 | Trained the R058 geometry under the unchanged R057 contract and removed most, but not all, sparse foldback. |
 
 ## Recovery And Interpolation: R000-R007
 
@@ -159,8 +159,8 @@ decision.
 | R054 | Primary-guide-only curl/frizz | Retained as a cleaner ownership control. Backward strands fall from R053 `560` to `375`, but local-turn P95 remains `57.30 deg`. |
 | R055 | Primary shape plus Gaussian appearance at 20k-25k, then secondary shape residual at 25k-30k | Accepted as the latest controlled shape checkpoint, not the default baseline. Versus R054, backward strands fall `375 -> 159`, local-turn P95 falls `57.30 -> 50.03 deg`, and local length continuity improves, with `-0.132 dB` fixed-view mean PSNR. R050 remains the strict structural reference. |
 | R057 | Exclude color parameters only from the existing RGB-flow backward | Accepted gradient-ownership correction. Reconstruction is metric-neutral versus R055; the sparse foldback tail is not improved. |
-| R058 | Redesign curl/frizz forward geometry | Accepted implementation with 133 passing tests after the R059 lifecycle/schema gates were added. No training result yet. |
-| R059 | Train the strict R058 schema on the complete R057 contract | Active formal from-zero H100 validation; results pending. |
+| R058 | Redesign curl/frizz forward geometry | Accepted implementation with 133 passing tests after the R059 lifecycle/schema gates were added. |
+| R059 | Train the strict R058 schema on the complete R057 contract | Accepted as the latest trained advanced-geometry research checkpoint. Final/best test is `32.25537/32.33647`, fixed eight-view mean is `33.32501`, and Gaussian RGB residual contributes `+1.60937 dB`. Backward strands fall `177 -> 34`, maximum-turn P95 `50.309 -> 10.265 deg`, and arc/chord P99 `1.20297 -> 1.14865`. The remaining 34 hooks form one compact head-crown patch, so R050 remains the strict zero-foldback reference. |
 
 ## Effective Findings
 
@@ -188,9 +188,10 @@ The strongest reusable findings are:
 ## Current Boundary
 
 R043 remains the base structural/lifecycle route and does not enable
-curl/frizz or Gaussian-level RGB residual. R050 is the accepted appearance
-checkpoint built on the smooth R049 geometry. R055 validates a more orderly
-optional-shape handoff, but its remaining foldback and mild long-tail strands
-prevent promotion into the default route. These roles must remain distinct:
-R043 for independent-root lifecycle, R050 for strict appearance/structure, and
-R055 for subsequent controlled curl/frizz research.
+curl/frizz or Gaussian-level RGB residual. R050 is the accepted appearance and
+strict zero-foldback checkpoint built on the smooth R049 geometry. R059 is the
+latest trained advanced-geometry research checkpoint: it preserves R057's
+appearance handoff while removing `80.8%` of strict foldbacks, but one compact
+head-crown cluster remains. These roles must remain distinct: R043 for
+independent-root lifecycle, R050 for strict appearance/structure, and R059 for
+subsequent controlled advanced-geometry work.
