@@ -44,9 +44,13 @@ DEFAULT_WORK_DIR = Path(r"D:\RTS\_tmp\paper_parametric_groom_controls")
 FINAL_STEM = "fig_parametric_groom_controls"
 COMPOSED_SCENE_STEM = "composed_scene"
 SCENE_SCALE = 12.0
-COMPOSED_ROOT_SPACING = 1.55
+COMPOSED_ROOT_SPACING = 0.82
 COMPOSED_WAVE_AMPLITUDE = 0.035
 COMPOSED_WAVE_FREQUENCY = np.pi / COMPOSED_ROOT_SPACING
+COMPOSED_ORTHO_SCALE = 4.20
+COMPOSED_CAMERA_OFFSET = (0.0, -1.0, 0.34)
+COMPOSED_TARGET_ROOT_OFFSET = (0.30, 0.0, 0.19)
+COMPOSED_GROUND_SCREEN_HEIGHT = 0.20
 BASE_LENGTH = 0.064
 BASE_ROOT_WIDTH = 0.00145
 BASE_TIP_WIDTH = 0.00018
@@ -524,6 +528,17 @@ def presentation_command(
     ground_wave_frequency: float = 0.0,
     ground_wave_phase: float = 0.0,
     ground_base_z: float | None = None,
+    ground_color: tuple[float, float, float] = (0.20, 0.20, 0.20),
+    world_strength: float = 0.85,
+    key_light_type: str = "area",
+    key_light_energy: float = 900.0,
+    key_light_offset: tuple[float, float, float] = (-0.12, -0.18, 1.80),
+    sun_angle_deg: float = 8.0,
+    fill_light_energy: float = 260.0,
+    fill_light_size: float = 2.0,
+    shadow_sun_energy: float = 1.5,
+    shadow_sun_offset: tuple[float, float, float] = (0.45, -0.12, 1.80),
+    shadow_sun_angle_deg: float = 5.0,
 ) -> list[str]:
     command = [
         str(blender), "--background", "--python", str(renderer), "--",
@@ -534,22 +549,25 @@ def presentation_command(
         "--material-roughness", "0.38",
         "--material-specular", "0.50",
         "--background-color", "0.6654", "0.6795", "0.7084",
-        "--world-strength", "0.85",
+        "--world-strength", str(world_strength),
         "--camera-background-strength", "1.0",
-        "--key-light-type", "area",
-        "--key-light-energy", "900",
+        "--key-light-type", key_light_type,
+        "--key-light-energy", str(key_light_energy),
         "--key-light-size", "1.6",
-        "--fill-light-energy", "260",
-        "--shadow-sun-energy", "1.5",
-        "--shadow-sun-offset", "0.45", "-0.12", "1.80",
-        "--shadow-sun-angle-deg", "5.0",
+        "--key-light-offset", *(str(value) for value in key_light_offset),
+        "--sun-angle-deg", str(sun_angle_deg),
+        "--fill-light-energy", str(fill_light_energy),
+        "--fill-light-size", str(fill_light_size),
+        "--shadow-sun-energy", str(shadow_sun_energy),
+        "--shadow-sun-offset", *(str(value) for value in shadow_sun_offset),
+        "--shadow-sun-angle-deg", str(shadow_sun_angle_deg),
         "--camera-offset", *(f"{value:.8f}" for value in camera_offset),
         "--target-root-offset", *(f"{value:.8f}" for value in target_root_offset),
         "--coord-system", "identity",
         "--frame-margin", str(frame_margin),
         "--reference-extent", str(reference_extent),
         "--ground-plane",
-        "--ground-color", "0.20", "0.20", "0.20",
+        "--ground-color", *(str(value) for value in ground_color),
         "--ground-relief", str(ground_relief),
         "--ground-width-scale", str(ground_width_scale),
         "--ground-depth-scale", str(ground_depth_scale),
@@ -684,20 +702,29 @@ def render_composed_scene(
             image_path=image_path,
             resolution=panel.resolution,
             render_samples=render_samples,
-            camera_offset=(0.0, -1.0, 0.26),
-            target_root_offset=(0.30, 0.0, 0.26),
+            camera_offset=COMPOSED_CAMERA_OFFSET,
+            target_root_offset=COMPOSED_TARGET_ROOT_OFFSET,
             frame_margin=1.0,
             reference_extent=1.0,
-            ortho_scale=7.60,
+            ortho_scale=COMPOSED_ORTHO_SCALE,
             ground_relief=0.010,
             ground_width_scale=4.40,
             ground_depth_scale=0.55,
-            ground_screen_height=0.10,
+            ground_screen_height=COMPOSED_GROUND_SCREEN_HEIGHT,
             gaussian_outlines=gaussian_outlines,
             ground_wave_amplitude=COMPOSED_WAVE_AMPLITUDE,
             ground_wave_frequency=COMPOSED_WAVE_FREQUENCY,
             ground_wave_phase=0.0,
             ground_base_z=0.0,
+            ground_color=(1.0, 1.0, 1.0),
+            world_strength=0.32,
+            key_light_type="sun",
+            key_light_energy=3.4,
+            key_light_offset=(-1.00, -0.05, 1.25),
+            sun_angle_deg=4.0,
+            fill_light_energy=110.0,
+            fill_light_size=8.0,
+            shadow_sun_energy=0.0,
         )
         completed = subprocess.run(command, capture_output=True, text=True)
         if completed.returncode != 0:

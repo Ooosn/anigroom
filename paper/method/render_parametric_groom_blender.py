@@ -142,6 +142,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sun-angle-deg", type=float, default=8.0)
     parser.add_argument("--fill-light-energy", type=float, default=260.0)
     parser.add_argument(
+        "--fill-light-size",
+        type=float,
+        default=2.0,
+        help="Fill-light size relative to the fixed presentation extent.",
+    )
+    parser.add_argument(
         "--shadow-sun-energy",
         type=float,
         default=0.0,
@@ -936,7 +942,7 @@ def main() -> None:
             float(presentation_center[2] + 0.35 * distance),
         )
         fill_data.energy = float(args.fill_light_energy)
-        fill_data.size = max_extent * 2.0
+        fill_data.size = max_extent * float(args.fill_light_size)
 
     if float(args.shadow_sun_energy) > 0.0:
         shadow_sun_data = bpy.data.lights.new("shadow_sun", "SUN")
