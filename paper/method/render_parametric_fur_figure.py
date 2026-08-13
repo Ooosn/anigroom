@@ -51,6 +51,9 @@ COMPOSED_ORTHO_SCALE = 4.20
 COMPOSED_CAMERA_OFFSET = (0.0, -1.0, 0.34)
 COMPOSED_TARGET_ROOT_OFFSET = (0.30, 0.0, 0.19)
 COMPOSED_GROUND_SCREEN_HEIGHT = 0.20
+# Remove 15% of the previously visible top background while retaining tip margin.
+CONTROL_PANEL_TOP_CROP = 0.40125
+CONTROL_PANEL_BOTTOM_CROP = 0.975
 BASE_LENGTH = 0.064
 BASE_ROOT_WIDTH = 0.00145
 BASE_TIP_WIDTH = 0.00018
@@ -796,9 +799,9 @@ def add_render_panel(
         image = image.crop(
             (
                 0,
-                int(round(image.height * 0.300)),
+                int(round(image.height * CONTROL_PANEL_TOP_CROP)),
                 image.width,
-                int(round(image.height * 0.975)),
+                int(round(image.height * CONTROL_PANEL_BOTTOM_CROP)),
             )
         )
         x0 = position - half_width
