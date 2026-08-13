@@ -1,10 +1,9 @@
 # R060: Length-Relative Curl And Frizz Amplitudes
 
-Status date: 2026-08-13.
+Status date: 2026-08-14.
 
-Status: implemented and locally verified; formal from-zero H100 training is
-pending. R059 remains frozen until the complete R060 run and structural QA are
-accepted.
+Status: completed and accepted as the current advanced-geometry baseline.
+R059 remains frozen as the matched absolute-amplitude control.
 
 ## Question
 
@@ -94,17 +93,91 @@ Artifacts:
 - `D:/RTS/_tmp/r060_relative_shape_scale_20260813/relative_shape_scale.npz`
 - `D:/RTS/_tmp/r060_relative_shape_scale_20260813/relative_shape_scale_blender.png`
 
-## Formal Acceptance Gate
+## Formal H100 Result
 
-The formal route is:
+The reviewed commit `88c953988c30b68bb9cdc09ed082c5b5b4b0577c` completed
+one uninterrupted, strict from-zero 0-30k H100 run. It used the unchanged
+1920x1080 data/evaluation contract, 400k initial render roots, 4500 primary
+guides, 20k secondary guides, and 30 training views. There was no resume,
+fallback, reduced resolution, or compatibility migration.
 
-1. clean checkout at the reviewed R060 commit;
-2. full-resolution active-path forward/backward preflight;
-3. strict from-zero 0-30k H100 training;
-4. eight fixed RGB views, canonical 100k-strand export, attribute diagnostics,
-   and the same foldback component audit used for R059.
+| Metric | R059 absolute amplitudes | R060 relative amplitudes | Delta |
+| --- | ---: | ---: | ---: |
+| final train composite | 33.38828 | 33.37045 | -0.01784 dB |
+| final test composite | 32.25537 | 32.23912 | -0.01625 dB |
+| best test composite | 32.33647 | 32.32348 | -0.01299 dB |
+| fixed eight-view composite mean | 33.32501 | 33.29358 | -0.03143 dB |
+| final render roots | 474054 | 473867 | -187 |
+| final generated Gaussians | 5535197 | 5486787 | -48410 |
+| elapsed time | 13351.595 s | 13593.378 s | +241.783 s |
+| peak CUDA allocation | 21938.24 MB | 16698.83 MB | -5239.41 MB |
 
-Acceptance requires no reconstruction collapse and a structural improvement
-in the R059 head-crown patch. In particular, the decision will use strict
-foldbacks, component attribution, normalized curl/frizz tails, local turn, and
-canonical assets together. PSNR alone cannot accept or reject the route.
+The two routes remain matched before optional shape activates. At iteration
+20k their test-composite difference is only `-0.00048 dB`, so the result is
+not caused by early capacity, lifecycle, or initialization drift. All 85
+lifecycle events finish by 9k, as in R059.
+
+## Structural Result
+
+The canonical audit uses the same 100k roots, 32 samples, and seed 29 as R050
+and R059.
+
+| Metric | R050 | R059 | R060 |
+| --- | ---: | ---: | ---: |
+| strict foldback strands | 0 | 34 | 0 |
+| local relative-length mean | 0.02047 | 0.02125 | 0.02062 |
+| local relative-length P95 | 0.07741 | 0.07919 | 0.07726 |
+| local direction difference mean | 3.828 deg | 3.946 deg | 3.916 deg |
+| local direction difference P95 | 11.296 deg | 11.475 deg | 11.378 deg |
+| arc/chord P95 | 1.00673 | 1.06189 | 1.03476 |
+| arc/chord P99 | 1.02534 | 1.14865 | 1.08576 |
+| maximum local-turn P95 | 0.955 deg | 10.265 deg | 8.853 deg |
+| maximum local turn | 3.188 deg | 56.163 deg | 41.063 deg |
+
+R060 has zero strict foldbacks at 20k, 22k, 25k, 27k, and 30k. The matched
+R059 timeline has 14 at 25k, 25 at 27k, and 34 at 30k. Curl-only,
+frizz-only, primary-only, and secondary-disabled R060 component audits also
+remain at zero foldbacks.
+
+This is not a disabled-shape result. At 30k the effective curl-radius ratio
+has mean/P95/max `0.01769/0.05822/0.16837`, while effective frizz ratio has
+mean/P95/max `0.00621/0.01769/0.11901`. Their derived physical amplitudes vary
+with strand length, which removes the R059 failure where one short crown hair
+received a curl radius larger than its own length.
+
+## Appearance Handoff
+
+The fixed eight-view Gaussian RGB residual gain is `+1.60593 dB`, compared
+with `+1.60937 dB` in R059. Residual RMS is `0.07857`, saturation is `1.84%`,
+and mean shape-detail image magnitude remains nonzero at `0.00165`. Therefore
+the appearance outlet remains active and optional shape has not collapsed.
+
+Canonical side, opposite-side, and front assets show no new body spike,
+tail hook, leg foldback, or head-crown spiral. Some top/front regions still
+show direction-field convergence and crossing bands. That is retained as a
+clean-flow/direction-field or asset-postprocess issue; R060 does not claim to
+solve it through curl/frizz amplitude semantics.
+
+## Decision And Frozen Evidence
+
+R060 is accepted because it removes the short-strand scale failure and all 34
+R059 strict foldbacks while preserving reconstruction, appearance handoff,
+lifecycle behavior, and local continuity. R059 is retained only as the
+absolute-amplitude comparison. R050 remains the near-straight appearance
+reference, and R043 remains the structural/lifecycle base.
+
+Formal evidence:
+
+- server output: `/home/wangyy/anigroom-r060-relative-shape-runtime-20260813/outputs/r060_relative_shape_amplitudes_0_30k_h100_20260813`
+- local postprocess: `D:/RTS/_tmp/r060_h100_postprocess_20260814/postprocess/r060_relative_shape_amplitudes`
+- foldback timeline: `D:/RTS/_tmp/r060_h100_postprocess_20260814/diagnostics/foldback_timeline_20260814`
+- canonical cross-run audit: `D:/RTS/_tmp/r060_h100_postprocess_20260814/postprocess/r050_r059_r060_strand_audit_canonical.json`
+- canonical side asset: `D:/RTS/_tmp/r060_h100_postprocess_20260814/postprocess/r060_relative_shape_amplitudes/assets/r060_030000_asset_side_y_v11_protocol.png`
+
+Frozen SHA256 values:
+
+- checkpoint: `5300eabe5495f6f6fd254ad1911b874b80c0b4a8ae01f98ba90ad6ddb40f7060`
+- configuration: `d76386759e59b1f288a223306f69c7053b9a4ebcfa2d6218c5765ed6ad6ad3b4`
+- render report: `b6d85bfbc4e6e2d6b2863fc21efdf58606e18ea8d81db777adafce77566b2b6d`
+- strand export: `23c7cbbbedb2c2cea5e8f2ef0c877b97750e2eeca4bd08d326e5148e6e415140`
+- canonical cross-run audit: `5c6b30022f50fe2d96a62753e02eabd4228b198bae3cf59202b0e49b9608a6f0`

@@ -82,29 +82,24 @@ fixed views. Its sparse extreme foldback tail is not better, so R057 is a
 gradient-ownership correction rather than a structural solution. See
 `docs/r057_rgb_flow_no_color_grad.md`.
 
-R059 is the latest trained advanced-geometry research checkpoint. It inherits
-the complete R057 behavior contract and changes only the R058 curl/frizz
-forward geometry under a strict from-zero schema. Final/best test composite is
-`32.25537/32.33647`, and fixed eight-view mean is `33.32501`; all differ from
-R057 by at most `0.0202 dB`. The Gaussian RGB residual still contributes
-`+1.60937 dB`. In the matched 100k-strand audit, backward strands fall
-`177 -> 34`, maximum-turn P95 falls `50.309 -> 10.265` degrees, and arc/chord
-P99 falls `1.20297 -> 1.14865`. The remaining 34 hooks form one compact
-head-crown patch. R059 therefore replaces R057 only as the advanced-geometry
-research parent. R050 remains the strict zero-foldback structural/appearance
-reference, and R043 remains the default structural/lifecycle baseline. See
-`docs/r058_advanced_groom_geometry.md` and
+R059 is the immutable absolute-amplitude comparison for advanced geometry. It
+inherits the complete R057 behavior contract and changes only the R058
+curl/frizz forward geometry. Its formal run reaches final/best test composite
+`32.25537/32.33647`, fixed eight-view mean `33.32501`, and 34 strict foldbacks
+in one compact head-crown patch. See
 `docs/r059_redesigned_groom_geometry_training.md`.
 
-R060 is the current unaccepted one-variable candidate. It retains the complete
-R059 training contract but replaces absolute curl radius and frizz amplitude
-with positive dimensionless ratios to current strand length. Physical offsets
-are formed only in `build_strands` as `length * ratio`; guide interpolation,
+R060 is the accepted current advanced-geometry baseline. It retains the
+complete R059 training contract but stores curl radius and frizz amplitude as
+positive dimensionless ratios to current strand length. Physical offsets are
+formed only in `build_strands` as `length * ratio`; guide interpolation,
 secondary/render residuals, smoothing, and lifecycle inheritance all use the
-same ratio semantics. Checkpoint schema `7` intentionally rejects R059 state,
-so the formal comparison must train from zero. Local scale-equivariance and
-gradient tests pass; formal H100 training and fixed-protocol structural QA are
-pending. See `docs/r060_relative_shape_amplitudes.md`.
+same ratio semantics. The strict from-zero run reaches final/best test
+`32.23912/32.32348`, within `0.0163/0.0130 dB` of R059, while matched 100k
+strict foldbacks fall `34 -> 0`. Fixed eight-view mean is `33.29358`, and the
+Gaussian RGB residual still contributes `+1.60593 dB`. R050 remains the
+near-straight appearance reference, and R043 remains the structural/lifecycle
+base. See `docs/r060_relative_shape_amplitudes.md`.
 
 ## Active Entry Points
 
@@ -121,9 +116,9 @@ pending. See `docs/r060_relative_shape_amplitudes.md`.
   `configs/r055_staged_primary_secondary_shape_0_30k.env`
 - accepted R057 staged-shape/gradient-ownership parent:
   `configs/r057_rgb_flow_no_color_grad_0_30k.env`
-- latest trained R059 advanced-geometry research configuration:
+- frozen R059 absolute-amplitude comparison configuration:
   `configs/r059_redesigned_groom_geometry_0_30k.env`
-- unaccepted R060 length-relative shape candidate:
+- accepted R060 advanced-geometry configuration:
   `configs/r060_relative_shape_amplitudes_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
