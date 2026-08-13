@@ -837,7 +837,7 @@ def add_composed_panel(
     upper = Image.open(work_dir / f"{COMPOSED_SCENE_STEM}.png").convert("RGB")
     lower = Image.open(work_dir / f"{COMPOSED_SCENE_STEM}_gaussians.png").convert("RGB")
     ax.imshow(upper, extent=(0.0, 1.0, 0.500, 0.910), aspect="auto")
-    ax.imshow(lower, extent=(0.0, 1.0, 0.090, 0.500), aspect="auto")
+    ax.imshow(lower, extent=(0.0, 1.0, 0.102, 0.512), aspect="auto")
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
