@@ -42,7 +42,11 @@ from anigroom.grooming.strand_gaussians import (  # noqa: E402
 DEFAULT_BLENDER = Path(r"D:\Program Files\Blender Foundation\Blender 5.0\blender.exe")
 DEFAULT_WORK_DIR = Path(r"D:\RTS\_tmp\paper_parametric_groom_controls")
 FINAL_STEM = "fig_parametric_groom_controls"
+COMPOSED_SCENE_STEM = "composed_scene"
 SCENE_SCALE = 12.0
+COMPOSED_ROOT_SPACING = 1.55
+COMPOSED_WAVE_AMPLITUDE = 0.035
+COMPOSED_WAVE_FREQUENCY = np.pi / COMPOSED_ROOT_SPACING
 BASE_LENGTH = 0.064
 BASE_ROOT_WIDTH = 0.00145
 BASE_TIP_WIDTH = 0.00018
@@ -438,11 +442,144 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
                 frizz_seed=2.17,
             ),
         ),
-        resolution=(4320, 540),
+        resolution=(4320, 700),
         frame_margin=1.08,
         ortho_scale=0.82,
         reference_extent=0.92,
     )
+
+
+def build_composed_scene_arrays(
+    panel: Panel,
+    *,
+    gaussian_outlines: bool,
+) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+    root_x = np.linspace(
+        -2.0 * COMPOSED_ROOT_SPACING,
+        2.0 * COMPOSED_ROOT_SPACING,
+        len(panel.specs),
+        dtype=np.float32,
+    )
+    root_z = COMPOSED_WAVE_AMPLITUDE * np.cos(
+        COMPOSED_WAVE_FREQUENCY * root_x
+    )
+    groups: list[dict[str, np.ndarray]] = []
+    group_reports: list[dict[str, object]] = []
+    for group_index, (spec, x, z) in enumerate(zip(panel.specs, root_x, root_z)):
+        arrays, stats = build_value_strands(
+            spec,
+            adaptive_samples=gaussian_outlines,
+            gaussian_strand_index=1 if gaussian_outlines else None,
+        )
+        translation = np.asarray([x, 0.0, z], dtype=np.float32)
+        arrays["strands"] = arrays["strands"] + translation[None, None, :]
+        if gaussian_outlines:
+            arrays["gaussian_means"] = arrays["gaussian_means"] + translation[None, :]
+        groups.append(arrays)
+        group_reports.append(
+            {
+                "group_index": group_index,
+                "label": panel.labels[group_index],
+                "root_position": [float(x), 0.0, float(z)],
+                **stats,
+            }
+        )
+
+    combined: dict[str, np.ndarray] = {
+        key: np.concatenate([group[key] for group in groups], axis=0)
+        for key in ("strands", "widths", "colors", "opacities")
+    }
+    combined["root_ids"] = np.arange(combined["strands"].shape[0], dtype=np.int64)
+    if gaussian_outlines:
+        for key in ("gaussian_means", "gaussian_directions", "gaussian_scales"):
+            combined[key] = np.concatenate([group[key] for group in groups], axis=0)
+    return combined, {
+        "group_count": len(panel.specs),
+        "root_spacing": COMPOSED_ROOT_SPACING,
+        "wave_amplitude": COMPOSED_WAVE_AMPLITUDE,
+        "wave_frequency": COMPOSED_WAVE_FREQUENCY,
+        "groups": group_reports,
+    }
+
+
+def presentation_command(
+    *,
+    blender: Path,
+    renderer: Path,
+    npz_path: Path,
+    image_path: Path,
+    resolution: tuple[int, int],
+    render_samples: int,
+    camera_offset: tuple[float, float, float],
+    target_root_offset: tuple[float, float, float],
+    frame_margin: float,
+    reference_extent: float,
+    ortho_scale: float,
+    ground_relief: float,
+    ground_width_scale: float,
+    ground_depth_scale: float,
+    ground_screen_height: float,
+    gaussian_outlines: bool,
+    ground_wave_amplitude: float = 0.0,
+    ground_wave_frequency: float = 0.0,
+    ground_wave_phase: float = 0.0,
+    ground_base_z: float | None = None,
+) -> list[str]:
+    command = [
+        str(blender), "--background", "--python", str(renderer), "--",
+        "--input", str(npz_path), "--output", str(image_path),
+        "--resolution", str(resolution[0]), str(resolution[1]),
+        "--samples", str(render_samples), "--width-scale", "1.0",
+        "--material-color", "0.78", "0.34", "0.07",
+        "--material-roughness", "0.38",
+        "--material-specular", "0.50",
+        "--background-color", "0.6654", "0.6795", "0.7084",
+        "--world-strength", "0.85",
+        "--camera-background-strength", "1.0",
+        "--key-light-type", "area",
+        "--key-light-energy", "900",
+        "--key-light-size", "1.6",
+        "--fill-light-energy", "260",
+        "--shadow-sun-energy", "1.5",
+        "--shadow-sun-offset", "0.45", "-0.12", "1.80",
+        "--shadow-sun-angle-deg", "5.0",
+        "--camera-offset", *(f"{value:.8f}" for value in camera_offset),
+        "--target-root-offset", *(f"{value:.8f}" for value in target_root_offset),
+        "--coord-system", "identity",
+        "--frame-margin", str(frame_margin),
+        "--reference-extent", str(reference_extent),
+        "--ground-plane",
+        "--ground-color", "0.20", "0.20", "0.20",
+        "--ground-relief", str(ground_relief),
+        "--ground-width-scale", str(ground_width_scale),
+        "--ground-depth-scale", str(ground_depth_scale),
+        "--ground-screen-height", str(ground_screen_height),
+    ]
+    if ortho_scale > 0.0:
+        command.extend(["--ortho-scale", str(ortho_scale)])
+    if abs(ground_wave_amplitude) > 0.0:
+        command.extend(
+            [
+                "--ground-wave-amplitude", str(ground_wave_amplitude),
+                "--ground-wave-frequency", str(ground_wave_frequency),
+                "--ground-wave-phase", str(ground_wave_phase),
+            ]
+        )
+    if ground_base_z is not None:
+        command.extend(["--ground-base-z", str(ground_base_z)])
+    if gaussian_outlines:
+        command.extend(
+            [
+                "--gaussian-outline-only",
+                "--gaussian-outline-color", "0.10", "0.12", "0.15",
+                "--gaussian-accent-color", "0.72", "0.36", "0.07",
+                "--gaussian-outline-width", "0.00190",
+                "--gaussian-outline-scale", "1.0",
+            ]
+        )
+    else:
+        command.append("--use-input-colors")
+    return command
 
 
 def render_panel(
@@ -472,72 +609,34 @@ def render_panel(
             gaussian_strand_index=1 if gaussian_outlines else None,
         )
         np.savez(npz_path, **arrays)
-        camera_offset = ("0.07", "-1.0", "0.14") if panel.key == "composed" else ("0.0", "-1.0", "0.09")
         item_width = panel.resolution[0] // len(panel.specs)
         item_aspect = float(item_width) / float(panel.resolution[1])
         target_x_shift = (
             panel.target_x_shifts[value_index] if panel.target_x_shifts else 0.0
         )
-        if panel.key == "composed":
-            # Keep the root and the underside of the receiver inside each tall cell.
-            target_x = 0.25 + target_x_shift
-            target_z = 0.23
-        else:
-            target_x = 0.32 + target_x_shift
-            target_z = 0.30
         root_target_offset = (
-            target_x * panel.ortho_scale * item_aspect,
+            (0.32 + target_x_shift) * panel.ortho_scale * item_aspect,
             0.0,
-            target_z * panel.ortho_scale,
+            0.30 * panel.ortho_scale,
         )
-        command = [
-            str(blender), "--background", "--python", str(renderer), "--",
-            "--input", str(npz_path), "--output", str(image_path),
-            "--resolution", str(panel.resolution[0] // len(panel.specs)), str(panel.resolution[1]),
-            "--samples", str(render_samples), "--width-scale", "1.0",
-            "--material-color", "0.78", "0.34", "0.07",
-            "--material-roughness", "0.38",
-            "--material-specular", "0.50",
-            "--background-color", "0.6654", "0.6795", "0.7084",
-            "--world-strength", "0.85",
-            "--camera-background-strength", "1.0",
-            "--key-light-type", "area",
-            "--key-light-energy", "900",
-            "--key-light-size", "1.6",
-            "--fill-light-energy", "260",
-            "--shadow-sun-energy", "1.5",
-            "--shadow-sun-offset", "0.45", "-0.12", "1.80",
-            "--shadow-sun-angle-deg", "5.0",
-            "--camera-offset", *camera_offset,
-            "--target-root-offset", *(f"{value:.8f}" for value in root_target_offset),
-            "--coord-system", "identity",
-            "--frame-margin", str(panel.frame_margin),
-            "--reference-extent", str(panel.reference_extent),
-        ]
-        if panel.ortho_scale > 0.0:
-            command.extend(["--ortho-scale", str(panel.ortho_scale)])
-        command.extend(
-            [
-                "--ground-plane",
-                "--ground-color", "0.20", "0.20", "0.20",
-                "--ground-relief", "0.040",
-                "--ground-width-scale", "2.40",
-                "--ground-depth-scale", "0.55",
-                "--ground-screen-height", "0.075" if panel.key == "composed" else "0.10",
-            ]
+        command = presentation_command(
+            blender=blender,
+            renderer=renderer,
+            npz_path=npz_path,
+            image_path=image_path,
+            resolution=(item_width, panel.resolution[1]),
+            render_samples=render_samples,
+            camera_offset=(0.0, -1.0, 0.09),
+            target_root_offset=root_target_offset,
+            frame_margin=panel.frame_margin,
+            reference_extent=panel.reference_extent,
+            ortho_scale=panel.ortho_scale,
+            ground_relief=0.040,
+            ground_width_scale=2.40,
+            ground_depth_scale=0.55,
+            ground_screen_height=0.10,
+            gaussian_outlines=gaussian_outlines,
         )
-        if not gaussian_outlines:
-            command.append("--use-input-colors")
-        if gaussian_outlines:
-            command.extend(
-                [
-                    "--gaussian-outline-only",
-                    "--gaussian-outline-color", "0.10", "0.12", "0.15",
-                    "--gaussian-accent-color", "0.72", "0.36", "0.07",
-                    "--gaussian-outline-width", "0.00190",
-                    "--gaussian-outline-scale", "1.0",
-                ]
-            )
         completed = subprocess.run(command, capture_output=True, text=True)
         if completed.returncode != 0:
             raise RuntimeError(
@@ -556,6 +655,68 @@ def render_panel(
         "values": value_reports,
         "specs": [spec.__dict__ for spec in panel.specs],
         **value_reports[0],
+    }
+
+
+def render_composed_scene(
+    panel: Panel,
+    *,
+    blender: Path,
+    renderer: Path,
+    work_dir: Path,
+    render_samples: int,
+) -> dict[str, object]:
+    reports: dict[str, object] = {}
+    for gaussian_outlines in (False, True):
+        suffix = "_gaussians" if gaussian_outlines else ""
+        stem = f"{COMPOSED_SCENE_STEM}{suffix}"
+        npz_path = work_dir / f"{stem}.npz"
+        image_path = work_dir / f"{stem}.png"
+        arrays, scene_report = build_composed_scene_arrays(
+            panel,
+            gaussian_outlines=gaussian_outlines,
+        )
+        np.savez(npz_path, **arrays)
+        command = presentation_command(
+            blender=blender,
+            renderer=renderer,
+            npz_path=npz_path,
+            image_path=image_path,
+            resolution=panel.resolution,
+            render_samples=render_samples,
+            camera_offset=(0.0, -1.0, 0.26),
+            target_root_offset=(0.30, 0.0, 0.26),
+            frame_margin=1.0,
+            reference_extent=1.0,
+            ortho_scale=7.60,
+            ground_relief=0.010,
+            ground_width_scale=4.40,
+            ground_depth_scale=0.55,
+            ground_screen_height=0.10,
+            gaussian_outlines=gaussian_outlines,
+            ground_wave_amplitude=COMPOSED_WAVE_AMPLITUDE,
+            ground_wave_frequency=COMPOSED_WAVE_FREQUENCY,
+            ground_wave_phase=0.0,
+            ground_base_z=0.0,
+        )
+        completed = subprocess.run(command, capture_output=True, text=True)
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"Blender failed for {stem}:\n{completed.stdout}\n{completed.stderr}"
+            )
+        if not image_path.exists():
+            raise RuntimeError(f"Blender did not produce {image_path}")
+        reports["gaussians" if gaussian_outlines else "strands"] = {
+            "npz": str(npz_path.resolve()),
+            "image": str(image_path.resolve()),
+            **scene_report,
+        }
+    return {
+        "key": panel.key,
+        "title": panel.title,
+        "labels": list(panel.labels),
+        "specs": [spec.__dict__ for spec in panel.specs],
+        "scene": reports,
     }
 
 
@@ -646,22 +807,10 @@ def add_composed_panel(
     panel: Panel,
     work_dir: Path,
 ) -> None:
-    column_count = len(panel.labels)
-    half_width = 0.5 / column_count
-    positions = np.linspace(half_width, 1.0 - half_width, column_count)
-    for value_index, position in enumerate(positions):
-        upper = Image.open(work_dir / f"{panel.key}_{value_index}.png").convert("RGB")
-        lower = Image.open(work_dir / f"{panel.key}_{value_index}_gaussians.png").convert("RGB")
-        upper = upper.crop(
-            (0, int(0.015 * upper.height), upper.width, int(0.960 * upper.height))
-        )
-        lower = lower.crop(
-            (0, int(0.015 * lower.height), lower.width, int(0.960 * lower.height))
-        )
-        x0 = position - half_width
-        x1 = position + half_width
-        ax.imshow(upper, extent=(x0, x1, 0.500, 0.910), aspect="auto")
-        ax.imshow(lower, extent=(x0, x1, 0.090, 0.500), aspect="auto")
+    upper = Image.open(work_dir / f"{COMPOSED_SCENE_STEM}.png").convert("RGB")
+    lower = Image.open(work_dir / f"{COMPOSED_SCENE_STEM}_gaussians.png").convert("RGB")
+    ax.imshow(upper, extent=(0.0, 1.0, 0.500, 0.910), aspect="auto")
+    ax.imshow(lower, extent=(0.0, 1.0, 0.090, 0.500), aspect="auto")
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
@@ -782,7 +931,6 @@ def main() -> None:
     )
     panels = control_panels(palette=args.palette)
     composed = composed_panel(palette=args.palette)
-    all_panels = (*panels, composed)
 
     if args.single_panel:
         matching_panels = [panel for panel in panels if panel.key == args.single_panel]
@@ -842,14 +990,14 @@ def main() -> None:
     if args.skip_blender:
         missing = [
             f"{panel.key}_{index}"
-            for panel in all_panels
+            for panel in panels
             for index in range(len(panel.specs))
             if not (args.work_dir / f"{panel.key}_{index}.png").exists()
         ]
         missing.extend(
-            f"{composed.key}_{index}_gaussians"
-            for index in range(len(composed.specs))
-            if not (args.work_dir / f"{composed.key}_{index}_gaussians.png").exists()
+            stem
+            for stem in (COMPOSED_SCENE_STEM, f"{COMPOSED_SCENE_STEM}_gaussians")
+            if not (args.work_dir / f"{stem}.png").exists()
         )
         if missing:
             raise FileNotFoundError(f"Missing cached Blender renders: {missing}")
@@ -858,7 +1006,7 @@ def main() -> None:
             raise FileNotFoundError(cached_report)
         report = json.loads(cached_report.read_text(encoding="utf-8"))
     else:
-        for panel in all_panels:
+        for panel in panels:
             report["renders"][panel.key] = render_panel(
                 panel,
                 blender=args.blender,
@@ -867,14 +1015,12 @@ def main() -> None:
                 render_samples=args.render_samples,
                 final_sampling=False,
             )
-        report["renders"]["composed_gaussians"] = render_panel(
+        report["renders"]["composed"] = render_composed_scene(
             composed,
             blender=args.blender,
             renderer=renderer,
             work_dir=args.work_dir,
             render_samples=args.render_samples,
-            final_sampling=True,
-            gaussian_outlines=True,
         )
         (args.work_dir / "render_report.json").write_text(
             json.dumps(report, indent=2) + "\n",

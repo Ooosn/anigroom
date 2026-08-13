@@ -70,6 +70,30 @@ def parse_args() -> argparse.Namespace:
         help="Target receiver height as a fraction of the orthographic frame; zero uses ground-depth-scale.",
     )
     parser.add_argument(
+        "--ground-wave-amplitude",
+        type=float,
+        default=0.0,
+        help="Optional cosine-wave amplitude across the receiver's horizontal axis.",
+    )
+    parser.add_argument(
+        "--ground-wave-frequency",
+        type=float,
+        default=0.0,
+        help="Angular frequency of the optional horizontal receiver wave.",
+    )
+    parser.add_argument(
+        "--ground-wave-phase",
+        type=float,
+        default=0.0,
+        help="Phase of the optional horizontal receiver wave.",
+    )
+    parser.add_argument(
+        "--ground-base-z",
+        type=float,
+        default=None,
+        help="Optional undeformed receiver height; defaults to the mean root height.",
+    )
+    parser.add_argument(
         "--gaussian-outline-only",
         action="store_true",
         help="Render only wire outlines of Gaussian ellipsoids stored in the input NPZ.",
@@ -355,6 +379,10 @@ def add_ground_plane(
     relief_fraction: float,
     width_scale: float,
     depth_scale: float,
+    wave_amplitude: float,
+    wave_frequency: float,
+    wave_phase: float,
+    base_z: float | None,
 ) -> object:
     import bpy
 
@@ -364,7 +392,7 @@ def add_ground_plane(
     relief = max(max_extent * float(relief_fraction), 0.0)
     dome_center_x = float(root_center[0])
     dome_center_y = float(root_center[1])
-    top_z = float(root_center[2] - margin)
+    top_z = float(root_center[2] if base_z is None else base_z) - margin
     half_width = max(float(width_scale) * max_extent, 1.0e-5)
     half_depth = max(float(depth_scale) * max_extent, 1.0e-5)
     x_count = 65
@@ -378,9 +406,15 @@ def add_ground_plane(
             x = dome_center_x + half_width * x_unit
             x_relative = (x - dome_center_x) / max(max_extent, 1.0e-8)
             x_profile = float(np.clip(x_relative, -1.25, 1.25))
-            z = top_z - relief * (
-                0.78 * x_profile * x_profile + 0.22 * y_unit * y_unit
-            )
+            if abs(float(wave_amplitude)) > 0.0:
+                wave = float(wave_amplitude) * math.cos(
+                    float(wave_frequency) * (x - dome_center_x) + float(wave_phase)
+                )
+                z = top_z + wave - relief * y_unit * y_unit
+            else:
+                z = top_z - relief * (
+                    0.78 * x_profile * x_profile + 0.22 * y_unit * y_unit
+                )
             vertices.append((float(x), float(y), float(z)))
     faces: list[tuple[int, ...]] = []
     for y_index in range(y_count - 1):
@@ -839,7 +873,11 @@ def main() -> None:
             projected_depth = abs(float(camera_up[1]))
             if projected_depth < 1.0e-5:
                 raise RuntimeError("ground-screen-height requires a camera with a nonzero top-down component")
-            target_height = float(args.ground_screen_height) * float(cam_data.ortho_scale)
+            aspect = float(scene.render.resolution_x) / max(
+                float(scene.render.resolution_y), 1.0
+            )
+            camera_frame_height = float(cam_data.ortho_scale) / max(aspect, 1.0)
+            target_height = float(args.ground_screen_height) * camera_frame_height
             relief_height = (
                 0.22
                 * float(args.ground_relief)
@@ -861,6 +899,10 @@ def main() -> None:
             relief_fraction=float(args.ground_relief),
             width_scale=float(args.ground_width_scale),
             depth_scale=resolved_ground_depth_scale,
+            wave_amplitude=float(args.ground_wave_amplitude),
+            wave_frequency=float(args.ground_wave_frequency),
+            wave_phase=float(args.ground_wave_phase),
+            base_z=(float(args.ground_base_z) if args.ground_base_z is not None else None),
         )
 
     light_type = "SUN" if args.key_light_type == "sun" else "AREA"
@@ -930,6 +972,12 @@ def main() -> None:
         "ground_plane": bool(args.ground_plane),
         "ground_depth_scale": float(resolved_ground_depth_scale),
         "ground_screen_height": float(args.ground_screen_height),
+        "ground_wave_amplitude": float(args.ground_wave_amplitude),
+        "ground_wave_frequency": float(args.ground_wave_frequency),
+        "ground_wave_phase": float(args.ground_wave_phase),
+        "ground_base_z": (
+            float(args.ground_base_z) if args.ground_base_z is not None else None
+        ),
         "material_roughness": float(args.material_roughness),
         "material_specular": float(args.material_specular),
         "world_strength": float(args.world_strength),
