@@ -54,6 +54,10 @@ COMPOSED_GROUND_SCREEN_HEIGHT = 0.20
 # Remove 15% of the previously visible top background while retaining tip margin.
 CONTROL_PANEL_TOP_CROP = 0.40125
 CONTROL_PANEL_BOTTOM_CROP = 0.975
+CONTROL_PANEL_IMAGE_TOP = 0.910
+COMPOSED_ROW_HEIGHT_RATIO = 1.46
+COMPOSED_IMAGE_TOP = 1.0 - (1.0 - CONTROL_PANEL_IMAGE_TOP) / COMPOSED_ROW_HEIGHT_RATIO
+COMPOSED_IMAGE_SHIFT = COMPOSED_IMAGE_TOP - CONTROL_PANEL_IMAGE_TOP
 BASE_LENGTH = 0.064
 BASE_ROOT_WIDTH = 0.00145
 BASE_TIP_WIDTH = 0.00018
@@ -73,6 +77,24 @@ def font_property(filename: str, *, size: float, style: str = "normal") -> font_
 TITLE_FONT = font_property("arialbd.ttf", size=12.5)
 SYMBOL_FONT = font_property("arialbi.ttf", size=12.5, style="italic")
 VALUE_FONT = font_property("arial.ttf", size=10.6)
+
+
+def configure_figure_fonts() -> None:
+    plt.rcParams.update(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "DejaVu Sans"],
+            "mathtext.fontset": "custom",
+            "mathtext.rm": "Arial",
+            "mathtext.it": "Arial:italic",
+            "mathtext.bf": "Arial:bold",
+            "mathtext.bfit": "Arial:italic:bold",
+            "mathtext.sf": "Arial",
+            "mathtext.default": "it",
+            "mathtext.fallback": "stixsans",
+            "axes.unicode_minus": False,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -271,7 +293,7 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
         Panel(
             "direction",
             "3D direction",
-            "d",
+            r"$\mathbfit{d}$",
             "angle from surface normal",
             ("8°", "48°", "82°"),
             tuple(
@@ -290,7 +312,7 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
         Panel(
             "length",
             "Length",
-            r"$\ell/\ell_{\mathrm{ref}}$",
+            r"$\mathbfit{L/L}_{\mathrm{ref}}$",
             "normalized by reference length",
             ("0.45", "1.00", "1.75"),
             tuple(replace(base, length=BASE_LENGTH * value) for value in (0.45, 1.0, 1.75)),
@@ -301,7 +323,7 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
         Panel(
             "stiffness",
             "Brush stiffness",
-            "s",
+            r"$\mathbfit{s}$",
             "one normal-to-flow turn",
             ("0", "0.5", "1"),
             tuple(replace(base, angle_deg=78.0, stiffness=value) for value in (0.0, 0.5, 1.0)),
@@ -312,7 +334,7 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
         Panel(
             "width",
             "Width profile",
-            "w(u)",
+            r"$\mathbfit{w(u)}$",
             "root, tip, and taper",
             ("0.65", "1.55", "2.10"),
             (
@@ -326,7 +348,7 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
         Panel(
             "curl_radius",
             "Curl radius",
-            r"$r/\ell$",
+            r"$\mathbfit{r/L}$",
             "normalized by strand length",
             ("0", "0.07", "0.16"),
             tuple(
@@ -339,7 +361,7 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
         Panel(
             "curl_turns",
             "Curl turns",
-            "f",
+            r"$\mathbfit{f}$",
             "turns along the final strand",
             ("0.5", "1.5", "3.0"),
             tuple(
@@ -352,7 +374,7 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
         Panel(
             "frizz",
             "Micro-frizz",
-            r"$a/\ell$",
+            r"$\mathbfit{a/L}$",
             "normalized by strand length",
             ("0", "0.035", "0.09"),
             tuple(
@@ -365,7 +387,7 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
         Panel(
             "appearance",
             "Root-tip color",
-            "c(u)",
+            r"$\mathbfit{c(u)}$",
             "continuous appearance profile",
             ("color_0", "color_1", "color_2"),
             appearance_specs,
@@ -875,8 +897,21 @@ def add_composed_panel(
 ) -> None:
     upper = Image.open(work_dir / f"{COMPOSED_SCENE_STEM}.png").convert("RGB")
     lower = Image.open(work_dir / f"{COMPOSED_SCENE_STEM}_gaussians.png").convert("RGB")
-    ax.imshow(upper, extent=(0.0, 1.0, 0.500, 0.910), aspect="auto")
-    ax.imshow(lower, extent=(0.0, 1.0, 0.102, 0.512), aspect="auto")
+    ax.imshow(
+        upper,
+        extent=(
+            0.0,
+            1.0,
+            0.500 + COMPOSED_IMAGE_SHIFT,
+            CONTROL_PANEL_IMAGE_TOP + COMPOSED_IMAGE_SHIFT,
+        ),
+        aspect="auto",
+    )
+    ax.imshow(
+        lower,
+        extent=(0.0, 1.0, 0.102 + COMPOSED_IMAGE_SHIFT, 0.512 + COMPOSED_IMAGE_SHIFT),
+        aspect="auto",
+    )
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
@@ -904,7 +939,7 @@ def compose_figure(
     report: dict[str, object],
     output_stem: str = FINAL_STEM,
 ) -> None:
-    plt.rcParams.update({"font.family": "Arial", "axes.unicode_minus": False})
+    configure_figure_fonts()
     figure = plt.figure(figsize=(7.50, 6.60), facecolor="white")
     grid = figure.add_gridspec(
         3,
@@ -915,7 +950,7 @@ def compose_figure(
         top=0.985,
         hspace=0.02,
         wspace=0.02,
-        height_ratios=(1.0, 1.0, 1.46),
+        height_ratios=(1.0, 1.0, COMPOSED_ROW_HEIGHT_RATIO),
     )
 
     for index, panel in enumerate(panels):
@@ -933,13 +968,20 @@ def compose_figure(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     for suffix, dpi in (("png", 600), ("pdf", 300), ("svg", 300)):
+        output_path = output_dir / f"{output_stem}.{suffix}"
         figure.savefig(
-            output_dir / f"{output_stem}.{suffix}",
+            output_path,
             dpi=dpi,
             facecolor="white",
             bbox_inches=None,
             pad_inches=0.0,
         )
+        if suffix == "svg":
+            svg = output_path.read_text(encoding="utf-8")
+            output_path.write_text(
+                "\n".join(line.rstrip() for line in svg.splitlines()) + "\n",
+                encoding="utf-8",
+            )
     plt.close(figure)
 
 
@@ -949,14 +991,7 @@ def compose_single_panel(
     work_dir: Path,
     output_dir: Path,
 ) -> dict[str, str]:
-    plt.rcParams.update(
-        {
-            "font.family": "sans-serif",
-            "font.sans-serif": ["Arial", "DejaVu Sans"],
-            "mathtext.fontset": "stixsans",
-            "axes.unicode_minus": False,
-        }
-    )
+    configure_figure_fonts()
     figure = plt.figure(figsize=(4.6, 3.6), facecolor="white")
     axis = figure.add_axes((0.02, 0.02, 0.96, 0.96))
     add_render_panel(
