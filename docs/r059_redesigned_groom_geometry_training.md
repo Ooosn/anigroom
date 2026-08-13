@@ -171,6 +171,86 @@ or tail. This concentration suggests a shared low-frequency shape-field issue,
 but the full-model audit alone does not assign it to the primary or secondary
 field. No body-region rule or sample-specific suppression is added.
 
+## Head-Crown Foldback Attribution
+
+Here, `backward` does not mean that a complete strand points in the wrong world
+direction or that its root and tip have been exchanged. For sampled points
+`p[0] ... p[n]`, the strict audit forms the strand's own root-to-tip unit chord
+`c = normalize(p[n] - p[0])` and reports a foldback only when at least one local
+segment satisfies `dot(p[i + 1] - p[i], c) < -1e-10`. A straight strand is
+therefore not marked regardless of which world direction it points. The 34
+R059 cases contain a local hook or loop whose middle segment travels backward
+relative to that strand's otherwise valid root-to-tip direction.
+
+`tools/diagnose_strand_foldback_components.py` strictly reloads a checkpoint,
+recreates the canonical 100k-root seed-29 export, and rebuilds the same roots
+with curl, frizz, and secondary residual components removed independently. At
+30k, the component counterfactual is:
+
+| 30k geometry | strict foldbacks / 100k |
+| --- | ---: |
+| brush backbone, curl and frizz removed | 0 |
+| frizz only | 0 |
+| primary curl only | 29 |
+| complete primary field | 33 |
+| complete field without secondary curl/frizz | 34 |
+| complete curl only | 30 |
+| complete R059 field | 34 |
+
+The sets, not only the counts, were compared. Twenty-nine strands fold under
+primary curl alone. Four additional strands need the interaction between curl
+and primary frizz; frizz alone never folds. One final strand is close to the
+boundary and is tipped by the denser secondary direction/length field in the
+complete geometry; in a curl-only counterfactual the secondary curl residual
+can also tip that same strand. Secondary shape residual is therefore not the
+source of the patch, although it can alter one boundary case.
+
+Replaying the exact same 100k render roots at the saved stage boundaries shows
+when the failure appears:
+
+| iteration | primary shape gate | secondary shape gate | foldbacks | dominant guide 140: curl radius / length |
+| ---: | ---: | ---: | ---: | ---: |
+| 20000 | 0.0 | 0.0 | 0 | neutral curl; rendered radius is zero |
+| 22000 | 0.4 | 0.0 | 0 | 0.004027 / 0.009861 = 0.408 raw |
+| 25000 | 1.0 | 0.0 | 14 | 0.007766 / 0.009832 = 0.790 |
+| 27000 | 1.0 | 0.4 | 25 | 0.010343 / 0.010036 = 1.031 |
+| 30000 | 1.0 | 1.0 | 34 | 0.011989 / 0.010079 = 1.190 |
+
+At 22k the rendered radius is additionally multiplied by the 0.4 primary
+shape gate, so its effective radius/length ratio is about 0.163 and no strand
+folds. Foldbacks first appear by 25k, before the secondary shape field unlocks.
+At 25k guide 140 contributes 72.3% of the interpolation weight of all affected
+roots; it remains the dominant guide at 27k and 30k. Its clean-flow confidence
+is 0.804, so this is not an unobserved-root or low-confidence initialization
+failure.
+
+The geometry explains why the failure is concentrated on the head. Curl radius
+is represented as an absolute physical transverse radius, while these crown
+strands are short: the final affected-strand median length is 0.01030 and the
+median curl radius is 0.00670. Their median dimensionless curl wavenumber
+`2*pi*radius*turns/length` is 4.87. Guide 140 reaches the globally largest curl
+radius/length ratio and K=8 guide interpolation spreads that guide peak over a
+small, spatially coherent crown patch. Other guides can learn a comparable
+absolute radius on 0.02-0.04-long strands without forming a loop.
+
+The current losses do not express this scale coupling. Primary-guide
+smoothness compares neighboring absolute curl radii. Effective-field
+smoothness compares curl normalized by the one global `(0, 0.026)` range and a
+global radius-times-turns energy. Neither regularizer measures curl relative
+to each strand's own length. A locally smooth absolute curl field can therefore
+still be geometrically excessive on short fur. The active geometry-residual
+prior constrains the secondary residual coordinate, not the absolute primary
+guide curl magnitude.
+
+This diagnosis does not justify a head mask, an animal-specific radius cap, or
+a global curl disable. The scale-consistent follow-up is a separate
+single-variable experiment in which the editable curl radius is represented or
+regularized relative to strand length (and, if turns later become trainable,
+the corresponding dimensionless wavenumber). R059 itself remains frozen: the
+remaining 34/100k patch is diagnosed, not silently changed. The checkpoints do
+not contain per-loss historical gradients, so the exact split between RGB and
+RGB-flow pressure on guide 140 cannot be reconstructed and is not claimed.
+
 ## Lifecycle And Checkpoint Integrity
 
 - all 85 uncapped render-root lifecycle events ran every 100 iterations from
@@ -217,3 +297,14 @@ curl/frizz disable, or a sample-specific clamp.
   `D:/RTS/_tmp/r059_h100_postprocess_20260813/postprocess/r059_redesigned_groom_geometry/foldback_gallery/r059_foldback_all34_planar_4k.png`;
 - matched R050/R057/R059 audit:
   `D:/RTS/_tmp/r059_h100_postprocess_20260813/postprocess/r050_r057_r059_strand_audit_canonical.json`.
+- local component-attribution timeline:
+  `D:/RTS/_tmp/r059_foldback_timeline_v2_20260813`;
+- canonical 30k reproduction report SHA-256:
+  `541dff9465f555f8be07e857d93b5bd5a6fba256db433ac6045cb9135a5af644`
+  (root IDs exact; maximum coordinate difference `9.5367431640625e-7`);
+- 20k/22k/25k/27k/30k component-report SHA-256 values:
+  `789b566a856d05f656a2fc12c67aa06fdea51fce0146fb43d6145b7fd03ddf1a`,
+  `9b63faabc090673b8ad68cf4b406e5066a46365e258e16a17494f4ad30e2b939`,
+  `744efc077cbf84e5cb320974996390fd1bbf34bc6f970bee5627482248c18de1`,
+  `03e45944b90214e9a6ba2d1557b7a874486fec690e3c2e8bf32347fb032a7293`,
+  and `6368944a7a77e128bc22e24dab47b61c7c561a7c29794724bdb04690567abd5a`.
