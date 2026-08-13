@@ -49,6 +49,8 @@ BASE_ROOT_WIDTH = 0.00145
 BASE_TIP_WIDTH = 0.00018
 FUR_ROOT = (0.17, 0.075, 0.025)
 FUR_TIP = (0.72, 0.36, 0.075)
+SMOKED_CHAMPAGNE_FUR_ROOT = (0.145, 0.105, 0.070)
+SMOKED_CHAMPAGNE_FUR_TIP = (0.50, 0.39, 0.255)
 
 
 def font_property(filename: str, *, size: float, style: str = "normal") -> font_manager.FontProperties:
@@ -107,6 +109,12 @@ def parse_args() -> argparse.Namespace:
         default=PROJECT_ROOT / "paper" / "method",
     )
     parser.add_argument("--render-samples", type=int, default=64)
+    parser.add_argument(
+        "--palette",
+        choices=("smoked_champagne", "copper"),
+        default="smoked_champagne",
+        help="Hair palette only; geometry, lighting, camera, and layout stay fixed.",
+    )
     parser.add_argument("--skip-blender", action="store_true")
     parser.add_argument(
         "--single-panel",
@@ -230,8 +238,35 @@ def build_value_strands(
     return arrays, report
 
 
-def control_panels() -> tuple[Panel, ...]:
-    base = StrandSpec()
+def palette_colors(
+    palette: str,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    if palette == "copper":
+        return FUR_ROOT, FUR_TIP
+    if palette == "smoked_champagne":
+        return SMOKED_CHAMPAGNE_FUR_ROOT, SMOKED_CHAMPAGNE_FUR_TIP
+    raise ValueError(f"Unsupported palette: {palette}")
+
+
+def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
+    root_color, tip_color = palette_colors(palette)
+    base = StrandSpec(root_color=root_color, tip_color=tip_color)
+    if palette == "copper":
+        appearance_specs = (
+            replace(base, root_color=(0.68, 0.67, 0.63), tip_color=(0.68, 0.67, 0.63)),
+            replace(base, root_color=(0.08, 0.09, 0.10), tip_color=(0.66, 0.68, 0.70)),
+            replace(base, root_color=(0.45, 0.42, 0.35), tip_color=(0.91, 0.89, 0.82)),
+        )
+    else:
+        root = np.asarray(root_color, dtype=np.float64)
+        tip = np.asarray(tip_color, dtype=np.float64)
+        dark = tuple(float(value) for value in np.clip(root * 0.58, 0.0, 1.0))
+        light = tuple(float(value) for value in np.clip(tip * 1.18, 0.0, 0.92))
+        appearance_specs = (
+            replace(base, root_color=root_color, tip_color=root_color),
+            replace(base, root_color=dark, tip_color=tip_color),
+            replace(base, root_color=root_color, tip_color=light),
+        )
     return (
         Panel(
             "direction",
@@ -333,19 +368,16 @@ def control_panels() -> tuple[Panel, ...]:
             "c(u)",
             "continuous appearance profile",
             ("color_0", "color_1", "color_2"),
-            (
-                replace(base, root_color=(0.68, 0.67, 0.63), tip_color=(0.68, 0.67, 0.63)),
-                replace(base, root_color=(0.08, 0.09, 0.10), tip_color=(0.66, 0.68, 0.70)),
-                replace(base, root_color=(0.45, 0.42, 0.35), tip_color=(0.91, 0.89, 0.82)),
-            ),
+            appearance_specs,
             ortho_scale=1.60,
             reference_extent=0.78,
         ),
     )
 
 
-def composed_panel() -> Panel:
-    base = StrandSpec()
+def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
+    root_color, tip_color = palette_colors(palette)
+    base = StrandSpec(root_color=root_color, tip_color=tip_color)
     return Panel(
         "composed",
         "Composed grooms",
@@ -675,6 +707,7 @@ def compose_figure(
     work_dir: Path,
     output_dir: Path,
     report: dict[str, object],
+    output_stem: str = FINAL_STEM,
 ) -> None:
     plt.rcParams.update({"font.family": "Arial", "axes.unicode_minus": False})
     figure = plt.figure(figsize=(7.50, 6.60), facecolor="white")
@@ -706,7 +739,7 @@ def compose_figure(
     output_dir.mkdir(parents=True, exist_ok=True)
     for suffix, dpi in (("png", 600), ("pdf", 300), ("svg", 300)):
         figure.savefig(
-            output_dir / f"{FINAL_STEM}.{suffix}",
+            output_dir / f"{output_stem}.{suffix}",
             dpi=dpi,
             facecolor="white",
             bbox_inches=None,
@@ -762,8 +795,13 @@ def main() -> None:
         raise FileNotFoundError(args.blender)
     renderer = Path(__file__).with_name("render_parametric_groom_blender.py")
     args.work_dir.mkdir(parents=True, exist_ok=True)
-    panels = control_panels()
-    composed = composed_panel()
+    output_stem = (
+        FINAL_STEM
+        if args.palette == "smoked_champagne"
+        else f"{FINAL_STEM}_{args.palette}"
+    )
+    panels = control_panels(palette=args.palette)
+    composed = composed_panel(palette=args.palette)
     all_panels = (*panels, composed)
 
     if args.single_panel:
@@ -818,6 +856,7 @@ def main() -> None:
         "geometry": "formal build_strands output",
         "sampling_order": "brush backbone -> curl/frizz -> final curve -> adaptive resampling",
         "renderer": str(renderer.resolve()),
+        "palette": args.palette,
         "renders": {},
     }
     if args.skip_blender:
@@ -868,13 +907,14 @@ def main() -> None:
         work_dir=args.work_dir,
         output_dir=args.output_dir,
         report=report,
+        output_stem=output_stem,
     )
     print(
         json.dumps(
             {
-                "png": str((args.output_dir / f"{FINAL_STEM}.png").resolve()),
-                "pdf": str((args.output_dir / f"{FINAL_STEM}.pdf").resolve()),
-                "svg": str((args.output_dir / f"{FINAL_STEM}.svg").resolve()),
+                "png": str((args.output_dir / f"{output_stem}.png").resolve()),
+                "pdf": str((args.output_dir / f"{output_stem}.pdf").resolve()),
+                "svg": str((args.output_dir / f"{output_stem}.svg").resolve()),
                 "render_report": str((args.work_dir / "render_report.json").resolve()),
             },
             indent=2,

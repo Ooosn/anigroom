@@ -30,4 +30,8 @@ conda activate mygs
 python paper/method/render_parametric_fur_figure.py
 ```
 
+The canonical paper export uses the low-saturation smoked-champagne fur
+palette. Pass `--palette copper` to reproduce the previous copper rendering;
+geometry, lighting, camera, and layout are identical between the two.
+
 The command regenerates the formal PDF, SVG, and PNG in this directory.
