@@ -144,6 +144,18 @@ The complete machine-readable report is:
 D:/RTS/_tmp/no_penetration/r060_allroot_local_geometry_512_20260814/report.json
 ```
 
+The canonical 1920x1080 highlight render contains all 629 penetrating strands
+present in the deterministic 100k visualization subset:
+
+```text
+D:/RTS/_tmp/no_penetration/r060_allroot_local_geometry_512_20260814/r060_allroot_penetration_side_y.png
+```
+
+They concentrate around high-curvature face/muzzle regions, paws, and joint
+recesses; broad torso regions remain clean. This spatial pattern is consistent
+with local strand/mesh intersection and not with a global coordinate or SDF
+axis error.
+
 A real backward pass over 16,384 roots confirms nonzero gradients on guide
 length/direction/brush stiffness, secondary length/direction, curl/frizz, and
 root barycentric coordinates. It confirms no gradient on global translation
