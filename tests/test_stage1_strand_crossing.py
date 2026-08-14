@@ -13,6 +13,7 @@ from tools.train_white_tiger_stage1 import (
     Stage1Config,
     WhiteTigerStage1Model,
     backward_stage1_losses,
+    is_strand_crossing_shape_parameter,
     make_stage1_optimizer,
     restore_strand_crossing_state,
     validate_strand_crossing_config,
@@ -132,7 +133,19 @@ def test_crossing_checkpoint_state_restores_and_rejects_stale_root_ids() -> None
         )
 
 
-def test_model_crossing_loss_updates_geometry_not_width_or_global_pose() -> None:
+def test_crossing_shape_parameter_ownership_excludes_length_and_root_move() -> None:
+    assert is_strand_crossing_shape_parameter("groom.direction_local_raw")
+    assert is_strand_crossing_shape_parameter("guide_brush_stiffness_raw")
+    assert is_strand_crossing_shape_parameter(
+        "secondary_geometry_residual.frizz_amplitude_raw"
+    )
+    assert not is_strand_crossing_shape_parameter("groom.length_raw")
+    assert not is_strand_crossing_shape_parameter("bary_logits")
+    assert not is_strand_crossing_shape_parameter("groom.root_width_raw")
+    assert not is_strand_crossing_shape_parameter("groom.root_color_raw")
+
+
+def test_model_crossing_loss_updates_shape_not_length_root_or_appearance() -> None:
     mesh = TriangleMesh(
         vertices=np.asarray(
             [
@@ -183,10 +196,10 @@ def test_model_crossing_loss_updates_geometry_not_width_or_global_pose() -> None
         strand_crossing_loss=crossing_loss,
     )
 
-    assert model.groom.length_raw.grad is not None
-    assert float(model.groom.length_raw.grad.abs().sum()) > 0.0
-    assert model.bary_logits.grad is not None
-    assert float(model.bary_logits.grad.abs().sum()) > 0.0
+    assert model.groom.direction_local_raw.grad is not None
+    assert float(model.groom.direction_local_raw.grad.abs().sum()) > 0.0
+    assert model.groom.length_raw.grad is None
+    assert model.bary_logits.grad is None
     assert model.groom.root_width_raw.grad is None
     assert model.groom.tip_width_ratio_raw.grad is None
     assert model.translation.grad is None or torch.count_nonzero(model.translation.grad) == 0

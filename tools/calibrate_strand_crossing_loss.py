@@ -25,6 +25,7 @@ from tools.train_white_tiger_stage1 import (  # noqa: E402
     effective_groom_graph_smoothness,
     guide_interpolation_regularization_losses,
     guide_root_graph_smoothness,
+    is_strand_crossing_shape_parameter,
     load_stage1_checkpoint_model,
     rebuild_graph_edges,
     render_geometry_residual_graph_smoothness,
@@ -48,38 +49,14 @@ def render_parameter_args(config) -> tuple[int | float, ...]:
 def geometry_parameters(
     model: torch.nn.Module,
 ) -> list[tuple[str, torch.nn.Parameter]]:
-    geometry_tokens = (
-        "bary_logits",
-        "length",
-        "direction",
-        "brush_stiffness",
-        "root_width",
-        "tip_width",
-        "width_taper",
-        "child_radius",
-        "clump",
-        "curl",
-        "frizz",
-    )
-    excluded_tokens = (
-        "root_color",
-        "tip_color",
-        "opacity",
-        "child_color",
-        "gaussian_rgb",
-        "log_scale",
-        "translation",
-    )
     selected = []
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        if any(token in name for token in excluded_tokens):
-            continue
-        if any(token in name for token in geometry_tokens):
+        if is_strand_crossing_shape_parameter(name):
             selected.append((name, parameter))
     if not selected:
-        raise RuntimeError("checkpoint model exposes no geometry parameters")
+        raise RuntimeError("checkpoint model exposes no crossing-shape parameters")
     return selected
 
 

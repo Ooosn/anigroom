@@ -5741,35 +5741,46 @@ def optimizer_non_color_parameters(
     )
 
 
-def optimizer_strand_centerline_parameters(
+_STRAND_CROSSING_SHAPE_PARAMETER_TOKENS = (
+    "direction",
+    "brush_stiffness",
+    "curl_radius",
+    "curl_turns",
+    "curl_phase",
+    "frizz_amplitude",
+)
+
+
+def is_strand_crossing_shape_parameter(name: str) -> bool:
+    """Return whether crossing may alter this learned shape parameter."""
+
+    return any(
+        token in name for token in _STRAND_CROSSING_SHAPE_PARAMETER_TOKENS
+    )
+
+
+def optimizer_strand_crossing_shape_parameters(
     model: WhiteTigerStage1Model,
     optimizer: torch.optim.Optimizer,
 ) -> list[torch.nn.Parameter]:
-    """Optimizer-owned parameters that can move a strand centerline."""
+    """Optimizer-owned shape parameters allowed to resolve strand crossings.
+
+    Crossing is a centerline-direction validity constraint. It must not change
+    strand length, root density/placement, width, or appearance to escape a
+    contact.
+    """
 
     optimizer_parameter_ids = {
         id(parameter)
         for group in optimizer.param_groups
         for parameter in group["params"]
     }
-    centerline_tokens = (
-        "length",
-        "direction",
-        "brush_stiffness",
-        "curl_radius",
-        "curl_turns",
-        "curl_phase",
-        "frizz_amplitude",
-    )
     return unique_trainable_parameters(
         [
             parameter
             for name, parameter in model.named_parameters()
             if id(parameter) in optimizer_parameter_ids
-            and (
-                name == "bary_logits"
-                or any(token in name for token in centerline_tokens)
-            )
+            and is_strand_crossing_shape_parameter(name)
         ]
     )
 
@@ -5785,7 +5796,9 @@ def backward_stage1_losses(
 ) -> None:
     """Backpropagate independently routed RGB, flow, and crossing losses."""
 
-    crossing_parameters = optimizer_strand_centerline_parameters(model, optimizer)
+    crossing_parameters = optimizer_strand_crossing_shape_parameters(
+        model, optimizer
+    )
     route_crossing = (
         strand_crossing_loss is not None
         and strand_crossing_loss.requires_grad
