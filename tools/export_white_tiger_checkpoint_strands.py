@@ -27,6 +27,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--samples", type=int, default=48)
+    parser.add_argument(
+        "--root-domain",
+        choices=("render", "secondary_guide"),
+        default="render",
+        help="Export rendered roots or the persistent secondary geometry-control field.",
+    )
     parser.add_argument("--child-count", type=int, default=-1, help="Use checkpoint config when negative.")
     parser.add_argument("--max-strands", type=int, default=0, help="0 exports all strands; positive value exports a deterministic subset.")
     parser.add_argument("--seed", type=int, default=29)
@@ -65,9 +71,32 @@ def main() -> None:
         )
 
     with torch.no_grad():
-        roots, normals, roots_local = model.roots_and_normals()
-        tangents, bitangents = model.tangent_frames(normals)
-        groom = model.apply_guide_controls(model.groom.decode(), roots_local)
+        if args.root_domain == "render":
+            roots, normals, roots_local = model.roots_and_normals()
+            tangents, bitangents = model.tangent_frames(normals)
+            groom = model.apply_guide_controls(model.groom.decode(), roots_local)
+            child_count = int(
+                config.child_count if args.child_count < 0 else args.child_count
+            )
+        else:
+            if not model.secondary_guides_enabled():
+                raise RuntimeError(
+                    "secondary-guide export requires a checkpoint with persistent secondary guides"
+                )
+            if args.child_count not in (-1, 1):
+                raise ValueError(
+                    "secondary-guide control strands do not support child expansion"
+                )
+            roots_local = model.secondary_guide_points_local
+            roots = (
+                roots_local * torch.exp(model.log_scale).view(1, 1)
+                + model.translation.view(1, 3)
+            )
+            normals, tangents, bitangents = model.tangent_frames_for_face_ids(
+                model.secondary_guide_face_ids
+            )
+            groom = model.secondary_effective_groom()
+            child_count = 1
         strands, widths, colors, opacities = build_strands(
             roots,
             normals,
@@ -76,17 +105,21 @@ def main() -> None:
             groom,
             samples=int(args.samples),
         )
-        child_count = int(config.child_count if args.child_count < 0 else args.child_count)
-        strands, widths, colors, opacities, root_ids = expand_child_strands(
-            strands,
-            widths,
-            colors,
-            opacities,
-            normals,
-            groom.child_radius,
-            groom.clump_strength,
-            child_count=child_count,
-        )
+        if args.root_domain == "render":
+            strands, widths, colors, opacities, root_ids = expand_child_strands(
+                strands,
+                widths,
+                colors,
+                opacities,
+                normals,
+                groom.child_radius,
+                groom.clump_strength,
+                child_count=child_count,
+            )
+        else:
+            root_ids = torch.arange(
+                strands.shape[0], device=strands.device, dtype=torch.long
+            )
         if args.max_strands > 0 and int(strands.shape[0]) > int(args.max_strands):
             gen = torch.Generator(device="cpu")
             gen.manual_seed(int(args.seed))
@@ -109,7 +142,7 @@ def main() -> None:
         opacities=tensor_to_numpy(opacities).astype(np.float32),
         root_ids=tensor_to_numpy(root_ids).astype(np.int64),
         iteration=np.asarray([int(checkpoint.get("iteration", -1))], dtype=np.int64),
-        source_checkpoint=np.asarray([str(checkpoint_path)], dtype=object),
+        source_checkpoint=np.asarray([str(checkpoint_path)]),
     )
     report = {
         "checkpoint": str(checkpoint_path),
@@ -120,6 +153,7 @@ def main() -> None:
         "secondary_shape_residual_multiplier": float(
             model.secondary_shape_residual_multiplier
         ),
+        "root_domain": str(args.root_domain),
         "root_count": int(model.face_ids.shape[0]),
         "guide_root_count": int(model.guide_face_ids.shape[0]),
         "child_count": child_count,
