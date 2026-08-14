@@ -33,6 +33,18 @@ from tools.train_white_tiger_stage1 import (  # noqa: E402
 )
 
 
+def render_parameter_args(config) -> tuple[int | float, ...]:
+    return (
+        int(config.samples),
+        int(config.child_count),
+        int(config.min_segments),
+        float(config.segment_length_origin),
+        float(config.segments_per_unit_length),
+        float(config.segments_per_unit_complexity),
+        float(config.gaussian_length_overlap),
+    )
+
+
 def geometry_parameters(
     model: torch.nn.Module,
 ) -> list[tuple[str, torch.nn.Parameter]]:
@@ -273,13 +285,7 @@ def main() -> None:
 
     with torch.no_grad():
         gaussians, _, _, _, _, _, _ = model.render_parameters(
-            config.samples,
-            config.min_segments,
-            config.max_segments,
-            config.segment_length_origin,
-            config.segments_per_unit_length,
-            config.segments_per_unit_complexity,
-            config.gaussian_length_overlap,
+            *render_parameter_args(config),
         )
         snapshot = GaussianSegmentSnapshot.from_tensors(
             means=gaussians.means,
@@ -305,13 +311,7 @@ def main() -> None:
 
     named_geometry = geometry_parameters(model)
     _, _, _, _, _, crossing_loss, crossing_stats = model.render_parameters(
-        config.samples,
-        config.min_segments,
-        config.max_segments,
-        config.segment_length_origin,
-        config.segments_per_unit_length,
-        config.segments_per_unit_complexity,
-        config.gaussian_length_overlap,
+        *render_parameter_args(config),
         strand_crossing_active_set=active_torch,
     )
     crossing_gradients = gradient_report(crossing_loss, named_geometry)

@@ -15,6 +15,7 @@ from tools.train_white_tiger_stage1 import (
     restore_strand_crossing_state,
     validate_strand_crossing_config,
 )
+from tools.calibrate_strand_crossing_loss import render_parameter_args
 
 
 def base_config() -> Stage1Config:
@@ -36,6 +37,28 @@ def enabled_config() -> Stage1Config:
         strand_crossing_support=True,
         strand_crossing_weight=0.01,
         strand_crossing_refresh_interval=1000,
+    )
+
+
+def test_calibration_uses_the_canonical_render_parameter_signature() -> None:
+    config = replace(
+        base_config(),
+        samples=48,
+        child_count=1,
+        min_segments=7,
+        segment_length_origin=0.012,
+        segments_per_unit_length=81.0,
+        segments_per_unit_complexity=19.0,
+        gaussian_length_overlap=1.35,
+    )
+    assert render_parameter_args(config) == (
+        48,
+        1,
+        7,
+        0.012,
+        81.0,
+        19.0,
+        1.35,
     )
 
 
