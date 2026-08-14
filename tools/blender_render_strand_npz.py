@@ -36,6 +36,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Highlight strands containing a segment that points against the strand chord.",
     )
+    parser.add_argument(
+        "--highlight-mask-key",
+        default="",
+        help="Boolean NPZ array selecting strands to highlight.",
+    )
     parser.add_argument("--highlight-color", nargs=3, type=float, default=[1.0, 0.0, 0.08])
     parser.add_argument("--highlight-width-scale", type=float, default=4.0)
     parser.add_argument("--mesh-color", nargs=3, type=float, default=[0.52, 0.55, 0.60])
@@ -73,10 +78,11 @@ def look_at(obj, target: np.ndarray) -> None:
 
 def sample_strands(strands: np.ndarray, widths: np.ndarray, colors: np.ndarray, max_strands: int, seed: int):
     if max_strands <= 0 or strands.shape[0] <= max_strands:
-        return strands, widths, colors
+        ids = np.arange(strands.shape[0], dtype=np.int64)
+        return strands, widths, colors, ids
     rng = np.random.default_rng(seed)
     ids = np.sort(rng.choice(strands.shape[0], size=max_strands, replace=False))
-    return strands[ids], widths[ids], colors[ids]
+    return strands[ids], widths[ids], colors[ids], ids
 
 
 def map_coordinates(strands: np.ndarray, coord_system: str) -> np.ndarray:
@@ -203,15 +209,36 @@ def main() -> None:
     strands = np.asarray(data["strands"], dtype=np.float32)
     widths = np.asarray(data["widths"], dtype=np.float32)
     colors = np.asarray(data["colors"], dtype=np.float32)
-    strands, widths, colors = sample_strands(strands, widths, colors, int(args.max_strands), int(args.seed))
+    source_strand_count = int(strands.shape[0])
+    strands, widths, colors, selected_ids = sample_strands(
+        strands,
+        widths,
+        colors,
+        int(args.max_strands),
+        int(args.seed),
+    )
     if strands.ndim != 3 or strands.shape[-1] != 3:
         raise RuntimeError(f"strands must be [N,S,3], got {strands.shape}")
     strands = map_coordinates(strands, args.coord_system)
-    highlight_mask = (
-        backward_strand_mask(strands)
-        if bool(args.highlight_backward_strands)
-        else np.zeros(strands.shape[0], dtype=bool)
-    )
+    if args.highlight_mask_key and args.highlight_backward_strands:
+        raise RuntimeError(
+            "choose either --highlight-mask-key or --highlight-backward-strands"
+        )
+    if args.highlight_mask_key:
+        if args.highlight_mask_key not in data.files:
+            raise RuntimeError(
+                f"NPZ has no highlight mask array: {args.highlight_mask_key}"
+            )
+        source_mask = np.asarray(data[args.highlight_mask_key]).reshape(-1)
+        if source_mask.shape[0] != source_strand_count:
+            raise RuntimeError(
+                "highlight mask length does not match the source strand count"
+            )
+        highlight_mask = source_mask[selected_ids].astype(bool, copy=False)
+    elif args.highlight_backward_strands:
+        highlight_mask = backward_strand_mask(strands)
+    else:
+        highlight_mask = np.zeros(strands.shape[0], dtype=bool)
 
     import bpy
 

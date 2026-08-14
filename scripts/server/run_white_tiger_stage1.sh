@@ -190,6 +190,7 @@ done
 
 GAUSSIAN_RGB_RESIDUAL_SUPPORT="${GAUSSIAN_RGB_RESIDUAL_SUPPORT:-0}"
 RGB_FLOW_EXCLUDE_COLOR_GRADIENTS="${RGB_FLOW_EXCLUDE_COLOR_GRADIENTS:-0}"
+MESH_NO_PENETRATION_SUPPORT="${MESH_NO_PENETRATION_SUPPORT:-0}"
 if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
   for name in \
     GAUSSIAN_RGB_RESIDUAL_CONTROL_POINTS \
@@ -205,6 +206,23 @@ else
   GAUSSIAN_RGB_RESIDUAL_UNLOCK_START=10000
   GAUSSIAN_RGB_RESIDUAL_UNLOCK_END=20000
   GAUSSIAN_RGB_RESIDUAL_INITIAL_MULTIPLIER=0.0
+fi
+
+if [[ "$MESH_NO_PENETRATION_SUPPORT" == "1" ]]; then
+  for name in \
+    MESH_NO_PENETRATION_SDF \
+    MESH_NO_PENETRATION_WEIGHT \
+    MESH_NO_PENETRATION_ROOT_BATCH; do
+    require_var "$name"
+  done
+  if [[ ! -f "$MESH_NO_PENETRATION_SDF" ]]; then
+    echo "[stage1] mesh no-penetration SDF does not exist: $MESH_NO_PENETRATION_SDF" >&2
+    exit 2
+  fi
+else
+  MESH_NO_PENETRATION_SDF=""
+  MESH_NO_PENETRATION_WEIGHT=0
+  MESH_NO_PENETRATION_ROOT_BATCH=16384
 fi
 
 GEOMETRY_RESIDUAL_DOMAIN="${GEOMETRY_RESIDUAL_DOMAIN:-render}"
@@ -354,6 +372,9 @@ cmd=(
   --backing-color-max "$BACKING_COLOR_MAX"
   --mesh-backing-texture-strength "$MESH_BACKING_TEXTURE_STRENGTH"
   --mesh-backing-texture-octaves "$MESH_BACKING_TEXTURE_OCTAVES"
+  --mesh-no-penetration-sdf "$MESH_NO_PENETRATION_SDF"
+  --mesh-no-penetration-weight "$MESH_NO_PENETRATION_WEIGHT"
+  --mesh-no-penetration-root-batch "$MESH_NO_PENETRATION_ROOT_BATCH"
   --mesh-depth-abs-tolerance "$MESH_DEPTH_ABS_TOLERANCE"
   --mesh-depth-rel-tolerance "$MESH_DEPTH_REL_TOLERANCE"
   --mesh-depth-local-kernel "$MESH_DEPTH_LOCAL_KERNEL"
@@ -411,6 +432,9 @@ if [[ "$CLEAN_FLOW_LENGTH_INIT" == "1" ]]; then
 fi
 if [[ "$MESH_DEPTH_CLIPPING" == "0" ]]; then
   cmd+=(--disable-mesh-depth-clipping)
+fi
+if [[ "$MESH_NO_PENETRATION_SUPPORT" == "1" ]]; then
+  cmd+=(--mesh-no-penetration-support)
 fi
 if [[ "$MESH_BACKING_COMPOSITING" == "0" ]]; then
   cmd+=(--disable-mesh-backing-compositing)

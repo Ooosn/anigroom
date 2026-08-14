@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import importlib
 import json
 import math
@@ -49,6 +50,11 @@ def memory_constrained_activation_checkpointing(device: torch.device) -> bool:
 
 from anigroom.data.white_tiger import build_stage1_input_report, list_images  # noqa: E402
 from anigroom.data.alignment import apply_alignment_to_namespace, load_alignment_config  # noqa: E402
+from anigroom.collision.sdf import (  # noqa: E402
+    SignedDistanceGrid,
+    cyclic_strand_indices,
+    strand_penetration_depth,
+)
 from anigroom.evaluation.metrics import MetricComputer  # noqa: E402
 from anigroom.flow import (  # noqa: E402
     CleanFlowTargets,
@@ -1854,6 +1860,10 @@ class Stage1Config:
     random_mesh_backing_texture: bool = True
     mesh_backing_texture_strength: float = 0.30
     mesh_backing_texture_octaves: int = 5
+    mesh_no_penetration_support: bool = False
+    mesh_no_penetration_sdf: str = ""
+    mesh_no_penetration_weight: float = 0.0
+    mesh_no_penetration_root_batch: int = 16384
     mesh_depth_clipping: bool = True
     mesh_depth_abs_tolerance: float = 0.018
     mesh_depth_rel_tolerance: float = 0.004
@@ -3493,6 +3503,8 @@ class WhiteTigerStage1Model(torch.nn.Module):
         segments_per_unit_length: float,
         segments_per_unit_complexity: float,
         length_overlap: float,
+        mesh_no_penetration_field: SignedDistanceGrid | None = None,
+        mesh_no_penetration_root_indices: torch.Tensor | None = None,
     ):
         roots, normals, roots_local = self.roots_and_normals()
         tangents, bitangents = self.tangent_frames(normals)
@@ -3505,6 +3517,36 @@ class WhiteTigerStage1Model(torch.nn.Module):
             groom,
             samples=samples,
         )
+        if mesh_no_penetration_field is None:
+            mesh_no_penetration_depth = roots.new_empty((0, max(int(samples) - 1, 0)))
+        else:
+            if mesh_no_penetration_root_indices is None:
+                raise RuntimeError(
+                    "mesh no-penetration is enabled without a root sample"
+                )
+            selected_groom_values = {
+                field.name: getattr(groom, field.name)[
+                    mesh_no_penetration_root_indices
+                ]
+                for field in fields(groom)
+            }
+            selected_groom_values["length"] = (
+                selected_groom_values["length"]
+                / torch.exp(self.log_scale.detach())
+            )
+            selected_groom = replace(groom, **selected_groom_values)
+            selected_local, _, _, _ = build_strands(
+                roots_local[mesh_no_penetration_root_indices],
+                normals[mesh_no_penetration_root_indices],
+                tangents[mesh_no_penetration_root_indices],
+                bitangents[mesh_no_penetration_root_indices],
+                selected_groom,
+                samples=samples,
+            )
+            mesh_no_penetration_depth = strand_penetration_depth(
+                selected_local,
+                mesh_no_penetration_field,
+            )
         strands, widths, colors, opacities, root_ids = expand_child_strands(
             strands,
             widths,
@@ -3578,7 +3620,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 self.gaussian_rgb_residual_multiplier
             ),
         }
-        return gaussians, roots, roots_local, stats
+        return gaussians, roots, roots_local, stats, mesh_no_penetration_depth
 
     def apply_local_child_support(
         self,
@@ -4806,6 +4848,8 @@ def render_view(
     mesh_depth: MeshDepthResult | None = None,
     backing_image: torch.Tensor | None = None,
     retain_lifecycle_grad: bool = False,
+    mesh_no_penetration_field: SignedDistanceGrid | None = None,
+    mesh_no_penetration_root_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, object, torch.Tensor, dict[str, float | int], dict]:
     render_args = (
         config.samples,
@@ -4817,14 +4861,22 @@ def render_view(
         config.gaussian_length_overlap,
     )
     if memory_constrained_activation_checkpointing(model.groom.length_raw.device):
-        gaussians, roots, roots_local, stats = activation_checkpoint(
-            lambda _anchor: model.render_parameters(*render_args),
+        gaussians, roots, roots_local, stats, mesh_no_penetration_depth = activation_checkpoint(
+            lambda _anchor: model.render_parameters(
+                *render_args,
+                mesh_no_penetration_field=mesh_no_penetration_field,
+                mesh_no_penetration_root_indices=mesh_no_penetration_root_indices,
+            ),
             model.groom.length_raw,
             use_reentrant=False,
             preserve_rng_state=False,
         )
     else:
-        gaussians, roots, roots_local, stats = model.render_parameters(*render_args)
+        gaussians, roots, roots_local, stats, mesh_no_penetration_depth = model.render_parameters(
+            *render_args,
+            mesh_no_penetration_field=mesh_no_penetration_field,
+            mesh_no_penetration_root_indices=mesh_no_penetration_root_indices,
+        )
     preclip_gaussians = gaussians
     if config.mesh_depth_clipping:
         if mesh_depth is None:
@@ -4897,6 +4949,7 @@ def render_view(
     info["mesh_depth_behind_mesh_mask"] = clip_masks["behind_mesh_mask"].detach()
     info["preclip_means"] = preclip_gaussians.means.detach()
     info["raw_fur_image"] = raw_image[0]
+    info["mesh_no_penetration_depth"] = mesh_no_penetration_depth
     return image[0].clamp(0.0, 1.0), alpha[0].clamp(0.0, 1.0), gaussians, roots_local, stats, info
 
 
@@ -6183,6 +6236,8 @@ def build_stage1_model_from_checkpoint(
 def load_stage1_checkpoint_model(
     checkpoint_path: Path,
     device: torch.device,
+    *,
+    mesh_path_override: Path | None = None,
 ) -> tuple[WhiteTigerStage1Model, Stage1Config, dict[str, object]]:
     checkpoint = load_training_checkpoint(checkpoint_path)
     config_mapping = checkpoint.get("config")
@@ -6197,6 +6252,13 @@ def load_stage1_checkpoint_model(
     if not isinstance(config_mapping, dict):
         raise RuntimeError("Stage1 checkpoint config is not a dictionary")
     config = stage1_config_from_checkpoint_mapping(config_mapping)
+    if mesh_path_override is not None:
+        mesh_path = mesh_path_override.resolve()
+        if not mesh_path.is_file():
+            raise FileNotFoundError(
+                f"checkpoint mesh override does not exist: {mesh_path}"
+            )
+        config = replace(config, mesh_path=str(mesh_path))
     model = build_stage1_model_from_checkpoint(checkpoint, config, device)
     return model, config, checkpoint
 
@@ -6414,6 +6476,89 @@ def parse_index_override(text: str, default: list[int]) -> list[int]:
     return values
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def validate_mesh_no_penetration_config(config: Stage1Config) -> None:
+    if config.mesh_no_penetration_support:
+        if not config.mesh_no_penetration_sdf.strip():
+            raise ValueError(
+                "mesh no-penetration requires --mesh-no-penetration-sdf"
+            )
+        if float(config.mesh_no_penetration_weight) <= 0.0:
+            raise ValueError(
+                "mesh no-penetration requires a positive loss weight"
+            )
+        if int(config.mesh_no_penetration_root_batch) <= 0:
+            raise ValueError(
+                "mesh no-penetration root batch must be positive"
+            )
+        return
+    if config.mesh_no_penetration_sdf.strip():
+        raise ValueError(
+            "mesh no-penetration SDF was provided while support is disabled"
+        )
+    if float(config.mesh_no_penetration_weight) != 0.0:
+        raise ValueError(
+            "mesh no-penetration weight must be zero while support is disabled"
+        )
+
+
+def load_mesh_no_penetration_field(
+    config: Stage1Config,
+    mesh_path: Path,
+    device: torch.device,
+) -> tuple[SignedDistanceGrid | None, dict[str, object] | None]:
+    validate_mesh_no_penetration_config(config)
+    if not config.mesh_no_penetration_support:
+        return None, None
+
+    sdf_path = resolve_project_path(config.mesh_no_penetration_sdf)
+    if not sdf_path.is_file():
+        raise FileNotFoundError(f"mesh no-penetration SDF does not exist: {sdf_path}")
+    field = SignedDistanceGrid.from_npz(sdf_path, device=device)
+    metadata = dict(field.metadata)
+    expected = {
+        "sign_convention": "outside_positive_inside_negative",
+        "storage_order": "zyx",
+    }
+    for name, value in expected.items():
+        if metadata.get(name) != value:
+            raise RuntimeError(
+                f"mesh no-penetration SDF {name} mismatch: "
+                f"expected {value!r}, got {metadata.get(name)!r}"
+            )
+    mesh_hash = file_sha256(mesh_path)
+    if metadata.get("mesh_sha256") != mesh_hash:
+        raise RuntimeError(
+            "mesh no-penetration SDF was built from a different mesh: "
+            f"expected {mesh_hash}, got {metadata.get('mesh_sha256')!r}"
+        )
+    field.requires_grad_(False)
+    field.eval()
+    report = {
+        "sdf_path": str(sdf_path),
+        "sdf_sha256": file_sha256(sdf_path),
+        "mesh_sha256": mesh_hash,
+        "shape_zyx": [int(value) for value in field.values_zyx.shape],
+        "reference_length": float(field.reference_length.detach().cpu()),
+        "voxel_size": float(metadata["voxel_size"]),
+        "signed_distance_backend": metadata["signed_distance_backend"],
+        "validation_p95_error_voxels": float(
+            metadata["absolute_error_voxels_p95"]
+        ),
+        "validation_sign_agreement": float(
+            metadata["normal_offset_expected_sign_agreement"]
+        ),
+    }
+    return field, report
+
+
 def train_white_tiger_stage1(config: Stage1Config) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("White Tiger Stage 1 requires CUDA")
@@ -6486,8 +6631,16 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         raise RuntimeError(f"input report errors: {report.errors}")
     if tuple(report.image_size or ()) != (config.expected_width, config.expected_height):
         raise RuntimeError(f"expected native {config.expected_width}x{config.expected_height}, got {report.image_size}")
+    mesh_no_penetration_field, mesh_no_penetration_report = (
+        load_mesh_no_penetration_field(config, mesh_path, device)
+    )
     (output_dir / "stage1_inputs.json").write_text(json.dumps(report.to_json_dict(), indent=2) + "\n", encoding="utf-8")
     (output_dir / "config.json").write_text(json.dumps(asdict(config), indent=2) + "\n", encoding="utf-8")
+    if mesh_no_penetration_report is not None:
+        (output_dir / "mesh_no_penetration_sdf.json").write_text(
+            json.dumps(mesh_no_penetration_report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     image_paths = list_images(Path(report.image_dir))
     mask_paths = list_images(Path(report.mask_dir))
@@ -6961,6 +7114,15 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         guide_graph_edges=int(guide_graph_edges.shape[0]),
         activation_checkpointing=memory_constrained_activation_checkpointing(device),
         lifecycle_statistics_active=bool(previous_lifecycle_stats_active),
+        mesh_no_penetration_support=bool(config.mesh_no_penetration_support),
+        mesh_no_penetration_sdf_sha256=(
+            mesh_no_penetration_report["sdf_sha256"]
+            if mesh_no_penetration_report is not None
+            else None
+        ),
+        mesh_no_penetration_root_batch=int(
+            config.mesh_no_penetration_root_batch
+        ),
         pytorch_alloc_conf=os.environ.get("PYTORCH_ALLOC_CONF", ""),
         device_memory_gb=float(torch.cuda.get_device_properties(device).total_memory / 1024**3) if device.type == "cuda" else 0.0,
     )
@@ -7053,6 +7215,16 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 train=True,
             )
             target_with_backing = composite_target(target, mask, backing_image)
+            mesh_no_penetration_root_indices = (
+                cyclic_strand_indices(
+                    int(model.face_ids.shape[0]),
+                    int(config.mesh_no_penetration_root_batch),
+                    int(iteration),
+                    device=device,
+                )
+                if mesh_no_penetration_field is not None
+                else None
+            )
 
             try:
                 if trace_iteration:
@@ -7068,6 +7240,10 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     mesh_depth=mesh_depth,
                     backing_image=backing_image,
                     retain_lifecycle_grad=lifecycle_stats_active,
+                    mesh_no_penetration_field=mesh_no_penetration_field,
+                    mesh_no_penetration_root_indices=(
+                        mesh_no_penetration_root_indices
+                    ),
                 )
                 if trace_iteration:
                     progress_event(
@@ -7082,6 +7258,31 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 raise RuntimeError(
                     f"train render failed: iteration={iteration}, view_index={idx}, root_count={int(model.face_ids.shape[0])}"
                 ) from exc
+            mesh_no_penetration_depth = render_info[
+                "mesh_no_penetration_depth"
+            ]
+            if mesh_no_penetration_field is not None:
+                if mesh_no_penetration_root_indices is None:
+                    raise RuntimeError(
+                        "mesh no-penetration field has no sampled root indices"
+                    )
+                expected_shape = (
+                    int(mesh_no_penetration_root_indices.numel()),
+                    int(config.samples) - 1,
+                )
+                if tuple(mesh_no_penetration_depth.shape) != expected_shape:
+                    raise RuntimeError(
+                        "mesh no-penetration depth shape mismatch: "
+                        f"expected {expected_shape}, got "
+                        f"{tuple(mesh_no_penetration_depth.shape)}"
+                    )
+                mesh_no_penetration_loss = mesh_no_penetration_depth.mean()
+            else:
+                if mesh_no_penetration_depth.numel() != 0:
+                    raise RuntimeError(
+                        "disabled mesh no-penetration produced depth samples"
+                    )
+                mesh_no_penetration_loss = model.groom.length_raw.sum() * 0.0
             fixed_bg = scene_background_color(config, device).view(1, 1, 3)
             pred_fixed = render_info["raw_fur_image"] + (1.0 - alpha) * fixed_bg
             target_fixed = composite_target(target, mask, fixed_bg)
@@ -7269,6 +7470,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.clean_flow_guide_anchor_weight * guide_clean_flow_loss
                 + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
                 + config.root_move_reg_weight * root_move_loss
+                + config.mesh_no_penetration_weight * mesh_no_penetration_loss
             )
             weighted_rgb_flow_loss = (
                 config.rgb_flow_weight * rgb_flow_loss
@@ -7284,6 +7486,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.clean_flow_guide_anchor_weight * guide_clean_flow_loss
                 + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
                 + config.root_move_reg_weight * root_move_loss
+                + config.mesh_no_penetration_weight * mesh_no_penetration_loss
             )
             if not bool(torch.isfinite(loss).detach().cpu()):
                 raise RuntimeError(
@@ -7298,6 +7501,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                             "smooth_loss": float(smooth_loss.detach().cpu()),
                             "guide_prior_loss": float(guide_prior_loss.detach().cpu()),
                             "guide_clean_flow_loss": float(guide_clean_flow_loss.detach().cpu()),
+                            "mesh_no_penetration_loss": float(
+                                mesh_no_penetration_loss.detach().cpu()
+                            ),
                         },
                         sort_keys=True,
                     )
@@ -7600,6 +7806,28 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     ),
                     "lifecycle_statistics_active": bool(lifecycle_stats_active),
                     "root_move_loss": float(root_move_loss.detach().cpu()),
+                    "mesh_no_penetration": {
+                        "loss": float(mesh_no_penetration_loss.detach().cpu()),
+                        "weight": float(config.mesh_no_penetration_weight),
+                        "sampled_root_count": int(
+                            mesh_no_penetration_root_indices.numel()
+                        ) if mesh_no_penetration_root_indices is not None else 0,
+                        "sampled_point_count": int(
+                            mesh_no_penetration_depth.numel()
+                        ),
+                        "penetrating_fraction": float(
+                            (mesh_no_penetration_depth.detach() > 0.0)
+                            .float()
+                            .mean()
+                            .cpu()
+                        ) if mesh_no_penetration_depth.numel() else 0.0,
+                        "mean_depth": float(
+                            mesh_no_penetration_depth.detach().mean().cpu()
+                        ) if mesh_no_penetration_depth.numel() else 0.0,
+                        "maximum_depth": float(
+                            mesh_no_penetration_depth.detach().max().cpu()
+                        ) if mesh_no_penetration_depth.numel() else 0.0,
+                    },
                     "train": train_eval,
                     "test": test_eval,
                     "render": render_stats,
@@ -7817,6 +8045,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         "gaussian_rgb_residual_multiplier": float(
                             model.gaussian_rgb_residual_multiplier
                         ),
+                        "mesh_no_penetration_sdf_sha256": (
+                            mesh_no_penetration_report["sdf_sha256"]
+                            if mesh_no_penetration_report is not None
+                            else None
+                        ),
                         "lifecycle_history": lifecycle_history,
                         "save_reason": save_reason,
                     },
@@ -8006,6 +8239,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable-random-mesh-backing-texture", action="store_true")
     parser.add_argument("--mesh-backing-texture-strength", type=float, default=0.30)
     parser.add_argument("--mesh-backing-texture-octaves", type=int, default=5)
+    parser.add_argument("--mesh-no-penetration-support", action="store_true")
+    parser.add_argument("--mesh-no-penetration-sdf", default="")
+    parser.add_argument("--mesh-no-penetration-weight", type=float, default=0.0)
+    parser.add_argument("--mesh-no-penetration-root-batch", type=int, default=16384)
     parser.add_argument("--disable-mesh-depth-clipping", action="store_true")
     parser.add_argument("--mesh-depth-abs-tolerance", type=float, default=0.018)
     parser.add_argument("--mesh-depth-rel-tolerance", type=float, default=0.004)
@@ -8184,6 +8421,10 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         random_mesh_backing_texture=not args.disable_random_mesh_backing_texture,
         mesh_backing_texture_strength=args.mesh_backing_texture_strength,
         mesh_backing_texture_octaves=args.mesh_backing_texture_octaves,
+        mesh_no_penetration_support=args.mesh_no_penetration_support,
+        mesh_no_penetration_sdf=args.mesh_no_penetration_sdf,
+        mesh_no_penetration_weight=args.mesh_no_penetration_weight,
+        mesh_no_penetration_root_batch=args.mesh_no_penetration_root_batch,
         mesh_depth_clipping=not args.disable_mesh_depth_clipping,
         mesh_depth_abs_tolerance=args.mesh_depth_abs_tolerance,
         mesh_depth_rel_tolerance=args.mesh_depth_rel_tolerance,
