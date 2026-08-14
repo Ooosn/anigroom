@@ -142,4 +142,4 @@ export R061_NO_PENETRATION_REPORT="$reference_dir/report.json"
 
 "$PYTHON" -m pytest tests/test_sdf_collision.py tests/test_stage1_no_penetration.py -q
 
-exec bash "$PROJECT_ROOT/scripts/server/run_r061_gaussian_only_appearance.sh"
+exec bash "$PROJECT_ROOT/scripts/server/run_r060_relative_shape_amplitudes.sh"
