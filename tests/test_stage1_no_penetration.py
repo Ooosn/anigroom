@@ -153,8 +153,11 @@ def test_render_parameter_path_backpropagates_collision_to_groom_geometry() -> N
     )
     lower = torch.tensor([-1.0, -1.0, -1.0])
     upper = torch.tensor([2.0, 2.0, 1.0])
+    x = torch.linspace(lower[0], upper[0], 17)
     z = torch.linspace(lower[2], upper[2], 33)
-    values = z[:, None, None].expand(33, 17, 17).contiguous()
+    values = (z[:, None, None] - 0.05 * x[None, None, :]).expand(
+        33, 17, 17
+    ).contiguous()
     field = SignedDistanceGrid(values, lower, upper)
 
     _, _, _, _, depth = model.render_parameters(
@@ -191,5 +194,8 @@ def test_render_parameter_path_backpropagates_collision_to_groom_geometry() -> N
     assert model.groom.length_raw.grad is not None
     assert bool(torch.isfinite(model.groom.length_raw.grad).all())
     assert float(model.groom.length_raw.grad.abs().sum()) > 0.0
+    assert model.bary_logits.grad is not None
+    assert bool(torch.isfinite(model.bary_logits.grad).all())
+    assert float(model.bary_logits.grad.abs().sum()) > 0.0
     assert model.translation.grad is None
     assert model.log_scale.grad is None

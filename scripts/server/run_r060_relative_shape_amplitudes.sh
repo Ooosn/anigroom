@@ -14,6 +14,8 @@ LABEL="${LABEL:-r060_relative_shape_amplitudes}"
 PREFLIGHT_CONFIG="${PREFLIGHT_CONFIG:-r060_relative_shape_amplitudes_fullres_preflight.env}"
 RUN_CONFIG="${RUN_CONFIG:-r060_relative_shape_amplitudes_0_30k.env}"
 REQUIRE_NO_LOCAL_CHILD_COLOR="${REQUIRE_NO_LOCAL_CHILD_COLOR:-0}"
+PREFLIGHT_POSTCHECK_SCRIPT="${PREFLIGHT_POSTCHECK_SCRIPT:-}"
+POSTPROCESS_POSTCHECK_SCRIPT="${POSTPROCESS_POSTCHECK_SCRIPT:-}"
 
 LOG_ROOT="$RUNTIME_ROOT/logs"
 OUTPUT_ROOT="$RUNTIME_ROOT/outputs"
@@ -265,12 +267,38 @@ run_stage1 \
   "$PREFLIGHT_ID" \
   "$PREFLIGHT_CONFIG"
 verify_active_path_preflight
+if [[ -n "$PREFLIGHT_POSTCHECK_SCRIPT" ]]; then
+  [[ -f "$PREFLIGHT_POSTCHECK_SCRIPT" ]] || {
+    echo "[r060] missing preflight postcheck: $PREFLIGHT_POSTCHECK_SCRIPT" >&2
+    exit 2
+  }
+  bash "$PREFLIGHT_POSTCHECK_SCRIPT" \
+    preflight \
+    "$PROJECT_ROOT" \
+    "$PYTHON" \
+    "$MESH_PATH" \
+    "$OUTPUT_ROOT/$PREFLIGHT_ID" \
+    "$RUNTIME_ROOT"
+fi
 touch "$CONTROL_ROOT/preflight_passed"
 
 run_stage1 \
   "$RUN_ID" \
   "$RUN_CONFIG"
 postprocess
+if [[ -n "$POSTPROCESS_POSTCHECK_SCRIPT" ]]; then
+  [[ -f "$POSTPROCESS_POSTCHECK_SCRIPT" ]] || {
+    echo "[r060] missing postprocess postcheck: $POSTPROCESS_POSTCHECK_SCRIPT" >&2
+    exit 2
+  }
+  bash "$POSTPROCESS_POSTCHECK_SCRIPT" \
+    final \
+    "$PROJECT_ROOT" \
+    "$PYTHON" \
+    "$MESH_PATH" \
+    "$OUTPUT_ROOT/$RUN_ID" \
+    "$RUNTIME_ROOT"
+fi
 
 touch "$CONTROL_ROOT/run_done"
 echo "[r060] run and postprocess complete; waiting for $CONTROL_ROOT/release"
