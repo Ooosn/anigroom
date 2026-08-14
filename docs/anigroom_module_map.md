@@ -104,6 +104,7 @@ The active schema is strict and has no historical checkpoint migration.
 - `tools/export_white_tiger_checkpoint_gaussians_ply.py`
 - `tools/visualize_white_tiger_groom_attributes.py`
 - `tools/blender_render_strand_npz.py`
+- `tools/diagnose_strand_crossings.py`
 
 Structural QA and asset rendering use different fixed protocols. Their exact
 settings are recorded in `docs/current_route.md`; parent-only QA must not be
