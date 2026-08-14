@@ -17,7 +17,7 @@ from anigroom.collision.strand_crossing import (  # noqa: E402
     GaussianSegmentSnapshot,
     discover_gaussian_segment_crossings,
 )
-from anigroom.grooming import groom_direction_3d  # noqa: E402
+from anigroom.flow import groom_direction_3d  # noqa: E402
 from tools.train_white_tiger_stage1 import (  # noqa: E402
     clean_flow_anchor_loss,
     clean_flow_smoothness_loss,
