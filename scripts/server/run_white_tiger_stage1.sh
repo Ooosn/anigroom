@@ -191,6 +191,7 @@ done
 GAUSSIAN_RGB_RESIDUAL_SUPPORT="${GAUSSIAN_RGB_RESIDUAL_SUPPORT:-0}"
 RGB_FLOW_EXCLUDE_COLOR_GRADIENTS="${RGB_FLOW_EXCLUDE_COLOR_GRADIENTS:-0}"
 MESH_NO_PENETRATION_SUPPORT="${MESH_NO_PENETRATION_SUPPORT:-0}"
+STRAND_CROSSING_SUPPORT="${STRAND_CROSSING_SUPPORT:-0}"
 if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
   for name in \
     GAUSSIAN_RGB_RESIDUAL_CONTROL_POINTS \
@@ -223,6 +224,21 @@ else
   MESH_NO_PENETRATION_SDF=""
   MESH_NO_PENETRATION_WEIGHT=0
   MESH_NO_PENETRATION_ROOT_BATCH=16384
+fi
+
+if [[ "$STRAND_CROSSING_SUPPORT" == "1" ]]; then
+  for name in \
+    STRAND_CROSSING_WEIGHT \
+    STRAND_CROSSING_REFRESH_INTERVAL \
+    STRAND_CROSSING_QUERY_BATCH \
+    STRAND_CROSSING_EXACT_PAIR_BATCH; do
+    require_var "$name"
+  done
+else
+  STRAND_CROSSING_WEIGHT=0
+  STRAND_CROSSING_REFRESH_INTERVAL=0
+  STRAND_CROSSING_QUERY_BATCH=50000
+  STRAND_CROSSING_EXACT_PAIR_BATCH=250000
 fi
 
 GEOMETRY_RESIDUAL_DOMAIN="${GEOMETRY_RESIDUAL_DOMAIN:-render}"
@@ -375,6 +391,10 @@ cmd=(
   --mesh-no-penetration-sdf "$MESH_NO_PENETRATION_SDF"
   --mesh-no-penetration-weight "$MESH_NO_PENETRATION_WEIGHT"
   --mesh-no-penetration-root-batch "$MESH_NO_PENETRATION_ROOT_BATCH"
+  --strand-crossing-weight "$STRAND_CROSSING_WEIGHT"
+  --strand-crossing-refresh-interval "$STRAND_CROSSING_REFRESH_INTERVAL"
+  --strand-crossing-query-batch "$STRAND_CROSSING_QUERY_BATCH"
+  --strand-crossing-exact-pair-batch "$STRAND_CROSSING_EXACT_PAIR_BATCH"
   --mesh-depth-abs-tolerance "$MESH_DEPTH_ABS_TOLERANCE"
   --mesh-depth-rel-tolerance "$MESH_DEPTH_REL_TOLERANCE"
   --mesh-depth-local-kernel "$MESH_DEPTH_LOCAL_KERNEL"
@@ -435,6 +455,9 @@ if [[ "$MESH_DEPTH_CLIPPING" == "0" ]]; then
 fi
 if [[ "$MESH_NO_PENETRATION_SUPPORT" == "1" ]]; then
   cmd+=(--mesh-no-penetration-support)
+fi
+if [[ "$STRAND_CROSSING_SUPPORT" == "1" ]]; then
+  cmd+=(--strand-crossing-support)
 fi
 if [[ "$MESH_BACKING_COMPOSITING" == "0" ]]; then
   cmd+=(--disable-mesh-backing-compositing)

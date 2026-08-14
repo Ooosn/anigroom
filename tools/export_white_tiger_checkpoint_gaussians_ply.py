@@ -116,7 +116,7 @@ def main() -> None:
     length_overlap = float(config.gaussian_length_overlap if args.length_overlap <= 0 else args.length_overlap)
 
     with torch.no_grad():
-        gaussians, _, _, stats, _ = model.render_parameters(
+        gaussians, _, _, stats, _, _, _ = model.render_parameters(
             samples=samples,
             child_count=child_count,
             min_segments=min_segments,

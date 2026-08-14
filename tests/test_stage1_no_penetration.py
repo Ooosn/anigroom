@@ -160,7 +160,7 @@ def test_render_parameter_path_backpropagates_collision_to_groom_geometry() -> N
     ).contiguous()
     field = SignedDistanceGrid(values, lower, upper)
 
-    _, _, _, _, depth = model.render_parameters(
+    _, _, _, _, depth, _, _ = model.render_parameters(
         16,
         1,
         10,

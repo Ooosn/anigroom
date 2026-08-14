@@ -55,6 +55,13 @@ from anigroom.collision.sdf import (  # noqa: E402
     cyclic_strand_indices,
     strand_penetration_depth,
 )
+from anigroom.collision.strand_crossing import (  # noqa: E402
+    GaussianSegmentSnapshot,
+    StrandCrossingActiveSet,
+    TorchStrandCrossingActiveSet,
+    active_set_crossing_loss,
+    discover_gaussian_segment_crossings,
+)
 from anigroom.evaluation.metrics import MetricComputer  # noqa: E402
 from anigroom.flow import (  # noqa: E402
     CleanFlowTargets,
@@ -1864,6 +1871,11 @@ class Stage1Config:
     mesh_no_penetration_sdf: str = ""
     mesh_no_penetration_weight: float = 0.0
     mesh_no_penetration_root_batch: int = 16384
+    strand_crossing_support: bool = False
+    strand_crossing_weight: float = 0.0
+    strand_crossing_refresh_interval: int = 0
+    strand_crossing_query_batch: int = 50000
+    strand_crossing_exact_pair_batch: int = 250000
     mesh_depth_clipping: bool = True
     mesh_depth_abs_tolerance: float = 0.018
     mesh_depth_rel_tolerance: float = 0.004
@@ -3505,6 +3517,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         length_overlap: float,
         mesh_no_penetration_field: SignedDistanceGrid | None = None,
         mesh_no_penetration_root_indices: torch.Tensor | None = None,
+        strand_crossing_active_set: TorchStrandCrossingActiveSet | None = None,
     ):
         roots, normals, roots_local = self.roots_and_normals()
         tangents, bitangents = self.tangent_frames(normals)
@@ -3517,6 +3530,53 @@ class WhiteTigerStage1Model(torch.nn.Module):
             groom,
             samples=samples,
         )
+        if strand_crossing_active_set is None:
+            strand_crossing_loss = strands.sum() * 0.0
+            strand_crossing_stats: dict[str, torch.Tensor | int] = {
+                "active_pair_count": 0,
+                "positive_pair_count": 0,
+                "positive_pair_fraction": strand_crossing_loss.detach(),
+                "mean_normalized_depth": strand_crossing_loss.detach(),
+                "maximum_normalized_depth": strand_crossing_loss.detach(),
+            }
+        else:
+            crossing_root_indices = strand_crossing_active_set.unique_root_indices
+            if crossing_root_indices.numel() and (
+                int(crossing_root_indices.min().detach().cpu()) < 0
+                or int(crossing_root_indices.max().detach().cpu())
+                >= int(roots.shape[0])
+            ):
+                raise RuntimeError(
+                    "strand-crossing active set contains a stale render-root index"
+                )
+            # Rebuild only active strands through the canonical geometry path.
+            # Global calibration is detached while root movement and every
+            # groom deformation remain differentiable.
+            selected_groom_values = {
+                field.name: getattr(groom, field.name)[crossing_root_indices]
+                for field in fields(groom)
+            }
+            selected_groom = replace(groom, **selected_groom_values)
+            selected_roots = (
+                roots_local[crossing_root_indices]
+                * torch.exp(self.log_scale.detach()).reshape(1, 1)
+                + self.translation.detach().reshape(1, 3)
+            )
+            selected_strands, selected_widths, _, _ = build_strands(
+                selected_roots,
+                normals[crossing_root_indices],
+                tangents[crossing_root_indices],
+                bitangents[crossing_root_indices],
+                selected_groom,
+                samples=samples,
+            )
+            strand_crossing_loss, strand_crossing_stats = (
+                active_set_crossing_loss(
+                    selected_strands,
+                    selected_widths,
+                    strand_crossing_active_set,
+                )
+            )
         if mesh_no_penetration_field is None:
             mesh_no_penetration_depth = roots.new_empty((0, max(int(samples) - 1, 0)))
         else:
@@ -3620,7 +3680,15 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 self.gaussian_rgb_residual_multiplier
             ),
         }
-        return gaussians, roots, roots_local, stats, mesh_no_penetration_depth
+        return (
+            gaussians,
+            roots,
+            roots_local,
+            stats,
+            mesh_no_penetration_depth,
+            strand_crossing_loss,
+            strand_crossing_stats,
+        )
 
     def apply_local_child_support(
         self,
@@ -4850,6 +4918,8 @@ def render_view(
     retain_lifecycle_grad: bool = False,
     mesh_no_penetration_field: SignedDistanceGrid | None = None,
     mesh_no_penetration_root_indices: torch.Tensor | None = None,
+    strand_crossing_active_set: TorchStrandCrossingActiveSet | None = None,
+    capture_strand_crossing_snapshot: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, object, torch.Tensor, dict[str, float | int], dict]:
     render_args = (
         config.samples,
@@ -4861,21 +4931,39 @@ def render_view(
         config.gaussian_length_overlap,
     )
     if memory_constrained_activation_checkpointing(model.groom.length_raw.device):
-        gaussians, roots, roots_local, stats, mesh_no_penetration_depth = activation_checkpoint(
+        (
+            gaussians,
+            roots,
+            roots_local,
+            stats,
+            mesh_no_penetration_depth,
+            strand_crossing_loss,
+            strand_crossing_stats,
+        ) = activation_checkpoint(
             lambda _anchor: model.render_parameters(
                 *render_args,
                 mesh_no_penetration_field=mesh_no_penetration_field,
                 mesh_no_penetration_root_indices=mesh_no_penetration_root_indices,
+                strand_crossing_active_set=strand_crossing_active_set,
             ),
             model.groom.length_raw,
             use_reentrant=False,
             preserve_rng_state=False,
         )
     else:
-        gaussians, roots, roots_local, stats, mesh_no_penetration_depth = model.render_parameters(
+        (
+            gaussians,
+            roots,
+            roots_local,
+            stats,
+            mesh_no_penetration_depth,
+            strand_crossing_loss,
+            strand_crossing_stats,
+        ) = model.render_parameters(
             *render_args,
             mesh_no_penetration_field=mesh_no_penetration_field,
             mesh_no_penetration_root_indices=mesh_no_penetration_root_indices,
+            strand_crossing_active_set=strand_crossing_active_set,
         )
     preclip_gaussians = gaussians
     if config.mesh_depth_clipping:
@@ -4950,6 +5038,20 @@ def render_view(
     info["preclip_means"] = preclip_gaussians.means.detach()
     info["raw_fur_image"] = raw_image[0]
     info["mesh_no_penetration_depth"] = mesh_no_penetration_depth
+    info["strand_crossing_loss"] = strand_crossing_loss
+    info["strand_crossing_stats"] = strand_crossing_stats
+    info["strand_crossing_snapshot"] = (
+        GaussianSegmentSnapshot.from_tensors(
+            means=preclip_gaussians.means,
+            directions=preclip_gaussians.directions,
+            scales=preclip_gaussians.scales,
+            root_indices=preclip_gaussians.root_indices,
+            segment_indices=preclip_gaussians.segment_indices,
+            length_overlap=float(config.gaussian_length_overlap),
+        )
+        if capture_strand_crossing_snapshot
+        else None
+    )
     return image[0].clamp(0.0, 1.0), alpha[0].clamp(0.0, 1.0), gaussians, roots_local, stats, info
 
 
@@ -6509,6 +6611,116 @@ def validate_mesh_no_penetration_config(config: Stage1Config) -> None:
         )
 
 
+def validate_strand_crossing_config(config: Stage1Config) -> None:
+    if config.strand_crossing_support:
+        if float(config.strand_crossing_weight) <= 0.0:
+            raise ValueError("strand crossing requires a positive loss weight")
+        if int(config.strand_crossing_refresh_interval) <= 0:
+            raise ValueError("strand crossing refresh interval must be positive")
+        if int(config.strand_crossing_query_batch) <= 0:
+            raise ValueError("strand crossing query batch must be positive")
+        if int(config.strand_crossing_exact_pair_batch) <= 0:
+            raise ValueError("strand crossing exact-pair batch must be positive")
+        if int(config.child_count) != 1:
+            raise ValueError("strand crossing currently requires child_count=1")
+        if int(config.densify_until) >= int(config.iterations):
+            raise ValueError(
+                "strand crossing requires a topology-stable interval after densification"
+            )
+        if int(config.prune_interval) > 0 and int(config.prune_start) <= int(
+            config.iterations
+        ):
+            raise ValueError(
+                "strand crossing active-set root IDs require pruning to remain disabled"
+            )
+        return
+    if float(config.strand_crossing_weight) != 0.0:
+        raise ValueError(
+            "strand crossing weight must be zero while support is disabled"
+        )
+    if int(config.strand_crossing_refresh_interval) != 0:
+        raise ValueError(
+            "strand crossing refresh interval must be zero while support is disabled"
+        )
+
+
+def restore_strand_crossing_state(
+    config: Stage1Config,
+    checkpoint: dict[str, object] | None,
+    *,
+    root_count: int,
+    device: torch.device,
+) -> tuple[
+    StrandCrossingActiveSet | None,
+    TorchStrandCrossingActiveSet | None,
+    int,
+    list[dict[str, object]],
+]:
+    raw_state = (
+        checkpoint.get("strand_crossing_active_set")
+        if checkpoint is not None
+        else None
+    )
+    raw_last_refresh = (
+        checkpoint.get("strand_crossing_last_refresh_iteration")
+        if checkpoint is not None
+        else None
+    )
+    raw_history = (
+        checkpoint.get("strand_crossing_history", [])
+        if checkpoint is not None
+        else []
+    )
+    if not isinstance(raw_history, list):
+        raise RuntimeError("strand-crossing checkpoint history is not a list")
+    history = [dict(record) for record in raw_history]
+
+    if not config.strand_crossing_support:
+        if raw_state is not None or raw_last_refresh not in (None, 0) or history:
+            raise RuntimeError(
+                "checkpoint contains strand-crossing state while support is disabled"
+            )
+        return None, None, 0, []
+    if raw_state is None:
+        if raw_last_refresh not in (None, 0):
+            raise RuntimeError(
+                "strand-crossing checkpoint has a refresh iteration but no active set"
+            )
+        return None, None, 0, history
+    if not isinstance(raw_state, dict):
+        raise RuntimeError("strand-crossing checkpoint active set is not a dictionary")
+    if raw_last_refresh is None:
+        raise RuntimeError(
+            "strand-crossing checkpoint active set has no refresh iteration"
+        )
+
+    active_set = StrandCrossingActiveSet.from_checkpoint_state(raw_state)
+    if active_set.pair_count:
+        minimum_root = int(
+            min(
+                active_set.first_root_indices.min(),
+                active_set.second_root_indices.min(),
+            )
+        )
+        maximum_root = int(
+            max(
+                active_set.first_root_indices.max(),
+                active_set.second_root_indices.max(),
+            )
+        )
+        if minimum_root < 0 or maximum_root >= int(root_count):
+            raise RuntimeError(
+                "strand-crossing checkpoint contains stale render-root indices: "
+                f"range=[{minimum_root}, {maximum_root}], root_count={root_count}"
+            )
+    return (
+        active_set,
+        active_set.to_torch(device),
+        int(raw_last_refresh),
+        history,
+    )
+
+
 def load_mesh_no_penetration_field(
     config: Stage1Config,
     mesh_path: Path,
@@ -6562,6 +6774,7 @@ def load_mesh_no_penetration_field(
 def train_white_tiger_stage1(config: Stage1Config) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("White Tiger Stage 1 requires CUDA")
+    validate_strand_crossing_config(config)
     if float(config.geometry_residual_smooth_scale) < 0.0:
         raise ValueError("geometry residual smooth scale must be non-negative")
     shape_detail_enabled = (
@@ -7091,6 +7304,33 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         resume_checkpoint,
         start_iteration=int(start_iteration),
     )
+    (
+        strand_crossing_active_set_cpu,
+        strand_crossing_active_set_torch,
+        strand_crossing_last_refresh_iteration,
+        strand_crossing_history,
+    ) = restore_strand_crossing_state(
+        config,
+        resume_checkpoint,
+        root_count=int(model.face_ids.shape[0]),
+        device=device,
+    )
+    if int(strand_crossing_last_refresh_iteration) > int(start_iteration):
+        raise RuntimeError(
+            "strand-crossing refresh iteration is newer than the resumed training "
+            f"iteration: {strand_crossing_last_refresh_iteration} > {start_iteration}"
+        )
+    setup_progress(
+        "strand_crossing_state_ready",
+        enabled=bool(config.strand_crossing_support),
+        active_pair_count=(
+            int(strand_crossing_active_set_cpu.pair_count)
+            if strand_crossing_active_set_cpu is not None
+            else 0
+        ),
+        last_refresh_iteration=int(strand_crossing_last_refresh_iteration),
+        history_count=int(len(strand_crossing_history)),
+    )
     stage_save_iters = parse_iteration_set(config.stage_save_iters)
     if float(config.gpu_memory_limit_gb) > 0.0 and int(config.gpu_memory_check_interval) <= 0:
         raise RuntimeError("--gpu-memory-limit-gb requires --gpu-memory-check-interval > 0")
@@ -7122,6 +7362,15 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         ),
         mesh_no_penetration_root_batch=int(
             config.mesh_no_penetration_root_batch
+        ),
+        strand_crossing_support=bool(config.strand_crossing_support),
+        strand_crossing_active_pair_count=(
+            int(strand_crossing_active_set_cpu.pair_count)
+            if strand_crossing_active_set_cpu is not None
+            else 0
+        ),
+        strand_crossing_last_refresh_iteration=int(
+            strand_crossing_last_refresh_iteration
         ),
         pytorch_alloc_conf=os.environ.get("PYTORCH_ALLOC_CONF", ""),
         device_memory_gb=float(torch.cuda.get_device_properties(device).total_memory / 1024**3) if device.type == "cuda" else 0.0,
@@ -7165,6 +7414,15 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 and iteration >= int(config.guide_densify_start)
                 and iteration <= int(config.guide_densify_until)
                 and (iteration - int(config.guide_densify_start)) % int(config.guide_densify_interval) == 0
+            )
+            should_refresh_strand_crossing = (
+                bool(config.strand_crossing_support)
+                and iteration > int(config.densify_until)
+                and (
+                    strand_crossing_active_set_cpu is None
+                    or iteration - int(strand_crossing_last_refresh_iteration)
+                    >= int(config.strand_crossing_refresh_interval)
+                )
             )
             lifecycle_stats_active = lifecycle_statistics_active(
                 config,
@@ -7244,6 +7502,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     mesh_no_penetration_root_indices=(
                         mesh_no_penetration_root_indices
                     ),
+                    strand_crossing_active_set=strand_crossing_active_set_torch,
+                    capture_strand_crossing_snapshot=should_refresh_strand_crossing,
                 )
                 if trace_iteration:
                     progress_event(
@@ -7283,6 +7543,18 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         "disabled mesh no-penetration produced depth samples"
                     )
                 mesh_no_penetration_loss = model.groom.length_raw.sum() * 0.0
+            strand_crossing_loss = render_info["strand_crossing_loss"]
+            strand_crossing_stats = render_info["strand_crossing_stats"]
+            strand_crossing_snapshot = render_info["strand_crossing_snapshot"]
+            if should_refresh_strand_crossing:
+                if not isinstance(strand_crossing_snapshot, GaussianSegmentSnapshot):
+                    raise RuntimeError(
+                        "strand-crossing refresh was requested without a Gaussian snapshot"
+                    )
+            elif strand_crossing_snapshot is not None:
+                raise RuntimeError(
+                    "strand-crossing snapshot was captured outside a refresh iteration"
+                )
             fixed_bg = scene_background_color(config, device).view(1, 1, 3)
             pred_fixed = render_info["raw_fur_image"] + (1.0 - alpha) * fixed_bg
             target_fixed = composite_target(target, mask, fixed_bg)
@@ -7471,6 +7743,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
                 + config.root_move_reg_weight * root_move_loss
                 + config.mesh_no_penetration_weight * mesh_no_penetration_loss
+                + config.strand_crossing_weight * strand_crossing_loss
             )
             weighted_rgb_flow_loss = (
                 config.rgb_flow_weight * rgb_flow_loss
@@ -7487,6 +7760,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
                 + config.root_move_reg_weight * root_move_loss
                 + config.mesh_no_penetration_weight * mesh_no_penetration_loss
+                + config.strand_crossing_weight * strand_crossing_loss
             )
             if not bool(torch.isfinite(loss).detach().cpu()):
                 raise RuntimeError(
@@ -7503,6 +7777,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                             "guide_clean_flow_loss": float(guide_clean_flow_loss.detach().cpu()),
                             "mesh_no_penetration_loss": float(
                                 mesh_no_penetration_loss.detach().cpu()
+                            ),
+                            "strand_crossing_loss": float(
+                                strand_crossing_loss.detach().cpu()
                             ),
                         },
                         sort_keys=True,
@@ -7765,6 +8042,58 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 if memory_guard_due:
                     enforce_cuda_memory_guard(config, device, iteration=int(iteration), stage="after_lifecycle", progress_event=progress_event)
 
+            if should_refresh_strand_crossing:
+                crossing_refresh_started = time.perf_counter()
+                discovery_workers = int(os.environ.get("NSLOTS", "1"))
+                if discovery_workers <= 0:
+                    raise RuntimeError("NSLOTS must be positive for crossing discovery")
+                refreshed_active_set, crossing_discovery_report = (
+                    discover_gaussian_segment_crossings(
+                        strand_crossing_snapshot,
+                        query_batch=int(config.strand_crossing_query_batch),
+                        exact_pair_batch=int(
+                            config.strand_crossing_exact_pair_batch
+                        ),
+                        workers=discovery_workers,
+                    )
+                )
+                current_root_count = int(model.face_ids.shape[0])
+                if int(crossing_discovery_report["source_root_count"]) != current_root_count:
+                    raise RuntimeError(
+                        "strand-crossing discovery did not cover every render root: "
+                        f"{crossing_discovery_report['source_root_count']} != "
+                        f"{current_root_count}"
+                    )
+                strand_crossing_active_set_cpu = refreshed_active_set
+                strand_crossing_active_set_torch = refreshed_active_set.to_torch(
+                    device
+                )
+                strand_crossing_last_refresh_iteration = int(iteration)
+                crossing_refresh_record = {
+                    "iteration": int(iteration),
+                    "elapsed_seconds": float(
+                        time.perf_counter() - crossing_refresh_started
+                    ),
+                    "workers": int(discovery_workers),
+                    **crossing_discovery_report,
+                }
+                strand_crossing_history.append(crossing_refresh_record)
+                log.write(
+                    json.dumps(
+                        {"strand_crossing_refresh": crossing_refresh_record}
+                    )
+                    + "\n"
+                )
+                log.flush()
+                print(
+                    json.dumps(
+                        {"strand_crossing_refresh": crossing_refresh_record}
+                    ),
+                    flush=True,
+                )
+                render_info["strand_crossing_snapshot"] = None
+                del strand_crossing_snapshot
+
             if iteration == 1 or iteration % config.eval_every == 0 or iteration == config.iterations:
                 train_eval = evaluate(model, image_paths, mask_paths, viewmats, ks, train_indices, width, height, config, metric_computer, device, mesh_depth_ctx=mesh_depth_ctx)
                 test_eval = evaluate(model, image_paths, mask_paths, viewmats, ks, test_indices, width, height, config, metric_computer, device, mesh_depth_ctx=mesh_depth_ctx)
@@ -7827,6 +8156,34 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         "maximum_depth": float(
                             mesh_no_penetration_depth.detach().max().cpu()
                         ) if mesh_no_penetration_depth.numel() else 0.0,
+                    },
+                    "strand_crossing": {
+                        "loss": float(strand_crossing_loss.detach().cpu()),
+                        "weight": float(config.strand_crossing_weight),
+                        "active_pair_count": int(
+                            strand_crossing_stats["active_pair_count"]
+                        ),
+                        "positive_pair_count": int(
+                            strand_crossing_stats["positive_pair_count"]
+                        ),
+                        "positive_pair_fraction": float(
+                            strand_crossing_stats["positive_pair_fraction"]
+                            .detach()
+                            .cpu()
+                        ),
+                        "mean_normalized_depth": float(
+                            strand_crossing_stats["mean_normalized_depth"]
+                            .detach()
+                            .cpu()
+                        ),
+                        "maximum_normalized_depth": float(
+                            strand_crossing_stats["maximum_normalized_depth"]
+                            .detach()
+                            .cpu()
+                        ),
+                        "last_refresh_iteration": int(
+                            strand_crossing_last_refresh_iteration
+                        ),
                     },
                     "train": train_eval,
                     "test": test_eval,
@@ -8051,6 +8408,15 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                             else None
                         ),
                         "lifecycle_history": lifecycle_history,
+                        "strand_crossing_active_set": (
+                            strand_crossing_active_set_cpu.checkpoint_state()
+                            if strand_crossing_active_set_cpu is not None
+                            else None
+                        ),
+                        "strand_crossing_last_refresh_iteration": int(
+                            strand_crossing_last_refresh_iteration
+                        ),
+                        "strand_crossing_history": strand_crossing_history,
                         "save_reason": save_reason,
                     },
                     output_dir / f"checkpoint_{iteration:06d}.pt",
@@ -8243,6 +8609,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mesh-no-penetration-sdf", default="")
     parser.add_argument("--mesh-no-penetration-weight", type=float, default=0.0)
     parser.add_argument("--mesh-no-penetration-root-batch", type=int, default=16384)
+    parser.add_argument("--strand-crossing-support", action="store_true")
+    parser.add_argument("--strand-crossing-weight", type=float, default=0.0)
+    parser.add_argument("--strand-crossing-refresh-interval", type=int, default=0)
+    parser.add_argument("--strand-crossing-query-batch", type=int, default=50000)
+    parser.add_argument("--strand-crossing-exact-pair-batch", type=int, default=250000)
     parser.add_argument("--disable-mesh-depth-clipping", action="store_true")
     parser.add_argument("--mesh-depth-abs-tolerance", type=float, default=0.018)
     parser.add_argument("--mesh-depth-rel-tolerance", type=float, default=0.004)
@@ -8425,6 +8796,11 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         mesh_no_penetration_sdf=args.mesh_no_penetration_sdf,
         mesh_no_penetration_weight=args.mesh_no_penetration_weight,
         mesh_no_penetration_root_batch=args.mesh_no_penetration_root_batch,
+        strand_crossing_support=args.strand_crossing_support,
+        strand_crossing_weight=args.strand_crossing_weight,
+        strand_crossing_refresh_interval=args.strand_crossing_refresh_interval,
+        strand_crossing_query_batch=args.strand_crossing_query_batch,
+        strand_crossing_exact_pair_batch=args.strand_crossing_exact_pair_batch,
         mesh_depth_clipping=not args.disable_mesh_depth_clipping,
         mesh_depth_abs_tolerance=args.mesh_depth_abs_tolerance,
         mesh_depth_rel_tolerance=args.mesh_depth_rel_tolerance,
