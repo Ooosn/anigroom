@@ -12,6 +12,8 @@ from anigroom.mesh_roots import TriangleMesh
 from tools.train_white_tiger_stage1 import (
     Stage1Config,
     WhiteTigerStage1Model,
+    backward_stage1_losses,
+    make_stage1_optimizer,
     restore_strand_crossing_state,
     validate_strand_crossing_config,
 )
@@ -170,7 +172,16 @@ def test_model_crossing_loss_updates_geometry_not_width_or_global_pose() -> None
     )
     assert stats["active_pair_count"] == 1
     assert float(crossing_loss.detach()) > 0.0
-    crossing_loss.backward()
+    optimizer = make_stage1_optimizer(model, base_config())
+    optimizer.zero_grad(set_to_none=True)
+    backward_stage1_losses(
+        model,
+        optimizer,
+        rgb_and_regularization_loss=model.groom.root_color_raw.sum() * 0.0,
+        flow_loss=model.groom.root_color_raw.sum() * 0.0,
+        exclude_color_flow_gradients=True,
+        strand_crossing_loss=crossing_loss,
+    )
 
     assert model.groom.length_raw.grad is not None
     assert float(model.groom.length_raw.grad.abs().sum()) > 0.0

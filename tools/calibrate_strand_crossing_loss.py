@@ -310,10 +310,16 @@ def main() -> None:
     del snapshot
 
     named_geometry = geometry_parameters(model)
+    torch.cuda.reset_peak_memory_stats(device)
+    torch.cuda.synchronize(device)
+    crossing_forward_started = time.perf_counter()
     _, _, _, _, _, crossing_loss, crossing_stats = model.render_parameters(
         *render_parameter_args(config),
         strand_crossing_active_set=active_torch,
     )
+    torch.cuda.synchronize(device)
+    crossing_forward_elapsed = time.perf_counter() - crossing_forward_started
+    crossing_forward_peak_mb = torch.cuda.max_memory_allocated(device) / (1024.0**2)
     crossing_gradients = gradient_report(crossing_loss, named_geometry)
     structure_loss, structure_values = weighted_structure_loss(model, config)
     structure_gradients = gradient_report(structure_loss, named_geometry)
@@ -328,12 +334,16 @@ def main() -> None:
         "gaussian_count": int(active.source_segment_count),
         "discovery": discovery,
         "crossing_runtime": {
-            key: (
-                int(value)
-                if isinstance(value, int)
-                else float(value.detach().cpu())
-            )
-            for key, value in crossing_stats.items()
+            **{
+                key: (
+                    int(value)
+                    if isinstance(value, int)
+                    else float(value.detach().cpu())
+                )
+                for key, value in crossing_stats.items()
+            },
+            "forward_elapsed_seconds": float(crossing_forward_elapsed),
+            "forward_peak_allocated_mb": float(crossing_forward_peak_mb),
         },
         "crossing_gradients_unweighted": crossing_gradients,
         "existing_structure_gradients_weighted": structure_gradients,

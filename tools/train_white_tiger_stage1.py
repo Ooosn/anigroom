@@ -3549,27 +3549,12 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 raise RuntimeError(
                     "strand-crossing active set contains a stale render-root index"
                 )
-            # Rebuild only active strands through the canonical geometry path.
-            # Global calibration is detached while root movement and every
-            # groom deformation remain differentiable.
-            selected_groom_values = {
-                field.name: getattr(groom, field.name)[crossing_root_indices]
-                for field in fields(groom)
-            }
-            selected_groom = replace(groom, **selected_groom_values)
-            selected_roots = (
-                roots_local[crossing_root_indices]
-                * torch.exp(self.log_scale.detach()).reshape(1, 1)
-                + self.translation.detach().reshape(1, 3)
-            )
-            selected_strands, selected_widths, _, _ = build_strands(
-                selected_roots,
-                normals[crossing_root_indices],
-                tangents[crossing_root_indices],
-                bitangents[crossing_root_indices],
-                selected_groom,
-                samples=samples,
-            )
+            # Reuse the canonical strands already built for this render. The
+            # training backward router restricts this loss to centerline
+            # geometry parameters, so global calibration and appearance do not
+            # receive crossing gradients without duplicating strand generation.
+            selected_strands = strands[crossing_root_indices]
+            selected_widths = widths[crossing_root_indices]
             strand_crossing_loss, strand_crossing_stats = (
                 active_set_crossing_loss(
                     selected_strands,
@@ -5756,6 +5741,75 @@ def optimizer_non_color_parameters(
     )
 
 
+def optimizer_strand_centerline_parameters(
+    model: WhiteTigerStage1Model,
+    optimizer: torch.optim.Optimizer,
+) -> list[torch.nn.Parameter]:
+    """Optimizer-owned parameters that can move a strand centerline."""
+
+    optimizer_parameter_ids = {
+        id(parameter)
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+    }
+    centerline_tokens = (
+        "length",
+        "direction",
+        "brush_stiffness",
+        "curl_radius",
+        "curl_turns",
+        "curl_phase",
+        "frizz_amplitude",
+    )
+    return unique_trainable_parameters(
+        [
+            parameter
+            for name, parameter in model.named_parameters()
+            if id(parameter) in optimizer_parameter_ids
+            and (
+                name == "bary_logits"
+                or any(token in name for token in centerline_tokens)
+            )
+        ]
+    )
+
+
+def backward_stage1_losses(
+    model: WhiteTigerStage1Model,
+    optimizer: torch.optim.Optimizer,
+    *,
+    rgb_and_regularization_loss: torch.Tensor,
+    flow_loss: torch.Tensor,
+    exclude_color_flow_gradients: bool,
+    strand_crossing_loss: torch.Tensor | None = None,
+) -> None:
+    """Backpropagate independently routed RGB, flow, and crossing losses."""
+
+    crossing_parameters = optimizer_strand_centerline_parameters(model, optimizer)
+    route_crossing = (
+        strand_crossing_loss is not None
+        and strand_crossing_loss.requires_grad
+        and bool(crossing_parameters)
+    )
+    if exclude_color_flow_gradients:
+        flow_parameters = optimizer_non_color_parameters(model, optimizer)
+        route_flow = bool(flow_parameters) and flow_loss.requires_grad
+        rgb_and_regularization_loss.backward(
+            retain_graph=route_flow or route_crossing
+        )
+        if route_flow:
+            flow_loss.backward(
+                inputs=flow_parameters,
+                retain_graph=route_crossing,
+            )
+    else:
+        (rgb_and_regularization_loss + flow_loss).backward(
+            retain_graph=route_crossing
+        )
+    if route_crossing:
+        strand_crossing_loss.backward(inputs=crossing_parameters)
+
+
 def backward_rgb_and_flow_without_color_flow_gradients(
     model: WhiteTigerStage1Model,
     optimizer: torch.optim.Optimizer,
@@ -5765,11 +5819,13 @@ def backward_rgb_and_flow_without_color_flow_gradients(
 ) -> None:
     """Backpropagate flow only to non-color optimizer parameters."""
 
-    flow_parameters = optimizer_non_color_parameters(model, optimizer)
-    route_flow = bool(flow_parameters) and flow_loss.requires_grad
-    rgb_and_regularization_loss.backward(retain_graph=route_flow)
-    if route_flow:
-        flow_loss.backward(inputs=flow_parameters)
+    backward_stage1_losses(
+        model,
+        optimizer,
+        rgb_and_regularization_loss=rgb_and_regularization_loss,
+        flow_loss=flow_loss,
+        exclude_color_flow_gradients=True,
+    )
 
 
 def raw_from_range(value: torch.Tensor, bounds: tuple[float, float]) -> torch.Tensor:
@@ -7760,7 +7816,6 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
                 + config.root_move_reg_weight * root_move_loss
                 + config.mesh_no_penetration_weight * mesh_no_penetration_loss
-                + config.strand_crossing_weight * strand_crossing_loss
             )
             if not bool(torch.isfinite(loss).detach().cpu()):
                 raise RuntimeError(
@@ -7789,15 +7844,24 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
             optimizer.zero_grad(set_to_none=True)
             if trace_iteration:
                 progress_event("before_backward", iteration=int(iteration))
-            if config.rgb_flow_exclude_color_gradients:
-                backward_rgb_and_flow_without_color_flow_gradients(
-                    model,
-                    optimizer,
-                    rgb_and_regularization_loss=rgb_and_regularization_loss,
-                    flow_loss=weighted_rgb_flow_loss,
+            weighted_strand_crossing_loss = None
+            if (
+                strand_crossing_active_set_torch is not None
+                and strand_crossing_active_set_torch.pair_count > 0
+            ):
+                weighted_strand_crossing_loss = (
+                    float(config.strand_crossing_weight) * strand_crossing_loss
                 )
-            else:
-                loss.backward()
+            backward_stage1_losses(
+                model,
+                optimizer,
+                rgb_and_regularization_loss=rgb_and_regularization_loss,
+                flow_loss=weighted_rgb_flow_loss,
+                exclude_color_flow_gradients=bool(
+                    config.rgb_flow_exclude_color_gradients
+                ),
+                strand_crossing_loss=weighted_strand_crossing_loss,
+            )
             if trace_iteration:
                 progress_event("after_backward", iteration=int(iteration))
             if memory_guard_due:

@@ -359,6 +359,7 @@ def discover_gaussian_segment_crossings(
 
     records: list[dict[str, np.ndarray]] = []
     broadphase_candidates = 0
+    sphere_filtered_candidates = 0
     exact_tested = 0
     segment_count = int(means.shape[0])
     for query_start in range(0, segment_count, int(query_batch)):
@@ -383,6 +384,19 @@ def discover_gaussian_segment_crossings(
         first = first[valid]
         second = second[valid]
         broadphase_candidates += int(first.size)
+
+        # query_ball_point uses the largest segment reach in the whole model.
+        # This per-pair midpoint-sphere test removes that global overreach. It
+        # is conservative: two swept segment capsules cannot touch when their
+        # midpoint distance exceeds the sum of their individual reaches.
+        midpoint_delta = means[first] - means[second]
+        pair_reach = reach[first] + reach[second]
+        sphere_overlap = np.einsum(
+            "nd,nd->n", midpoint_delta, midpoint_delta
+        ) <= pair_reach * pair_reach
+        first = first[sphere_overlap]
+        second = second[sphere_overlap]
+        sphere_filtered_candidates += int(first.size)
 
         batch_records: list[dict[str, np.ndarray]] = []
         for pair_start in range(0, first.size, int(exact_pair_batch)):
@@ -526,6 +540,9 @@ def discover_gaussian_segment_crossings(
         "source_segment_count": segment_count,
         "source_root_count": int(np.unique(root_indices).size),
         "broadphase_candidate_segment_pairs": int(broadphase_candidates),
+        "sphere_filtered_candidate_segment_pairs": int(
+            sphere_filtered_candidates
+        ),
         "exact_tested_segment_pairs": int(exact_tested),
         "active_root_pair_count": active.pair_count,
         "active_root_count": int(
@@ -553,19 +570,12 @@ def discover_gaussian_segment_crossings(
 def _sample_strand_field_at_arc_progress(
     strands: torch.Tensor,
     widths: torch.Tensor,
+    segment_length: torch.Tensor,
+    cumulative_length: torch.Tensor,
     local_root_indices: torch.Tensor,
     progress: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    segment = strands[:, 1:] - strands[:, :-1]
-    segment_length = torch.linalg.vector_norm(segment, dim=-1)
-    cumulative = torch.cat(
-        [
-            segment_length.new_zeros((segment_length.shape[0], 1)),
-            torch.cumsum(segment_length, dim=1),
-        ],
-        dim=1,
-    )
-    row_cumulative = cumulative[local_root_indices]
+    row_cumulative = cumulative_length[local_root_indices]
     target = progress.clamp(0.0, 1.0) * row_cumulative[:, -1]
     with torch.no_grad():
         segment_index = (
@@ -620,6 +630,16 @@ def active_set_crossing_loss(
             "maximum_normalized_depth": zero.detach(),
         }
 
+    segment_length = torch.linalg.vector_norm(
+        strands[:, 1:] - strands[:, :-1], dim=-1
+    )
+    cumulative_length = torch.cat(
+        [
+            segment_length.new_zeros((segment_length.shape[0], 1)),
+            torch.cumsum(segment_length, dim=1),
+        ],
+        dim=1,
+    )
     weighted_sum = strands.new_zeros(())
     weight_sum = strands.new_zeros(())
     depth_sum = strands.new_zeros(())
@@ -630,12 +650,16 @@ def active_set_crossing_loss(
         first_point, _, first_width = _sample_strand_field_at_arc_progress(
             strands,
             widths,
+            segment_length,
+            cumulative_length,
             active_set.first_local_indices[start:stop],
             active_set.first_progress[start:stop],
         )
         second_point, _, second_width = _sample_strand_field_at_arc_progress(
             strands,
             widths,
+            segment_length,
+            cumulative_length,
             active_set.second_local_indices[start:stop],
             active_set.second_progress[start:stop],
         )

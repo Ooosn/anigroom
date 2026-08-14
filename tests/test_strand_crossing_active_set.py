@@ -101,6 +101,37 @@ def test_nonzero_contact_uses_the_physical_separation_axis() -> None:
     )
 
 
+def test_pair_reach_filter_removes_global_reach_false_candidates() -> None:
+    snapshot = snapshot_from_segments(
+        np.asarray(
+            [
+                [-0.05, 0.0, 0.0],
+                [9.95, 0.0, 0.0],
+                [100.0, -100.0, 0.0],
+            ]
+        ),
+        np.asarray(
+            [
+                [0.05, 0.0, 0.0],
+                [10.05, 0.0, 0.0],
+                [100.0, 100.0, 0.0],
+            ]
+        ),
+        np.asarray([0, 1, 2]),
+        widths=0.05,
+    )
+    active, report = discover_gaussian_segment_crossings(snapshot)
+    assert active.pair_count == 0
+    assert (
+        report["broadphase_candidate_segment_pairs"]
+        > report["sphere_filtered_candidate_segment_pairs"]
+    )
+    assert (
+        report["sphere_filtered_candidate_segment_pairs"]
+        == report["exact_tested_segment_pairs"]
+    )
+
+
 def test_exact_perpendicular_crossing_has_separating_geometry_gradient_only() -> None:
     snapshot = snapshot_from_segments(
         np.asarray([[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]]),
