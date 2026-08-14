@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-08-13.
+Status date: 2026-08-14.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -101,6 +101,17 @@ Gaussian RGB residual still contributes `+1.60593 dB`. R050 remains the
 near-straight appearance reference, and R043 remains the structural/lifecycle
 base. See `docs/r060_relative_shape_amplitudes.md`.
 
+R061 is the accepted current advanced-geometry/appearance baseline. It changes
+only `LOCAL_CHILD_COLOR_SUPPORT=0`, deleting the obsolete per-render-root color
+delta so smooth root/tip color owns strand appearance and the generated-Gaussian
+RGB residual is the sole high-frequency outlet. Its strict from-zero run reaches
+final/best test composite `32.21457/32.30076`, within `0.02455/0.02272 dB` of
+R060. Fixed eight-view mean is `33.23565`; the Gaussian residual contribution
+increases from R060 `+1.60593` to `+1.82087 dB` with only `2.10%` saturation.
+The matched 100k-strand audit retains zero backward segments and no length above
+`0.12`; canonical assets show no material geometry regression. R060 remains the
+local-render-color control. See `docs/r061_gaussian_only_appearance.md`.
+
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
@@ -120,6 +131,8 @@ base. See `docs/r060_relative_shape_amplitudes.md`.
   `configs/r059_redesigned_groom_geometry_0_30k.env`
 - accepted R060 advanced-geometry configuration:
   `configs/r060_relative_shape_amplitudes_0_30k.env`
+- accepted R061 Gaussian-only appearance configuration:
+  `configs/r061_gaussian_only_appearance_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
