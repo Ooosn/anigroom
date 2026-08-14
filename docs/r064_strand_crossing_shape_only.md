@@ -52,6 +52,17 @@ owned by reconstruction, flow, interpolation, smoothness, and lifecycle.
 The training backward router and calibration tool share one parameter predicate
 so the measured gradient scale is the scale used by formal training.
 
+## Frozen Calibration
+
+Calibration used the accepted R062 checkpoint at iteration 30,000. The complete
+test suite passed (`170 passed`). The unweighted shape-only crossing gradient
+had L2 norm `0.0536521`; the already weighted structural-gradient L2 norm was
+`0.0000730371`, giving an equal-gradient crossing weight of `0.00136131`.
+
+The formal weight remains `0.001`. It is below the equal-gradient value and is
+identical to R063, so R064 tests gradient ownership rather than retuning the
+constraint for this subject.
+
 ## Formal Gate
 
 R064 must pass all of the following before acceptance:
