@@ -2,8 +2,10 @@
 
 Status date: 2026-08-14.
 
-Status: implementation and isolated verification complete; formal Stage1
-training acceptance is pending. This module is not enabled in R060 or R061.
+Status: accepted in R062 after strict full-resolution preflight, from-zero 30k
+training, all-root collision audit, fixed-view RGB comparison, and canonical
+strand QA. This module is not enabled in R060 or R061; R061 remains the direct
+single-variable control.
 
 ## Purpose
 
@@ -187,3 +189,78 @@ Before enabling this module in the accepted Stage1 route:
 Failure must remain visible. A missing/mismatched SDF, wrong mesh SHA, wrong
 sign convention, disabled support with a nonzero weight, or malformed depth
 shape raises an error; none of these conditions has a fallback.
+
+All four gates passed for R062. The full-resolution two-step H100 preflight
+was `5.304 s` faster than the matched R061 preflight and added `311.45 MB` peak
+allocated CUDA memory. Gradients reached guide length/direction, secondary
+length/direction, and root barycentric coordinates; global translation and
+scale received no collision gradient.
+
+## Accepted R062 Result
+
+R062 is a strict single-variable child of R061. Its formal configuration adds
+only these four fields:
+
+```text
+MESH_NO_PENETRATION_SUPPORT=1
+MESH_NO_PENETRATION_SDF=<reviewed artifact>
+MESH_NO_PENETRATION_WEIGHT=256
+MESH_NO_PENETRATION_ROOT_BATCH=16384
+```
+
+The uninterrupted from-zero H100 run completed all 30k iterations and passed
+the final strict reload and postprocess checks:
+
+| Quantity | R061 | R062 | Delta |
+| --- | ---: | ---: | ---: |
+| Final test composite PSNR | `32.21457` | `32.19214` | `-0.02243 dB` |
+| Best test composite PSNR | `32.30076` | `32.28517` | `-0.01559 dB` |
+| Fixed eight-view mean composite PSNR | `33.23565` | `33.21203` | `-0.02361 dB` |
+| Final render roots | `471749` | `471583` | `-166` |
+| Final generated Gaussians | `5484109` | `5475299` | `-8810` |
+| H100 elapsed time | `13186.907 s` | `12512.557 s` | `-5.11%` |
+| Peak allocated CUDA memory | `16312.76 MB` | `16560.75 MB` | `+247.99 MB` |
+
+The final all-root 64-sample collision audit gives:
+
+| Quantity | R061 | R062 | Reduction |
+| --- | ---: | ---: | ---: |
+| Penetrating non-root point fraction | `0.134272%` | `0.023592%` | `82.43%` |
+| Roots with any penetrating sample | `0.675571%` | `0.416470%` | `38.35%` |
+| Mean normalized depth over all points | `7.83501e-7` | `1.20769e-7` | `84.59%` |
+| Maximum normalized depth | `0.00978804` | `0.00478041` | `51.16%` |
+
+The fixed 100k-strand audit retains zero backward strands and zero arc lengths
+above `0.12`. Local relative-length P95 changes only
+`0.08033 -> 0.08110`, local direction P95 `11.526 -> 11.621 deg`, and
+maximum-turn P95 `9.408 -> 9.834 deg`. Canonical side, opposite, and front/top
+assets show no new loop, broad crossing cluster, tail spike, or local collapse.
+The Gaussian residual decomposition is also preserved: its fixed-view gain is
+`1.80923 dB`, RMS `0.08128`, and saturation `2.096%`.
+
+Formal identities and evidence:
+
+```text
+source commit:
+  100f7223ede6975862cbc6c30b27f29709f68147
+checkpoint SHA256:
+  d1f23c92f68b250f00ac8771f6435c63af2baf686a9329696de3b34c0cc72900
+SDF SHA256:
+  766e177fbeeb89fc779292f56662c7c6b256f7d4365415baa366cef04af10530
+formal HGC output:
+  /home/wangyy/anigroom-r062-no-penetration-runtime-20260814-v2/outputs/r062_mesh_no_penetration_0_30k_h100_20260814
+local acceptance evidence:
+  D:/RTS/_tmp/r062_acceptance_20260814
+canonical R062 asset:
+  D:/RTS/_tmp/r062_acceptance_20260814/postprocess/r062_mesh_no_penetration/assets/r062_030000_asset_side_y_v11_protocol.png
+R062 penetration highlight:
+  D:/RTS/_tmp/r062_acceptance_20260814/postprocess/r062_mesh_no_penetration/assets/r062_030000_penetration_highlight_side_y.png
+matched R061 penetration highlight:
+  D:/RTS/_tmp/r062_acceptance_20260814/reference/r061_no_penetration/r061_030000_penetration_highlight_side_y.png
+```
+
+Residual penetration is sparse and concentrated around the face, paws, joint
+recesses, and a few tail samples. R062 is accepted because it materially
+reduces both incidence and depth without adding body-part rules, absolute
+tolerances, appearance drift, or a structural failure. Further reductions, if
+needed, must remain a separate experiment rather than changing R062.

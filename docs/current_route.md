@@ -101,7 +101,7 @@ Gaussian RGB residual still contributes `+1.60593 dB`. R050 remains the
 near-straight appearance reference, and R043 remains the structural/lifecycle
 base. See `docs/r060_relative_shape_amplitudes.md`.
 
-R061 is the accepted current advanced-geometry/appearance baseline. It changes
+R061 is the frozen direct appearance control for R062. It changes
 only `LOCAL_CHILD_COLOR_SUPPORT=0`, deleting the obsolete per-render-root color
 delta so smooth root/tip color owns strand appearance and the generated-Gaussian
 RGB residual is the sole high-frequency outlet. Its strict from-zero run reaches
@@ -111,6 +111,20 @@ increases from R060 `+1.60593` to `+1.82087 dB` with only `2.10%` saturation.
 The matched 100k-strand audit retains zero backward segments and no length above
 `0.12`; canonical assets show no material geometry regression. R060 remains the
 local-render-color control. See `docs/r061_gaussian_only_appearance.md`.
+
+R062 is the accepted current advanced-geometry/appearance/validity baseline.
+It is a strict single-variable child of R061 and adds only the differentiable
+continuous-strand mesh no-penetration loss. The loss queries a reviewed
+mesh-local SDF, excludes surface roots, rotates deterministically over 16,384
+render roots per iteration, and sends gradients to groom geometry and root
+barycentric coordinates but not global mesh calibration. Its strict from-zero
+run reaches final/best test composite `32.19214/32.28517`; fixed eight-view mean
+is `33.21203`, only `0.02361 dB` below R061. The final all-root audit reduces
+penetrating point fraction `0.134272% -> 0.023592%`, penetrating-root fraction
+`0.675571% -> 0.416470%`, mean depth by `84.59%`, and maximum depth by
+`51.16%`. Matched 100k-strand QA retains zero backward strands, no length above
+`0.12`, and no canonical visual regression. R061 remains the immutable direct
+control. See `docs/mesh_no_penetration.md`.
 
 ## Active Entry Points
 
@@ -133,6 +147,8 @@ local-render-color control. See `docs/r061_gaussian_only_appearance.md`.
   `configs/r060_relative_shape_amplitudes_0_30k.env`
 - accepted R061 Gaussian-only appearance configuration:
   `configs/r061_gaussian_only_appearance_0_30k.env`
+- accepted R062 mesh-validity configuration:
+  `configs/r062_mesh_no_penetration_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
@@ -140,6 +156,9 @@ local-render-color control. See `docs/r061_gaussian_only_appearance.md`.
 - checkpoint rendering: `tools/render_white_tiger_stage1_checkpoint_views.py`
 - groom diagnostics: `tools/visualize_white_tiger_groom_attributes.py`
 - fixed-protocol strand audit: `tools/audit_strand_structure.py`
+- mesh SDF construction: `anigroom/collision/mesh_sdf.py`
+- differentiable SDF query/loss: `anigroom/collision/sdf.py`
+- checkpoint penetration audit: `tools/diagnose_checkpoint_no_penetration.py`
 
 The launcher requires an explicit `CONFIG_PATH`. There is no fallback route,
 retired configuration migration, or alternate executable baseline.

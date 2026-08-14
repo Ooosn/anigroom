@@ -2,7 +2,9 @@
 
 Current source of truth: `docs/current_route.md`. R043 is the active
 structural/lifecycle result; R036 remains the frozen higher-PSNR metric
-control. R043 retains the accepted flow, interpolation, hierarchy, one-turn
+control. R062 is the current accepted advanced-geometry/appearance/validity
+baseline, with R061 frozen as its direct no-collision control. R043 retains the
+accepted flow, interpolation, hierarchy, one-turn
 centerline, and finite 600-9000 render lifecycle while using 400k independent
 render roots, exact accelerated graph/lifecycle selection, and density-matched
 K32 render support. Guide support remains K8.
@@ -43,13 +45,18 @@ K32 render support. Guide support remains K8.
 - Frozen R036 metric-control config: `configs/stage1_baseline.env`.
 - Active R043 result: train/test composite PSNR `33.46581 / 32.51159`; best
   test composite PSNR `32.71421` at 29k.
+- Accepted R062 advanced result: train/test composite PSNR
+  `33.26321 / 32.19214`; best test composite `32.28517` at 29k. It adds only
+  mesh no-penetration to R061 and preserves the complete R061 schedule,
+  lifecycle, appearance decomposition, and renderer.
 - Active behavior config and lock:
   `configs/r043_density_matched_render_support_0_30k.env` and
   `configs/r043_density_matched_render_support.lock.json`.
 - R038/R039 configs remain historical evidence and are not launcher fallbacks.
 - Frozen R036 metric-control lock: `configs/stage1_baseline.lock.json`.
 - Evidence: `docs/r043_density_matched_render_support.md` and
-  `docs/accept_line_recovery_ledger.md`.
+  `docs/accept_line_recovery_ledger.md`; advanced validity evidence is in
+  `docs/mesh_no_penetration.md`.
 
 The active schema is strict and has no historical checkpoint migration.
 
@@ -73,6 +80,22 @@ The active schema is strict and has no historical checkpoint migration.
   Old target-directed placement branches are no longer present.
 - Densification and pruning remain part of the multi-level training method,
   not standalone synthetic replacements.
+
+## Mesh Collision Validity
+
+- SDF construction: `anigroom/collision/mesh_sdf.py`.
+- Differentiable query and normalized penetration loss:
+  `anigroom/collision/sdf.py`.
+- Formal checkpoint audit: `tools/diagnose_checkpoint_no_penetration.py`.
+- Accepted behavior config: `configs/r062_mesh_no_penetration_0_30k.env`.
+- R062 samples continuous non-root strand points in mesh-local coordinates,
+  uses positive-outside trilinear SDF queries, and rotates over 16,384 roots
+  per iteration. It contains no body-part mask, absolute penetration tolerance,
+  strand-length condition, fallback query, or collision-driven global scale
+  gradient.
+- R062 reduces all-root penetrating point fraction by `82.43%` and maximum
+  normalized depth by `51.16%` versus R061 while retaining matched RGB and
+  strand structure.
 
 ## Visualization And Export
 
