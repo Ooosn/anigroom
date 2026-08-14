@@ -8,9 +8,12 @@ DATA_ROOT="${DATA_ROOT:?set DATA_ROOT to the frozen white-tiger images}"
 MESH_PATH="${MESH_PATH:?set MESH_PATH to the frozen aligned mesh}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:?set EXPECTED_COMMIT to the reviewed R060 commit}"
 
-PREFLIGHT_ID=r060_relative_shape_amplitudes_fullres_preflight_h100_20260813
-RUN_ID=r060_relative_shape_amplitudes_0_30k_h100_20260813
-LABEL=r060_relative_shape_amplitudes
+PREFLIGHT_ID="${PREFLIGHT_ID:-r060_relative_shape_amplitudes_fullres_preflight_h100_20260813}"
+RUN_ID="${RUN_ID:-r060_relative_shape_amplitudes_0_30k_h100_20260813}"
+LABEL="${LABEL:-r060_relative_shape_amplitudes}"
+PREFLIGHT_CONFIG="${PREFLIGHT_CONFIG:-r060_relative_shape_amplitudes_fullres_preflight.env}"
+RUN_CONFIG="${RUN_CONFIG:-r060_relative_shape_amplitudes_0_30k.env}"
+REQUIRE_NO_LOCAL_CHILD_COLOR="${REQUIRE_NO_LOCAL_CHILD_COLOR:-0}"
 
 LOG_ROOT="$RUNTIME_ROOT/logs"
 OUTPUT_ROOT="$RUNTIME_ROOT/outputs"
@@ -78,13 +81,14 @@ verify_active_path_preflight() {
     exit 2
   }
 
-  "$PYTHON" - "$checkpoint" "$output_dir/metrics.jsonl" <<'PY'
+  "$PYTHON" - "$checkpoint" "$output_dir/metrics.jsonl" "$REQUIRE_NO_LOCAL_CHILD_COLOR" <<'PY'
 import json
 import sys
 
 import torch
 
 checkpoint = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+require_no_local_child_color = bool(int(sys.argv[3]))
 if int(checkpoint.get("checkpoint_version", -1)) != 7:
     raise RuntimeError("R060 preflight did not write checkpoint schema 7")
 
@@ -160,6 +164,18 @@ required_optimizer = {
 }
 optimizer_names = checkpoint["optimizer_param_names"]
 flat_optimizer_names = {name for group in optimizer_names for name in group}
+if require_no_local_child_color:
+    if bool(config.get("local_child_color_support", True)):
+        raise RuntimeError("R061 preflight config enabled local child/render-root color")
+    retired_local_color = sorted(
+        name for name in model_state if "child_color_delta_raw" in name
+    )
+    if retired_local_color:
+        raise RuntimeError(
+            f"R061 checkpoint contains retired local color state: {retired_local_color}"
+        )
+    if "child_color_delta_raw" in flat_optimizer_names:
+        raise RuntimeError("R061 optimizer contains retired local color state")
 for fixed_coordinate in ("groom.frizz_seed_phase", "groom.curl_turns_raw", "groom.curl_phase"):
     if fixed_coordinate in flat_optimizer_names:
         raise RuntimeError(f"R060 changed R057 shape ownership: {fixed_coordinate}")
@@ -247,13 +263,13 @@ postprocess() {
 
 run_stage1 \
   "$PREFLIGHT_ID" \
-  r060_relative_shape_amplitudes_fullres_preflight.env
+  "$PREFLIGHT_CONFIG"
 verify_active_path_preflight
 touch "$CONTROL_ROOT/preflight_passed"
 
 run_stage1 \
   "$RUN_ID" \
-  r060_relative_shape_amplitudes_0_30k.env
+  "$RUN_CONFIG"
 postprocess
 
 touch "$CONTROL_ROOT/run_done"
