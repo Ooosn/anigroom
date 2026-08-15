@@ -43,8 +43,29 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--highlight-color", nargs=3, type=float, default=[1.0, 0.0, 0.08])
     parser.add_argument("--highlight-width-scale", type=float, default=4.0)
+    parser.add_argument(
+        "--secondary-highlight-mask-key",
+        default="",
+        help="Optional second boolean NPZ strand mask for pair-level diagnostics.",
+    )
+    parser.add_argument("--secondary-highlight-color", nargs=3, type=float, default=[0.02, 0.45, 1.0])
+    parser.add_argument("--secondary-highlight-width-scale", type=float, default=4.0)
+    parser.add_argument(
+        "--contact-points-key",
+        default="",
+        help="Optional NPZ [N,3] array of exact contact points to mark.",
+    )
+    parser.add_argument("--contact-point-color", nargs=3, type=float, default=[1.0, 0.72, 0.02])
+    parser.add_argument(
+        "--contact-point-radius",
+        type=float,
+        default=0.0,
+        help="World-space marker radius; 0 derives a readable radius from the asset extent.",
+    )
     parser.add_argument("--mesh-color", nargs=3, type=float, default=[0.52, 0.55, 0.60])
     parser.add_argument("--background-color", nargs=3, type=float, default=[0.18, 0.18, 0.18])
+    parser.add_argument("--key-light-energy", type=float, default=900.0)
+    parser.add_argument("--fill-light-energy", type=float, default=260.0)
     parser.add_argument(
         "--camera",
         choices=("side_y", "side_y_pos", "side_x", "side_x_neg", "front_z", "view09_three_quarter"),
@@ -203,6 +224,32 @@ def add_mesh_object(args: argparse.Namespace, mat) -> object | None:
     return obj
 
 
+def add_contact_point_object(points: np.ndarray, radius: float, material) -> object | None:
+    if points.size == 0:
+        return None
+    import bmesh
+    import bpy
+    from mathutils import Matrix
+
+    mesh = bpy.data.meshes.new("crossing_contact_markers")
+    bm = bmesh.new()
+    try:
+        for point in points:
+            bmesh.ops.create_icosphere(
+                bm,
+                subdivisions=2,
+                radius=float(radius),
+                matrix=Matrix.Translation(tuple(float(value) for value in point)),
+            )
+        bm.to_mesh(mesh)
+    finally:
+        bm.free()
+    obj = bpy.data.objects.new("crossing_contact_markers", mesh)
+    obj.data.materials.append(material)
+    bpy.context.collection.objects.link(obj)
+    return obj
+
+
 def main() -> None:
     args = parse_args()
     data = np.load(args.input, allow_pickle=True)
@@ -239,6 +286,44 @@ def main() -> None:
         highlight_mask = backward_strand_mask(strands)
     else:
         highlight_mask = np.zeros(strands.shape[0], dtype=bool)
+    if args.secondary_highlight_mask_key:
+        if args.secondary_highlight_mask_key not in data.files:
+            raise RuntimeError(
+                f"NPZ has no secondary highlight mask array: {args.secondary_highlight_mask_key}"
+            )
+        source_secondary_mask = np.asarray(
+            data[args.secondary_highlight_mask_key]
+        ).reshape(-1)
+        if source_secondary_mask.shape[0] != source_strand_count:
+            raise RuntimeError(
+                "secondary highlight mask length does not match the source strand count"
+            )
+        secondary_highlight_mask = source_secondary_mask[selected_ids].astype(
+            bool, copy=False
+        )
+    else:
+        secondary_highlight_mask = np.zeros(strands.shape[0], dtype=bool)
+    highlight_overlap_count = int(
+        np.logical_and(highlight_mask, secondary_highlight_mask).sum()
+    )
+    secondary_highlight_mask = np.logical_and(
+        secondary_highlight_mask, ~highlight_mask
+    )
+    if args.contact_points_key:
+        if args.max_strands > 0 and source_strand_count > int(args.max_strands):
+            raise RuntimeError(
+                "contact-point rendering requires the complete source strand set"
+            )
+        if args.contact_points_key not in data.files:
+            raise RuntimeError(
+                f"NPZ has no contact point array: {args.contact_points_key}"
+            )
+        contact_points = np.asarray(
+            data[args.contact_points_key], dtype=np.float32
+        ).reshape(-1, 3)
+        contact_points = map_coordinates(contact_points, args.coord_system)
+    else:
+        contact_points = np.empty((0, 3), dtype=np.float32)
 
     import bpy
 
@@ -284,6 +369,33 @@ def main() -> None:
         highlight_bsdf.inputs["Base Color"].default_value = highlight_color
         highlight_bsdf.inputs["Roughness"].default_value = 0.48
 
+    secondary_highlight_mat = bpy.data.materials.new(
+        "secondary_highlighted_fur_material"
+    )
+    secondary_highlight_mat.use_nodes = True
+    secondary_highlight_nodes = secondary_highlight_mat.node_tree.nodes
+    secondary_highlight_bsdf = secondary_highlight_nodes.get("Principled BSDF")
+    if secondary_highlight_bsdf is not None:
+        secondary_highlight_color = tuple(
+            float(v) for v in args.secondary_highlight_color
+        ) + (1.0,)
+        secondary_highlight_bsdf.inputs["Base Color"].default_value = (
+            secondary_highlight_color
+        )
+        secondary_highlight_bsdf.inputs["Roughness"].default_value = 0.48
+
+    contact_mat = bpy.data.materials.new("crossing_contact_material")
+    contact_mat.use_nodes = True
+    contact_nodes = contact_mat.node_tree.nodes
+    contact_bsdf = contact_nodes.get("Principled BSDF")
+    if contact_bsdf is not None:
+        contact_color = tuple(float(v) for v in args.contact_point_color) + (1.0,)
+        contact_bsdf.inputs["Base Color"].default_value = contact_color
+        contact_bsdf.inputs["Roughness"].default_value = 0.32
+        if "Emission Color" in contact_bsdf.inputs:
+            contact_bsdf.inputs["Emission Color"].default_value = contact_color
+            contact_bsdf.inputs["Emission Strength"].default_value = 0.35
+
     mesh_mat = bpy.data.materials.new("furless_body_material")
     mesh_mat.use_nodes = True
     mesh_nodes = mesh_mat.node_tree.nodes
@@ -295,7 +407,7 @@ def main() -> None:
 
     base_width = max(float(np.percentile(widths, 60)) * float(args.width_scale), 1.0e-5)
     chunk_size = max(int(args.curve_chunk_size), 1)
-    normal_mask = ~highlight_mask
+    normal_mask = ~(highlight_mask | secondary_highlight_mask)
     curve_object_count = add_strand_curve_objects(
         strands=strands[normal_mask],
         widths=widths[normal_mask],
@@ -317,6 +429,17 @@ def main() -> None:
             chunk_size=chunk_size,
             name_prefix="highlighted_backward_fur",
         )
+    if np.any(secondary_highlight_mask):
+        curve_object_count += add_strand_curve_objects(
+            strands=strands[secondary_highlight_mask],
+            widths=widths[secondary_highlight_mask],
+            material=secondary_highlight_mat,
+            base_width=base_width,
+            width_scale=float(args.width_scale),
+            radius_multiplier=float(args.secondary_highlight_width_scale),
+            chunk_size=chunk_size,
+            name_prefix="secondary_highlighted_fur",
+        )
 
     bbox_min = strands.reshape(-1, 3).min(axis=0)
     bbox_max = strands.reshape(-1, 3).max(axis=0)
@@ -324,6 +447,12 @@ def main() -> None:
     target = center + np.asarray(args.target_offset, dtype=np.float32)
     extent = bbox_max - bbox_min
     max_extent = float(np.max(extent))
+    contact_point_radius = (
+        float(args.contact_point_radius)
+        if args.contact_point_radius > 0.0
+        else max(max_extent * 0.0016, base_width * 4.0)
+    )
+    add_contact_point_object(contact_points, contact_point_radius, contact_mat)
     distance = max_extent * 2.6 + 0.5
 
     cam_data = bpy.data.cameras.new("camera")
@@ -356,14 +485,14 @@ def main() -> None:
     light = bpy.data.objects.new("large_softbox", light_data)
     bpy.context.collection.objects.link(light)
     light.location = (float(center[0] - 0.6 * distance), float(center[1] - 0.8 * distance), float(center[2] + 0.9 * distance))
-    light_data.energy = 900.0
+    light_data.energy = float(args.key_light_energy)
     light_data.size = max_extent * 1.6
 
     fill_data = bpy.data.lights.new("soft_fill", "AREA")
     fill = bpy.data.objects.new("soft_fill", fill_data)
     bpy.context.collection.objects.link(fill)
     fill.location = (float(center[0] + 0.7 * distance), float(center[1] + 0.4 * distance), float(center[2] + 0.35 * distance))
-    fill_data.energy = 260.0
+    fill_data.energy = float(args.fill_light_energy)
     fill_data.size = max_extent * 2.0
 
     output_path = Path(args.output)
@@ -379,6 +508,17 @@ def main() -> None:
         "highlight_backward_strands": bool(args.highlight_backward_strands),
         "highlighted_strand_count": int(highlight_mask.sum()),
         "highlight_width_scale": float(args.highlight_width_scale),
+        "secondary_highlighted_strand_count": int(
+            secondary_highlight_mask.sum()
+        ),
+        "secondary_highlight_width_scale": float(
+            args.secondary_highlight_width_scale
+        ),
+        "highlight_mask_overlap_count": highlight_overlap_count,
+        "contact_point_count": int(contact_points.shape[0]),
+        "contact_point_radius": float(contact_point_radius),
+        "key_light_energy": float(args.key_light_energy),
+        "fill_light_energy": float(args.fill_light_energy),
         "base_width": base_width,
         "curve_chunk_size": chunk_size,
         "curve_object_count": int(curve_object_count),

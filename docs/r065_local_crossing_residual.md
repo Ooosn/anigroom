@@ -137,3 +137,47 @@ Formal artifacts:
   `D:/RTS/_tmp/r065_acceptance_20260815/postprocess/r065_local_crossing_residual`;
 - verified postprocess archive SHA-256:
   `548deb2fc44066374626071628cd73a9b0b7fd3c7f67d06367f227ad24527e10`.
+
+## Post-Acceptance Geometry Attribution
+
+The fixed R065 30k checkpoint was replayed on the same deterministic 100,000
+render roots with three geometry settings. Root ids, roots, widths, colors,
+opacities, sample count, and Blender protocol are identical; only the geometry
+multipliers change.
+
+| geometry | exact contacts | pairs >=45 deg | involved strands >=45 deg | score P95 | pairs >=45 deg with chord <15 deg |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| primary guide + brush | 14,390 | 192 | 282 | 0.08425 | 0 |
+| + primary curl/frizz | 16,286 | 300 | 476 | 0.14672 | 98 |
+| + secondary local residual (full R065) | 15,822 | 198 | 316 | 0.10635 | 19 |
+
+Primary curl/frizz is therefore the source of most locally curled high-angle
+contacts. The secondary residual repairs most of that increase, but it is a
+corrective layer rather than the source of the deformation. The fixed view09
+RGB replay gains `0.47657 dB` from shape detail, while the Gaussian RGB
+residual gains `2.32969 dB`; GT inspection does not support dense visible curls
+in the highlighted rump region. This is evidence that primary shape detail is
+absorbing some image residual rather than reconstructing only physical fur
+structure.
+
+The crossing diagnostic measures overlap between learned one-sigma Gaussian
+segment envelopes. It does not require polyline centerlines to intersect. The
+old whole-strand red visualization therefore groups together three visually
+different cases: tip-to-body collision, local curved envelope contact, and
+literal centerline crossing. Pair-level rendering now colors the two strands
+separately and marks the exact closest-point midpoint.
+
+Attribution artifacts:
+
+- canonical geometry renders and crops:
+  `D:/RTS/_tmp/r065_geometry_ablation_20260816/assets`;
+- exact guide/brush and guide/curl/frizz contact audits:
+  `D:/RTS/_tmp/r065_geometry_ablation_20260816/crossing_audit_guide_brush`
+  and
+  `D:/RTS/_tmp/r065_geometry_ablation_20260816/crossing_audit_guide_curl_frizz`;
+- pair-level contact inputs:
+  `D:/RTS/_tmp/r065_geometry_ablation_20260816/crossing`;
+- highest-score tip/body contact:
+  `D:/RTS/_tmp/r065_geometry_ablation_20260816/assets/r065_crossing_pair_rank00_contact_closeup.png`;
+- locally curled contact with only `8.05 deg` chord disagreement:
+  `D:/RTS/_tmp/r065_geometry_ablation_20260816/assets/r065_crossing_pair_rank05_contact_closeup.png`.
