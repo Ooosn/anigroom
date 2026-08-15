@@ -1,8 +1,8 @@
 # R-Series Evolution
 
-Status date: 2026-08-14. Active structural/lifecycle baseline: R043. Frozen
+Status date: 2026-08-15. Active structural/lifecycle baseline: R043. Frozen
 higher-PSNR metric control: R036. Accepted appearance and strict zero-foldback
-reference: R050. Current advanced-geometry baseline: R060.
+reference: R050. Current advanced validity/crossing baseline: R065.
 
 This document is the compact decision history. Detailed measurements and
 artifact paths remain in `docs/accept_line_recovery_ledger.md` and the
@@ -150,7 +150,7 @@ final test metric, so
 R036 remains the metric control rather than being rewritten by the structural
 decision.
 
-## Appearance And Optional Shape: R049-R060
+## Appearance, Optional Shape, And Validity: R049-R065
 
 | Run | Test | Decision and lasting result |
 | --- | --- | --- |
@@ -163,6 +163,11 @@ decision.
 | R058 | Redesign curl/frizz forward geometry | Accepted implementation with 133 passing tests after the R059 lifecycle/schema gates were added. |
 | R059 | Train the strict R058 schema on the complete R057 contract | Accepted as the latest trained advanced-geometry research checkpoint. Final/best test is `32.25537/32.33647`, fixed eight-view mean is `33.32501`, and Gaussian RGB residual contributes `+1.60937 dB`. Backward strands fall `177 -> 34`, maximum-turn P95 `50.309 -> 10.265 deg`, and arc/chord P99 `1.20297 -> 1.14865`. The remaining 34 hooks form one compact head-crown patch, so R050 remains the strict zero-foldback reference. |
 | R060 | Express curl radius and frizz amplitude as ratios to current strand length throughout the hierarchy | Accepted as the current advanced-geometry baseline. Final/best test is `32.23912/32.32348`, fixed eight-view mean is `33.29358`, and Gaussian RGB residual contributes `+1.60593 dB`. Matched strict foldbacks fall `34 -> 0`; arc/chord P99 improves `1.14865 -> 1.08576`, local-turn P95 improves `10.265 -> 8.853 deg`, and local continuity remains matched. R059 is retained as the absolute-amplitude control. |
+| R061 | Delete obsolete per-render-root RGB color delta | Accepted appearance cleanup. Smooth root/tip color remains the strand appearance field and generated-Gaussian RGB residual is the only high-frequency outlet. |
+| R062 | Add continuous-strand mesh no-penetration | Accepted validity baseline. Penetrating point fraction falls to `0.023592%` with only `-0.02243 dB` final test composite from R061. |
+| R063 | Add exact 3D crossing active-set loss with broad geometry ownership | Rejected ownership diagnostic. Contacts at least 45 degrees fall `230 -> 56`, but 20 sampled strands exceed `0.12` because crossing can escape through length/root changes. |
+| R064 | Restrict crossing to shared shape fields | Rejected ownership control. Contacts at least 45 degrees fall to `113`, but two primary guides stretch above `0.12` and drive 162 overlong effective roots. |
+| R065 | Route crossing only through active dense local geometry residuals | Accepted current advanced validity/crossing baseline. Contacts at least 45 degrees fall `230 -> 198`, fixed eight-view mean is `33.22230`, no audited length exceeds `0.12`, and no-penetration remains matched. |
 
 ## Effective Findings
 
@@ -192,9 +197,10 @@ The strongest reusable findings are:
 R043 remains the base structural/lifecycle route and does not enable
 curl/frizz or Gaussian-level RGB residual. R050 is the accepted appearance and
 near-straight zero-foldback checkpoint built on the smooth R049 geometry.
-R060 is the current advanced-geometry baseline: it preserves R059's optional
-shape and R057's appearance handoff while removing the remaining short-crown
-foldbacks through length-relative curl/frizz amplitudes. These roles remain
-distinct: R043 for independent-root lifecycle, R050 for near-straight
-appearance/structure, R059 for the absolute-amplitude control, and R060 for
-subsequent controlled advanced-geometry work.
+R065 is the current advanced-geometry/appearance/validity/crossing baseline. It
+preserves R060's length-relative optional shape, R061's Gaussian-only
+high-frequency appearance outlet, and R062's no-penetration constraint, while
+adding a local-residual-only exact crossing route. These roles remain distinct:
+R043 for independent-root lifecycle, R050 for near-straight appearance and
+structure, R059 for the absolute-amplitude control, R062 for the direct
+no-crossing control, and R065 for subsequent controlled validity work.

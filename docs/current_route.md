@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-08-14.
+Status date: 2026-08-15.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -112,7 +112,7 @@ The matched 100k-strand audit retains zero backward segments and no length above
 `0.12`; canonical assets show no material geometry regression. R060 remains the
 local-render-color control. See `docs/r061_gaussian_only_appearance.md`.
 
-R062 is the accepted current advanced-geometry/appearance/validity baseline.
+R062 is the frozen direct validity control for R065.
 It is a strict single-variable child of R061 and adds only the differentiable
 continuous-strand mesh no-penetration loss. The loss queries a reviewed
 mesh-local SDF, excludes surface roots, rotates deterministically over 16,384
@@ -125,6 +125,20 @@ penetrating point fraction `0.134272% -> 0.023592%`, penetrating-root fraction
 `51.16%`. Matched 100k-strand QA retains zero backward strands, no length above
 `0.12`, and no canonical visual regression. R061 remains the immutable direct
 control. See `docs/mesh_no_penetration.md`.
+
+R065 is the accepted current advanced-geometry/appearance/validity/crossing
+baseline. It keeps R062's rendering, reconstruction, no-penetration,
+interpolation, lifecycle, appearance, and groom geometry contracts. It adds the
+exact continuous 3D crossing active set from R063/R064, but routes crossing
+gradients only through active dense zero-centered local direction, curl-radius,
+and frizz-amplitude residuals. Primary guides, length, root placement, width,
+and appearance receive no crossing gradient. The uninterrupted from-zero run
+reaches final/best test composite `32.19859/32.28711`; fixed eight-view mean is
+`33.22230`. Exact contacts at least 45 degrees fall from R062 `230` to `198`,
+while sampled, primary-guide, and effective lengths all remain below `0.12`.
+The no-penetration audit remains matched. R063 and R064 are rejected ownership
+controls; R062 remains the immutable direct control. See
+`docs/r065_local_crossing_residual.md`.
 
 ## Active Entry Points
 
@@ -149,6 +163,8 @@ control. See `docs/mesh_no_penetration.md`.
   `configs/r061_gaussian_only_appearance_0_30k.env`
 - accepted R062 mesh-validity configuration:
   `configs/r062_mesh_no_penetration_0_30k.env`
+- accepted R065 local crossing-residual configuration:
+  `configs/r065_local_crossing_residual_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`

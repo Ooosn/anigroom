@@ -2,10 +2,10 @@
 
 ## Status
 
-This is a diagnostic checkpoint derived from frozen `stage1-r062`. It does not
-change training, geometry, losses, interpolation, lifecycle, or rendering.
-R062 remains the accepted baseline until a crossing treatment passes a strict
-from-zero comparison.
+The exact 3D diagnostic is frozen and retained. Its first trainable treatment,
+R063 broad crossing ownership, completed the strict from-zero comparison and
+was rejected because it reduced contacts by stretching strands and moving
+roots. R062 remained the accepted baseline until R065 passed the complete gate.
 
 ## Question
 
@@ -121,8 +121,22 @@ Candidate discovery may be detached and refreshed as an active set; the loss
 itself must remain differentiable to strand geometry. No camera, anatomical
 mask, absolute length, or body-specific distance enters the method.
 
-Before a from-zero R063 run, the implementation must pass exact synthetic
-crossing/parallel/projection-overlap tests, gradient ownership checks, a
-full-resolution memory/runtime preflight, and a measured active-set refresh
-benchmark. The loss weight must be calibrated from observed gradient scale,
-not chosen to fit one white-tiger region.
+Before the formal R063 run, the implementation was required to pass exact
+synthetic crossing/parallel/projection-overlap tests, gradient ownership checks,
+a full-resolution memory/runtime preflight, and a measured active-set refresh
+benchmark. The loss weight was calibrated from observed gradient scale rather
+than chosen to fit one white-tiger region.
+
+## Formal Treatment Result
+
+R063 passed the implementation, calibration, native full-resolution 30k,
+strict reload, fixed eight-view, and 100k-strand crossing gates. Relative to
+R062 it reduced all exact contacts `16,291 -> 12,834`, contacts at least 45
+degrees `230 -> 56`, and involved strands `379 -> 95`; fixed eight-view
+composite PSNR changed only `33.21203 -> 33.17865`.
+
+It failed geometry ownership. Twenty sampled strands exceeded `0.12`, with a
+maximum of `0.15085`, while R062 had none. Every overlong root belonged to the
+crossing active set. R063 is therefore retained only as proof that the exact
+forward objective is useful and broad geometry ownership is invalid. R064 and
+R065 isolate the subsequent ownership corrections.

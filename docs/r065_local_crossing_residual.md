@@ -1,7 +1,7 @@
 # R065 Local Crossing Residual
 
-Status: implementation and frozen-checkpoint gradient calibration passed;
-formal from-zero 30k acceptance is pending.
+Status: complete and accepted as the current advanced
+geometry/appearance/validity/crossing baseline.
 
 ## Question
 
@@ -73,3 +73,67 @@ All three non-zero crossing-gradient tensors belong to
 appearance tensor belongs to the routed parameter set. The unchanged `0.001`
 weight therefore preserves the original one-third-gradient calibration without
 a new sample-specific tuning parameter.
+
+## Formal Result
+
+The uninterrupted native 1920x1080 H100 run completed all 30,000 iterations in
+14,766.96 seconds. It finished with 471,073 render roots, 5,469,186 generated
+Gaussians, and 20,371.37 MB peak allocated CUDA memory. Final train/test
+composite PSNR is `33.26970/32.19859`; best test composite is `32.28711` at
+29k.
+
+The strict fixed eight-view evaluation reports:
+
+| Metric | R062 | R064 | R065 |
+| --- | ---: | ---: | ---: |
+| composite PSNR mean | 33.21203 | 33.19708 | 33.22230 |
+| no-Gaussian-residual mean | - | - | 31.41187 |
+| Gaussian-residual gain | - | - | +1.81043 |
+| no-shape-detail mean | - | - | 32.76970 |
+
+The deterministic 100k-strand exact crossing and structure audit reports:
+
+| Metric | R062 | R064 | R065 |
+| --- | ---: | ---: | ---: |
+| all exact contacts | 16,291 | 14,762 | 15,822 |
+| contacts at least 45 degrees | 230 | 113 | 198 |
+| contacts at least 60 degrees | 75 | 29 | 55 |
+| crossing-score P95 | 0.10885 | - | 0.10635 |
+| local direction P95 (degrees) | 11.62127 | 11.34429 | 11.50378 |
+| maximum local turn P95 (degrees) | 9.83369 | 8.00770 | 9.21152 |
+| backward strands | 0 | 0 | 0 |
+| sampled length max | 0.105264 | 0.154185 | 0.109623 |
+| sampled lengths above 0.12 | 0 | 39 | 0 |
+
+The all-root length-ownership audit confirms that R065 did not trade crossing
+for a stretched shared groom: primary-guide/effective/secondary-effective
+maximum lengths are `0.112644/0.112774/0.112433`, with zero values above
+`0.12`. The corresponding R064 primary-guide/effective maxima are
+`0.162751/0.163158`, with 2 primary guides and 162 effective roots above
+`0.12`.
+
+The all-root no-penetration audit also remains matched: penetrating points are
+6,602 of 29,677,599 (`0.022246%`) and penetrating roots are 1,848 of 471,073
+(`0.392296%`), both slightly below R062. Canonical pure-fur assets show no tail
+spikes, gross folds, or visible local collapse. Remaining exact crossings are
+sparse around the head/neck, tail tip, and a few torso/limb regions.
+
+## Decision
+
+R065 passes the complete acceptance protocol. It reduces R062's exact
+45-degree crossing count by 13.9%, preserves reconstruction and collision
+validity, and eliminates the R063/R064 long-strand escape route. R064 achieves
+a lower crossing count but is rejected because it violates low-frequency
+length ownership. R065 becomes the accepted parent for any further crossing
+work; it is a clean checkpoint, not a claim that all crossings are solved.
+
+Formal artifacts:
+
+- H100 output:
+  `/home/wangyy/anigroom-r065-local-crossing-residual-runtime-20260815/outputs/r065_local_crossing_residual_0_30k_h100_20260815`;
+- H100 postprocess:
+  `/home/wangyy/anigroom-r065-local-crossing-residual-runtime-20260815/postprocess/r065_local_crossing_residual`;
+- local strict QA:
+  `D:/RTS/_tmp/r065_acceptance_20260815/postprocess/r065_local_crossing_residual`;
+- verified postprocess archive SHA-256:
+  `548deb2fc44066374626071628cd73a9b0b7fd3c7f67d06367f227ad24527e10`.

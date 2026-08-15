@@ -2,8 +2,9 @@
 
 ## Status
 
-R064 is an isolated correction of the R063 crossing-gradient ownership. R062
-remains the accepted baseline until the complete R064 from-zero gate passes.
+R064 is complete and rejected as a baseline. It is retained as the immutable
+shape-only ownership control between R063 and the accepted R065 local-residual
+route.
 
 ## R063 Finding
 
@@ -78,3 +79,28 @@ R064 must pass all of the following before acceptance:
 The comparison uses R062 and R063 as immutable controls. R064 is rejected if it
 recovers crossing counts by introducing long strands, foldbacks, penetration,
 visible local collapse, or a material reconstruction regression.
+
+## Formal Result
+
+The native full-resolution from-zero 30k run, strict reload, fixed eight-view
+evaluation, 100k-strand audit, no-penetration audit, and canonical assets all
+completed. R064 improved the exact crossing tail relative to R062, but failed
+the length-ownership gate.
+
+| Metric | R062 | R064 |
+| --- | ---: | ---: |
+| fixed eight-view composite PSNR | 33.21203 | 33.19708 |
+| all exact contacts | 16,291 | 14,762 |
+| contacts at least 45 degrees | 230 | 113 |
+| contacts at least 60 degrees | 75 | 29 |
+| sampled strand length max | 0.105264 | 0.154185 |
+| sampled strands above 0.12 | 0 | 39 |
+| checkpoint effective roots above 0.12 | 0 | 162 |
+| primary-guide length max | 0.104955 | 0.162751 |
+| primary guides above 0.12 | 0 | 2 |
+
+The crossing term no longer changed length directly, yet updating the shared
+primary direction/stiffness field caused ordinary reconstruction losses to
+compensate through primary-guide length. R064 therefore removed crossings by
+distorting the low-frequency groom rather than resolving them locally. It is
+rejected without adding a length cap; R065 addresses the ownership error.
