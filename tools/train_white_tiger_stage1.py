@@ -5741,34 +5741,40 @@ def optimizer_non_color_parameters(
     )
 
 
-_STRAND_CROSSING_SHAPE_PARAMETER_TOKENS = (
-    "direction",
-    "brush_stiffness",
-    "curl_radius",
-    "curl_turns",
-    "curl_phase",
-    "frizz_amplitude",
+_STRAND_CROSSING_LOCAL_RESIDUAL_PARAMETER_NAMES = (
+    "direction_local_raw",
+    "curl_radius_ratio_raw",
+    "frizz_amplitude_ratio_raw",
 )
 
 
-def is_strand_crossing_shape_parameter(name: str) -> bool:
-    """Return whether crossing may alter this learned shape parameter."""
+def strand_crossing_local_shape_named_parameters(
+    model: WhiteTigerStage1Model,
+) -> list[tuple[str, torch.nn.Parameter]]:
+    """Return the dense local shape field that may resolve a crossing.
 
-    return any(
-        token in name for token in _STRAND_CROSSING_SHAPE_PARAMETER_TOKENS
-    )
+    The primary guide field owns the low-frequency groom. A local intersection
+    must therefore be corrected by the active zero-centered residual layer,
+    rather than rotating a shared primary guide and forcing RGB to compensate
+    through guide length.
+    """
+
+    residual = model.active_geometry_residual()
+    if residual is None:
+        return []
+    prefix = model.geometry_residual_parameter_prefix()
+    return [
+        (f"{prefix}.{name}", parameter)
+        for name, parameter in residual.named_parameters(recurse=False)
+        if name in _STRAND_CROSSING_LOCAL_RESIDUAL_PARAMETER_NAMES
+    ]
 
 
 def optimizer_strand_crossing_shape_parameters(
     model: WhiteTigerStage1Model,
     optimizer: torch.optim.Optimizer,
 ) -> list[torch.nn.Parameter]:
-    """Optimizer-owned shape parameters allowed to resolve strand crossings.
-
-    Crossing is a centerline-direction validity constraint. It must not change
-    strand length, root density/placement, width, or appearance to escape a
-    contact.
-    """
+    """Return optimizer-owned dense local controls for crossing correction."""
 
     optimizer_parameter_ids = {
         id(parameter)
@@ -5778,9 +5784,8 @@ def optimizer_strand_crossing_shape_parameters(
     return unique_trainable_parameters(
         [
             parameter
-            for name, parameter in model.named_parameters()
+            for _, parameter in strand_crossing_local_shape_named_parameters(model)
             if id(parameter) in optimizer_parameter_ids
-            and is_strand_crossing_shape_parameter(name)
         ]
     )
 
@@ -6692,6 +6697,25 @@ def validate_strand_crossing_config(config: Stage1Config) -> None:
             raise ValueError("strand crossing exact-pair batch must be positive")
         if int(config.child_count) != 1:
             raise ValueError("strand crossing currently requires child_count=1")
+        if int(config.guide_root_count) <= 0:
+            raise ValueError(
+                "strand crossing local correction requires primary guides"
+            )
+        if config.render_geometry_parameterization == "absolute_endpoint":
+            raise ValueError(
+                "strand crossing local correction requires zero-centered geometry"
+            )
+        if (
+            config.geometry_residual_domain == "secondary_guide"
+            and int(config.secondary_guide_root_count) <= 0
+        ):
+            raise ValueError(
+                "strand crossing secondary correction requires secondary guides"
+            )
+        if float(config.guide_direction_residual_scale) <= 0.0:
+            raise ValueError(
+                "strand crossing local correction requires a direction residual"
+            )
         if int(config.densify_until) >= int(config.iterations):
             raise ValueError(
                 "strand crossing requires a topology-stable interval after densification"

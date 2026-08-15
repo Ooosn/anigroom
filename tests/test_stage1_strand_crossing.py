@@ -13,9 +13,9 @@ from tools.train_white_tiger_stage1 import (
     Stage1Config,
     WhiteTigerStage1Model,
     backward_stage1_losses,
-    is_strand_crossing_shape_parameter,
     make_stage1_optimizer,
     restore_strand_crossing_state,
+    strand_crossing_local_shape_named_parameters,
     validate_strand_crossing_config,
 )
 from tools.calibrate_strand_crossing_loss import render_parameter_args
@@ -40,6 +40,13 @@ def enabled_config() -> Stage1Config:
         strand_crossing_support=True,
         strand_crossing_weight=0.01,
         strand_crossing_refresh_interval=1000,
+        guide_root_count=2,
+        geometry_residual_domain="secondary_guide",
+        secondary_guide_root_count=2,
+        render_geometry_parameterization=(
+            "zero_centered_asinh_log_length_residual"
+        ),
+        guide_direction_residual_scale=0.1,
     )
 
 
@@ -101,6 +108,18 @@ def test_crossing_configuration_is_explicit_and_topology_safe() -> None:
         validate_strand_crossing_config(
             replace(enabled_config(), prune_start=12000, prune_interval=100)
         )
+    with pytest.raises(ValueError, match="zero-centered geometry"):
+        validate_strand_crossing_config(
+            replace(enabled_config(), render_geometry_parameterization="absolute_endpoint")
+        )
+    with pytest.raises(ValueError, match="secondary guides"):
+        validate_strand_crossing_config(
+            replace(enabled_config(), secondary_guide_root_count=0)
+        )
+    with pytest.raises(ValueError, match="direction residual"):
+        validate_strand_crossing_config(
+            replace(enabled_config(), guide_direction_residual_scale=0.0)
+        )
     validate_strand_crossing_config(enabled_config())
 
 
@@ -133,19 +152,7 @@ def test_crossing_checkpoint_state_restores_and_rejects_stale_root_ids() -> None
         )
 
 
-def test_crossing_shape_parameter_ownership_excludes_length_and_root_move() -> None:
-    assert is_strand_crossing_shape_parameter("groom.direction_local_raw")
-    assert is_strand_crossing_shape_parameter("guide_brush_stiffness_raw")
-    assert is_strand_crossing_shape_parameter(
-        "secondary_geometry_residual.frizz_amplitude_raw"
-    )
-    assert not is_strand_crossing_shape_parameter("groom.length_raw")
-    assert not is_strand_crossing_shape_parameter("bary_logits")
-    assert not is_strand_crossing_shape_parameter("groom.root_width_raw")
-    assert not is_strand_crossing_shape_parameter("groom.root_color_raw")
-
-
-def test_model_crossing_loss_updates_shape_not_length_root_or_appearance() -> None:
+def guided_secondary_model() -> WhiteTigerStage1Model:
     mesh = TriangleMesh(
         vertices=np.asarray(
             [
@@ -158,19 +165,55 @@ def test_model_crossing_loss_updates_shape_not_length_root_or_appearance() -> No
         ),
         faces=np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int64),
     )
-    model = WhiteTigerStage1Model(
+    face_ids = np.asarray([0, 1], dtype=np.int64)
+    barycentric = np.asarray(
+        [[0.6, 0.2, 0.2], [0.6, 0.2, 0.2]],
+        dtype=np.float32,
+    )
+    return WhiteTigerStage1Model(
         mesh,
         np.asarray([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]], dtype=np.float32),
         np.asarray([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float32),
-        np.asarray([0, 1], dtype=np.int64),
-        np.asarray([[0.6, 0.2, 0.2], [0.6, 0.2, 0.2]], dtype=np.float32),
+        face_ids,
+        barycentric,
         GroomRanges(),
         torch.device("cpu"),
         init_scale=1.75,
         init_translation=(0.2, 0.3, -0.4),
         init_groom_length=0.018,
         max_child_count=1,
+        guide_face_ids=face_ids,
+        guide_barycentric=barycentric,
+        guide_interpolation_k=1,
+        geometry_residual_domain="secondary_guide",
+        secondary_guide_face_ids=face_ids,
+        secondary_guide_barycentric=barycentric,
+        secondary_guide_parent_ids=np.asarray([0, 1], dtype=np.int64),
+        secondary_guide_interpolation_k=1,
+        render_geometry_parameterization=(
+            "zero_centered_asinh_log_length_residual"
+        ),
+        guide_length_residual_scale=1.0,
+        guide_direction_residual_scale=0.1,
+        guide_curl_residual_scale=1.0,
+        guide_frizz_residual_scale=1.0,
     )
+
+
+def test_crossing_shape_parameter_ownership_is_only_local_residual() -> None:
+    model = guided_secondary_model()
+    names = {
+        name for name, _ in strand_crossing_local_shape_named_parameters(model)
+    }
+    assert names == {
+        "secondary_geometry_residual.direction_local_raw",
+        "secondary_geometry_residual.curl_radius_ratio_raw",
+        "secondary_geometry_residual.frizz_amplitude_ratio_raw",
+    }
+
+
+def test_model_crossing_loss_updates_shape_not_length_root_or_appearance() -> None:
+    model = guided_secondary_model()
     active = one_pair_active_set().to_torch("cpu")
 
     _, _, _, _, _, crossing_loss, stats = model.render_parameters(
@@ -185,7 +228,21 @@ def test_model_crossing_loss_updates_shape_not_length_root_or_appearance() -> No
     )
     assert stats["active_pair_count"] == 1
     assert float(crossing_loss.detach()) > 0.0
-    optimizer = make_stage1_optimizer(model, base_config())
+    optimizer = make_stage1_optimizer(
+        model,
+        replace(
+            base_config(),
+            geometry_residual_domain="secondary_guide",
+            secondary_guide_root_count=2,
+            render_geometry_parameterization=(
+                "zero_centered_asinh_log_length_residual"
+            ),
+            guide_length_residual_scale=1.0,
+            guide_direction_residual_scale=0.1,
+            guide_curl_residual_scale=1.0,
+            guide_frizz_residual_scale=1.0,
+        ),
+    )
     optimizer.zero_grad(set_to_none=True)
     backward_stage1_losses(
         model,
@@ -196,8 +253,19 @@ def test_model_crossing_loss_updates_shape_not_length_root_or_appearance() -> No
         strand_crossing_loss=crossing_loss,
     )
 
-    assert model.groom.direction_local_raw.grad is not None
-    assert float(model.groom.direction_local_raw.grad.abs().sum()) > 0.0
+    assert model.secondary_geometry_residual is not None
+    assert model.secondary_geometry_residual.direction_local_raw.grad is not None
+    assert (
+        float(
+            model.secondary_geometry_residual.direction_local_raw.grad.abs().sum()
+        )
+        > 0.0
+    )
+    assert model.secondary_geometry_residual.length_raw.grad is None
+    assert model.guide_direction_local_raw.grad is None
+    assert model.guide_brush_stiffness_raw.grad is None
+    assert model.guide_length_raw.grad is None
+    assert model.groom.direction_local_raw.grad is None
     assert model.groom.length_raw.grad is None
     assert model.bary_logits.grad is None
     assert model.groom.root_width_raw.grad is None

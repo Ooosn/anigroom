@@ -25,12 +25,12 @@ from tools.train_white_tiger_stage1 import (  # noqa: E402
     effective_groom_graph_smoothness,
     guide_interpolation_regularization_losses,
     guide_root_graph_smoothness,
-    is_strand_crossing_shape_parameter,
     load_stage1_checkpoint_model,
     rebuild_graph_edges,
     render_geometry_residual_graph_smoothness,
     root_graph_smoothness,
     smooth_metric_uses_transport,
+    strand_crossing_local_shape_named_parameters,
 )
 
 
@@ -49,14 +49,15 @@ def render_parameter_args(config) -> tuple[int | float, ...]:
 def geometry_parameters(
     model: torch.nn.Module,
 ) -> list[tuple[str, torch.nn.Parameter]]:
-    selected = []
-    for name, parameter in model.named_parameters():
-        if not parameter.requires_grad:
-            continue
-        if is_strand_crossing_shape_parameter(name):
-            selected.append((name, parameter))
+    selected = [
+        (name, parameter)
+        for name, parameter in strand_crossing_local_shape_named_parameters(model)
+        if parameter.requires_grad
+    ]
     if not selected:
-        raise RuntimeError("checkpoint model exposes no crossing-shape parameters")
+        raise RuntimeError(
+            "checkpoint model exposes no active local crossing-shape residual"
+        )
     return selected
 
 
