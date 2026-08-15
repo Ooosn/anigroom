@@ -44,6 +44,12 @@ def parse_args() -> argparse.Namespace:
         help="Override the checkpoint curl/frizz multiplier for diagnostic export.",
     )
     parser.add_argument(
+        "--guide-residual-multiplier",
+        type=float,
+        default=None,
+        help="Override the checkpoint render-root/secondary geometry residual multiplier for diagnostic export.",
+    )
+    parser.add_argument(
         "--secondary-shape-residual-multiplier",
         type=float,
         default=None,
@@ -65,6 +71,8 @@ def main() -> None:
     model = build_stage1_model_from_checkpoint(checkpoint, config, device)
     if args.shape_detail_multiplier is not None:
         model.shape_detail_multiplier = float(args.shape_detail_multiplier)
+    if args.guide_residual_multiplier is not None:
+        model.guide_residual_multiplier = float(args.guide_residual_multiplier)
     if args.secondary_shape_residual_multiplier is not None:
         model.secondary_shape_residual_multiplier = float(
             args.secondary_shape_residual_multiplier
