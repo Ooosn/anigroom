@@ -1,6 +1,7 @@
 # R065 Local Crossing Residual
 
-Status: implementation and gradient calibration pending formal 30k acceptance.
+Status: implementation and frozen-checkpoint gradient calibration passed;
+formal from-zero 30k acceptance is pending.
 
 ## Question
 
@@ -52,3 +53,23 @@ semantic groom, while local residuals resolve local geometric validity.
    structure/crossing audit, no-penetration audit, and canonical assets pass;
 5. R065 is accepted only if it reduces R062 crossings without the R063/R064
    long-strand tail or a material appearance regression.
+
+## Frozen-Checkpoint Calibration
+
+The complete 173-test suite passed on the held H100 checkout. Calibration used
+the immutable R062 30k checkpoint and its 471,583 render roots / 5,475,249
+generated Gaussians. The discovered active set contained 365,280 pairs.
+
+| Quantity | Value |
+| --- | ---: |
+| unweighted local crossing gradient L2 | 0.01343185 |
+| weighted existing structural gradient L2 | 0.0000399193 |
+| crossing weight for equal L2 | 0.00297199 |
+| retained crossing weight | 0.001 |
+| retained crossing / structure gradient ratio | 0.3365 |
+
+All three non-zero crossing-gradient tensors belong to
+`secondary_geometry_residual`; no primary-guide, length, root, width, or
+appearance tensor belongs to the routed parameter set. The unchanged `0.001`
+weight therefore preserves the original one-third-gradient calibration without
+a new sample-specific tuning parameter.
