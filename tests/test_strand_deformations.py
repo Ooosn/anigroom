@@ -202,6 +202,77 @@ def test_zero_curl_turns_cannot_duplicate_the_brush_bend() -> None:
     torch.testing.assert_close(shaped, backbone, atol=2.0e-18, rtol=0.0)
 
 
+def test_zero_turn_jacobian_is_nonzero_with_positive_radius() -> None:
+    backbone, normals, directions, tangents = canonical_backbone(samples=33)
+    _, side, _ = backbone_transverse_frames(
+        backbone,
+        normals,
+        directions,
+        tangents,
+    )
+    radius = torch.tensor([[0.004]], dtype=torch.float64)
+    turns = torch.zeros((1, 1), dtype=torch.float64, requires_grad=True)
+    shaped = curl_backbone(
+        backbone,
+        normals,
+        directions,
+        tangents,
+        radius=radius,
+        turns=turns,
+        phase=torch.zeros_like(turns),
+    )
+    tip_side_projection = (shaped[:, -1] * side[:, -1]).sum()
+    gradient = torch.autograd.grad(tip_side_projection, turns)[0]
+    torch.testing.assert_close(
+        gradient,
+        2.0 * torch.pi * radius,
+        atol=1.0e-12,
+        rtol=1.0e-12,
+    )
+
+
+def test_signed_turns_reverse_side_handedness_without_clamping() -> None:
+    backbone, normals, directions, tangents = canonical_backbone(samples=129)
+    _, side, outward = backbone_transverse_frames(
+        backbone,
+        normals,
+        directions,
+        tangents,
+    )
+    positive = curl_backbone(
+        backbone,
+        normals,
+        directions,
+        tangents,
+        radius=torch.tensor([[0.004]], dtype=torch.float64),
+        turns=torch.tensor([[1.25]], dtype=torch.float64),
+        phase=torch.zeros((1, 1), dtype=torch.float64),
+    )
+    negative = curl_backbone(
+        backbone,
+        normals,
+        directions,
+        tangents,
+        radius=torch.tensor([[0.004]], dtype=torch.float64),
+        turns=torch.tensor([[-1.25]], dtype=torch.float64),
+        phase=torch.zeros((1, 1), dtype=torch.float64),
+    )
+    positive_offset = positive - backbone
+    negative_offset = negative - backbone
+    torch.testing.assert_close(
+        (negative_offset * side).sum(dim=-1),
+        -(positive_offset * side).sum(dim=-1),
+        atol=1.0e-12,
+        rtol=1.0e-12,
+    )
+    torch.testing.assert_close(
+        (negative_offset * outward).sum(dim=-1),
+        (positive_offset * outward).sum(dim=-1),
+        atol=1.0e-12,
+        rtol=1.0e-12,
+    )
+
+
 def test_curl_and_frizz_are_additive_and_parameter_independent() -> None:
     backbone, normals, directions, tangents = canonical_backbone()
     curl = curl_backbone(

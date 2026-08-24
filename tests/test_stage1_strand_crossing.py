@@ -263,6 +263,7 @@ def test_model_crossing_loss_updates_shape_not_length_root_or_appearance() -> No
     )
     assert model.secondary_geometry_residual.length_raw.grad is None
     assert model.guide_direction_local_raw.grad is None
+    assert model.guide_curl_turns_raw.grad is None
     assert model.guide_brush_stiffness_raw.grad is None
     assert model.guide_length_raw.grad is None
     assert model.groom.direction_local_raw.grad is None

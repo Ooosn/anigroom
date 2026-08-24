@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import torch
@@ -22,12 +24,17 @@ from tools.train_white_tiger_stage1 import (
     Stage1Config,
     WhiteTigerStage1Model,
     aggregate_render_need_to_guides,
+    effective_groom_graph_smoothness,
+    effective_groom_stats,
+    guide_root_graph_smoothness,
     make_stage1_optimizer,
     optimizer_row_transition,
     rebuild_stage1_optimizer_with_state,
     render_geometry_residual_graph_smoothness,
+    require_checkpoint_optimizer_param_names,
     select_surface_graph_local_maxima,
     stage1_optimizer_param_names,
+    zero_guide_gradients,
     zero_render_geometry_residual_gradients,
 )
 
@@ -247,6 +254,7 @@ def test_optimizer_contains_residuals_not_legacy_geometry() -> None:
     assert "render_geometry_residual.width_taper_raw" in names
     assert "render_geometry_residual.child_radius_raw" in names
     assert "guide_brush_stiffness_raw" in names
+    assert "guide_curl_turns_raw" in names
     assert "groom.length_raw" not in names
     assert "groom.root_width_raw" not in names
     assert "groom.tip_width_ratio_raw" not in names
@@ -254,6 +262,8 @@ def test_optimizer_contains_residuals_not_legacy_geometry() -> None:
     assert "groom.child_radius_raw" not in names
     assert "groom.brush_stiffness_raw" not in names
     assert "groom.direction_local_raw" not in names
+    assert "groom.curl_turns_raw" not in names
+    assert "groom.curl_phase" not in names
     assert id(model.render_geometry_residual.length_raw) in optimized_ids
     assert id(model.render_geometry_residual.root_width_raw) in optimized_ids
     assert id(model.render_geometry_residual.tip_width_ratio_raw) in optimized_ids
@@ -282,6 +292,114 @@ def test_disabled_curl_and_frizz_are_not_optimized() -> None:
 
     assert "guide_curl_radius_ratio_raw" not in names
     assert "guide_frizz_amplitude_ratio_raw" not in names
+
+
+def test_signed_guide_turns_use_range_free_smoothness_and_magnitude_stats() -> None:
+    model = make_model()
+    with torch.no_grad():
+        model.guide_curl_turns_raw.copy_(
+            torch.tensor([[-6.0], [9.0], [-6.0], [9.0]])
+        )
+        model.guide_curl_radius_ratio_raw.copy_(
+            encode_positive_softplus(
+                torch.full_like(model.guide_curl_radius_ratio_raw, 0.2)
+            )
+        )
+    roots, normals, roots_local = model.roots_and_normals()
+    del roots
+    tangents, bitangents = model.tangent_frames(normals)
+    groom = effective_groom(model)
+    edges = torch.tensor(
+        [[0, 1], [1, 2], [2, 3]],
+        dtype=torch.long,
+    )
+    guide_loss = guide_root_graph_smoothness(model, edges)
+    effective_loss = effective_groom_graph_smoothness(
+        groom,
+        edges,
+        normals,
+        tangents,
+        bitangents,
+        model.groom.ranges,
+    )
+    loss = guide_loss + effective_loss
+    assert bool(torch.isfinite(loss))
+    loss.backward()
+    assert model.guide_curl_turns_raw.grad is not None
+    assert bool(torch.isfinite(model.guide_curl_turns_raw.grad).all())
+
+    stats = effective_groom_stats(model)
+    assert stats is not None
+    assert stats["curl_turns"]["min"] < 0.0
+    assert stats["curl_wavenumber_magnitude"]["min"] >= 0.0
+    assert stats["curl_radius_x_abs_turns"]["min"] >= 0.0
+
+
+def test_effective_smoothness_has_no_standalone_signed_turn_term() -> None:
+    model = make_model()
+    base = effective_groom(model)
+    positive_turns = torch.ones_like(base.curl_turns)
+    signed_turns = positive_turns.clone()
+    signed_turns[1::2] = -1.0
+    positive = replace(base, curl_turns=positive_turns)
+    signed = replace(base, curl_turns=signed_turns)
+    _, normals, _ = model.roots_and_normals()
+    tangents, bitangents = model.tangent_frames(normals)
+    edges = torch.tensor(
+        [[0, 1], [1, 2], [2, 3]],
+        dtype=torch.long,
+    )
+    positive_loss = effective_groom_graph_smoothness(
+        positive,
+        edges,
+        normals,
+        tangents,
+        bitangents,
+        model.groom.ranges,
+    )
+    signed_loss = effective_groom_graph_smoothness(
+        signed,
+        edges,
+        normals,
+        tangents,
+        bitangents,
+        model.groom.ranges,
+    )
+    torch.testing.assert_close(signed_loss, positive_loss)
+
+
+def test_zero_guide_gradients_freezes_signed_turns() -> None:
+    model = make_model()
+    model.guide_curl_turns_raw.grad = torch.ones_like(model.guide_curl_turns_raw)
+    zero_guide_gradients(model)
+    torch.testing.assert_close(
+        model.guide_curl_turns_raw.grad,
+        torch.zeros_like(model.guide_curl_turns_raw.grad),
+    )
+
+
+def test_checkpoint_optimizer_parameter_names_are_strict() -> None:
+    model = make_model()
+    config = Stage1Config(
+        data_root="data",
+        mesh_path="mesh.obj",
+        output_dir="output",
+        render_geometry_parameterization="zero_centered_residual",
+        guide_length_residual_scale=0.18,
+        guide_direction_residual_scale=0.10,
+        guide_clump_residual_scale=0.04,
+    )
+    names = stage1_optimizer_param_names(model, config)
+    names = [
+        ["wrong_name" if name == "guide_curl_turns_raw" else name for name in group]
+        for group in names
+    ]
+    with pytest.raises(RuntimeError, match="optimizer parameter names mismatch"):
+        require_checkpoint_optimizer_param_names(
+            {"optimizer_param_names": names},
+            model,
+            config,
+        )
 
 
 def test_late_geometry_freeze_preserves_early_child_spread_gradient() -> None:
@@ -409,6 +527,16 @@ def test_lifecycle_rebuild_preserves_surviving_adam_rows() -> None:
         "exp_avg": old_guide_moment.clone(),
         "exp_avg_sq": old_guide_moment.square(),
     }
+    old_turns = model.guide_curl_turns_raw
+    old_turns_moment = torch.arange(
+        old_turns.numel(),
+        dtype=old_turns.dtype,
+    ).reshape_as(old_turns) + 40.0
+    optimizer.state[old_turns] = {
+        "step": torch.tensor(13.0),
+        "exp_avg": old_turns_moment.clone(),
+        "exp_avg_sq": old_turns_moment.square(),
+    }
 
     guide_update = RootStructureUpdate(
         parent_indices=torch.tensor([0], dtype=torch.long),
@@ -455,6 +583,18 @@ def test_lifecycle_rebuild_preserves_surviving_adam_rows() -> None:
     torch.testing.assert_close(guide_state["exp_avg_sq"][:4], old_guide_moment.square())
     assert float(guide_state["step"]) == 11.0
 
+    turns_state = rebuilt.state[model.guide_curl_turns_raw]
+    torch.testing.assert_close(turns_state["exp_avg"][:4], old_turns_moment)
+    torch.testing.assert_close(
+        turns_state["exp_avg"][4:],
+        torch.zeros_like(turns_state["exp_avg"][4:]),
+    )
+    torch.testing.assert_close(
+        turns_state["exp_avg_sq"][:4],
+        old_turns_moment.square(),
+    )
+    assert float(turns_state["step"]) == 13.0
+
     assert report["render"] == {
         "old_root_count": 4,
         "retained_root_count": 3,
@@ -467,7 +607,7 @@ def test_lifecycle_rebuild_preserves_surviving_adam_rows() -> None:
         "zero_initialized_child_count": 1,
         "new_root_count": 5,
     }
-    assert report["row_migrated_parameter_count"] >= 2
+    assert report["row_migrated_parameter_count"] >= 3
 
 
 def test_guide_densification_updates_direct_direction_and_loads_strict_state() -> None:
@@ -484,6 +624,9 @@ def test_guide_densification_updates_direct_direction_and_loads_strict_state() -
         model.guide_width_taper_reference.fill_(1.8)
         model.guide_width_taper_raw.fill_(0.4)
         model.guide_brush_stiffness_raw.fill_(0.3)
+        model.guide_curl_turns_raw.copy_(
+            torch.tensor([[-1.5], [-0.5], [0.5], [1.5]])
+        )
         model.guide_child_radius_reference.fill_(0.0028)
         model.guide_child_radius_raw.fill_(0.3)
     guide_before, _ = model.interpolate_guide_controls(
@@ -542,6 +685,9 @@ def test_guide_densification_updates_direct_direction_and_loads_strict_state() -
             atol=1.0e-5,
             rtol=1.0e-5,
         )
+    assert bool(torch.isfinite(guide_after["curl_turns"]).all())
+    assert float(guide_after["curl_turns"].min()) >= -1.5
+    assert float(guide_after["curl_turns"].max()) <= 1.5
 
     clone = make_model(
         guide_face_ids=model.guide_face_ids.detach().cpu().numpy(),
@@ -555,6 +701,10 @@ def test_guide_densification_updates_direct_direction_and_loads_strict_state() -
     torch.testing.assert_close(
         clone.guide_brush_stiffness_raw,
         model.guide_brush_stiffness_raw,
+    )
+    torch.testing.assert_close(
+        clone.guide_curl_turns_raw,
+        model.guide_curl_turns_raw,
     )
     torch.testing.assert_close(
         clone.guide_length_reference,

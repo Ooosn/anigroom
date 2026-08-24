@@ -33,7 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 ACTIVATION_CHECKPOINT_MAX_DEVICE_MEMORY_BYTES = 48 * 1024**3
-CURRENT_CHECKPOINT_VERSION = 7
+CURRENT_CHECKPOINT_VERSION = 8
 
 
 def memory_constrained_activation_checkpointing(device: torch.device) -> bool:
@@ -417,6 +417,16 @@ def load_training_checkpoint(path: Path) -> dict[str, object]:
     if not isinstance(checkpoint, dict):
         raise RuntimeError(f"checkpoint is not a dict: {path}")
     return checkpoint
+
+
+def require_current_checkpoint_version(checkpoint: dict[str, object]) -> None:
+    checkpoint_version = int(checkpoint.get("checkpoint_version", -1))
+    if checkpoint_version != CURRENT_CHECKPOINT_VERSION:
+        raise RuntimeError(
+            "checkpoint schema mismatch: "
+            f"expected {CURRENT_CHECKPOINT_VERSION}, got {checkpoint_version}; "
+            "R066 learned guide curl turns must start from zero"
+        )
 
 
 def setup_progress(stage: str, **extra: object) -> None:
@@ -1291,6 +1301,8 @@ def guide_root_graph_smoothness(
             model.guide_curl_radius_ratio_raw
         )
         terms.append(0.7 * mean_edge(guide_curl))
+        guide_turn_coordinate = torch.asinh(model.guide_curl_turns_raw)
+        terms.append(0.35 * mean_edge(guide_turn_coordinate))
     if float(model.shape_frizz_scale) > 0.0:
         guide_frizz = decode_positive_softplus(
             model.guide_frizz_amplitude_ratio_raw
@@ -1343,11 +1355,6 @@ def effective_groom_graph_smoothness(
             value = value.mean(dim=tuple(range(1, value.ndim)))
         return (value * edge_weight).sum() / edge_weight.sum().clamp_min(1.0)
 
-    def normalized_diff(value: torch.Tensor, bounds: tuple[float, float]) -> torch.Tensor:
-        lo, hi = bounds
-        scale = max(float(hi) - float(lo), EPS)
-        return (value[src] - value[dst]) / scale
-
     direction = groom_direction_3d(groom, normals, tangents, bitangents)
     tip_ratio = groom.tip_width / groom.root_width.clamp_min(EPS)
     tip_ratio_eps = torch.as_tensor(
@@ -1358,10 +1365,9 @@ def effective_groom_graph_smoothness(
     tip_ratio_logit = torch.logit(
         tip_ratio.clamp(tip_ratio_eps, 1.0 - tip_ratio_eps)
     )
-    curl_turns_n = (groom.curl_turns - float(ranges.curl_turns[0])) / max(
-        float(ranges.curl_turns[1] - ranges.curl_turns[0]), EPS
+    curl_wavenumber_magnitude = (
+        2.0 * torch.pi * groom.curl_radius_ratio * groom.curl_turns.abs()
     )
-    curl_wavenumber = 2.0 * torch.pi * groom.curl_radius_ratio * groom.curl_turns
 
     length_difference = symmetric_relative_edge_difference(groom.length, src, dst)
     if smooth_metric_uses_full_relative_length_field(smooth_field_metric):
@@ -1401,12 +1407,11 @@ def effective_groom_graph_smoothness(
             ).square()
         ),
         1.8 * weighted_mean((groom.curl_radius_ratio[src] - groom.curl_radius_ratio[dst]).square()),
-        1.2 * weighted_mean(normalized_diff(groom.curl_turns, ranges.curl_turns).square()),
         1.6
         * weighted_mean(
             (
-                torch.log1p(curl_wavenumber[src])
-                - torch.log1p(curl_wavenumber[dst])
+                torch.log1p(curl_wavenumber_magnitude[src])
+                - torch.log1p(curl_wavenumber_magnitude[dst])
             ).square()
         ),
         1.4
@@ -1452,11 +1457,11 @@ def groom_parameter_stats(field: GroomParameterField) -> dict[str, dict[str, flo
         "curl_radius_ratio": summarize(groom.curl_radius_ratio),
         "curl_radius": summarize(groom.length * groom.curl_radius_ratio),
         "curl_turns": summarize(groom.curl_turns),
-        "curl_energy_radius_x_turns": summarize(
-            groom.length * groom.curl_radius_ratio * groom.curl_turns
+        "curl_radius_x_abs_turns": summarize(
+            groom.length * groom.curl_radius_ratio * groom.curl_turns.abs()
         ),
-        "curl_wavenumber": summarize(
-            2.0 * torch.pi * groom.curl_radius_ratio * groom.curl_turns
+        "curl_wavenumber_magnitude": summarize(
+            2.0 * torch.pi * groom.curl_radius_ratio * groom.curl_turns.abs()
         ),
         "frizz_amplitude_ratio": summarize(groom.frizz_amplitude_ratio),
         "frizz_amplitude": summarize(groom.length * groom.frizz_amplitude_ratio),
@@ -1497,11 +1502,11 @@ def effective_groom_stats(model: WhiteTigerStage1Model) -> dict[str, dict[str, f
         "curl_radius_ratio": summarize(groom.curl_radius_ratio),
         "curl_radius": summarize(groom.length * groom.curl_radius_ratio),
         "curl_turns": summarize(groom.curl_turns),
-        "curl_energy_radius_x_turns": summarize(
-            groom.length * groom.curl_radius_ratio * groom.curl_turns
+        "curl_radius_x_abs_turns": summarize(
+            groom.length * groom.curl_radius_ratio * groom.curl_turns.abs()
         ),
-        "curl_wavenumber": summarize(
-            2.0 * torch.pi * groom.curl_radius_ratio * groom.curl_turns
+        "curl_wavenumber_magnitude": summarize(
+            2.0 * torch.pi * groom.curl_radius_ratio * groom.curl_turns.abs()
         ),
         "frizz_amplitude_ratio": summarize(groom.frizz_amplitude_ratio),
         "frizz_amplitude": summarize(groom.length * groom.frizz_amplitude_ratio),
@@ -2121,6 +2126,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.guide_width_taper_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_brush_stiffness_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_curl_radius_ratio_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
+            self.guide_curl_turns_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_frizz_amplitude_ratio_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_child_radius_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_clump_strength_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
@@ -2147,6 +2153,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.register_parameter("guide_width_taper_raw", None)
             self.register_parameter("guide_brush_stiffness_raw", None)
             self.register_parameter("guide_curl_radius_ratio_raw", None)
+            self.register_parameter("guide_curl_turns_raw", None)
             self.register_parameter("guide_frizz_amplitude_ratio_raw", None)
             self.register_parameter("guide_child_radius_raw", None)
             self.register_parameter("guide_clump_strength_raw", None)
@@ -2275,6 +2282,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 self.guide_width_taper_reference.fill_(1.80)
                 self.guide_width_taper_raw.zero_()
                 self.guide_brush_stiffness_raw.zero_()
+                self.guide_curl_turns_raw.zero_()
                 self.guide_child_radius_reference.fill_(0.0028)
                 self.initialize_guide_shape_ratios_from_current_scale()
                 self.guide_child_radius_raw.zero_()
@@ -2776,6 +2784,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "guide_curl_radius_ratio_raw": decode_positive_softplus(
                 self.guide_curl_radius_ratio_raw.detach()
             ),
+            "guide_curl_turns_raw": self.guide_curl_turns_raw.detach(),
             "guide_frizz_amplitude_ratio_raw": decode_positive_softplus(
                 self.guide_frizz_amplitude_ratio_raw.detach()
             ),
@@ -2795,6 +2804,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "guide_width_taper_raw": self.guide_width_taper_raw.detach(),
             "guide_brush_stiffness_raw": self.guide_brush_stiffness_raw.detach(),
             "guide_curl_radius_ratio_raw": self.guide_curl_radius_ratio_raw.detach(),
+            "guide_curl_turns_raw": self.guide_curl_turns_raw.detach(),
             "guide_frizz_amplitude_ratio_raw": self.guide_frizz_amplitude_ratio_raw.detach(),
             "guide_child_radius_raw": self.guide_child_radius_raw.detach(),
             "guide_clump_strength_raw": self.guide_clump_strength_raw.detach(),
@@ -2838,6 +2848,8 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 "guide_frizz_amplitude_ratio_raw",
             }:
                 child_raw = encode_positive_softplus(child_physical)
+            elif name == "guide_curl_turns_raw":
+                child_raw = child_physical
             else:
                 child_raw = raw_from_range(child_physical, raw_bounds[name])
             new_params[name] = apply_attribute_update(old_raw[name], update, child_raw)
@@ -2973,6 +2985,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             new_params["guide_brush_stiffness_raw"].to(device=device)
         )
         self.guide_curl_radius_ratio_raw = torch.nn.Parameter(new_params["guide_curl_radius_ratio_raw"].to(device=device))
+        self.guide_curl_turns_raw = torch.nn.Parameter(new_params["guide_curl_turns_raw"].to(device=device))
         self.guide_frizz_amplitude_ratio_raw = torch.nn.Parameter(new_params["guide_frizz_amplitude_ratio_raw"].to(device=device))
         self.guide_child_radius_raw = torch.nn.Parameter(new_params["guide_child_radius_raw"].to(device=device))
         self.guide_clump_strength_raw = torch.nn.Parameter(new_params["guide_clump_strength_raw"].to(device=device))
@@ -3040,6 +3053,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "curl_radius_ratio": decode_positive_softplus(
                 self.guide_curl_radius_ratio_raw
             ),
+            "curl_turns": self.guide_curl_turns_raw,
             "frizz_amplitude_ratio": decode_positive_softplus(
                 self.guide_frizz_amplitude_ratio_raw
             ),
@@ -3355,6 +3369,8 @@ class WhiteTigerStage1Model(torch.nn.Module):
             "width_taper": width_taper,
             "brush_stiffness": guide_interp["brush_stiffness"],
             "curl_radius_ratio": curl_radius_ratio,
+            "curl_turns": guide_interp["curl_turns"],
+            "curl_phase": torch.zeros_like(guide_interp["curl_turns"]),
             "frizz_amplitude_ratio": frizz_amplitude_ratio,
             "child_radius": child_radius,
             "clump_strength": clump_strength,
@@ -5193,6 +5209,7 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
     if model.guide_enabled():
         if float(config.shape_curl_scale) > 0.0:
             high_frequency_params.append(model.guide_curl_radius_ratio_raw)
+            high_frequency_params.append(model.guide_curl_turns_raw)
         if float(config.shape_frizz_scale) > 0.0:
             high_frequency_params.append(model.guide_frizz_amplitude_ratio_raw)
         if model.uses_zero_centered_geometry():
@@ -5305,6 +5322,7 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
     if model.guide_enabled():
         if float(config.shape_curl_scale) > 0.0:
             high_frequency_names.append("guide_curl_radius_ratio_raw")
+            high_frequency_names.append("guide_curl_turns_raw")
         if float(config.shape_frizz_scale) > 0.0:
             high_frequency_names.append("guide_frizz_amplitude_ratio_raw")
         if model.uses_zero_centered_geometry():
@@ -5343,6 +5361,20 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
     if float(config.lr_calibration) > 0.0:
         names.insert(1, ["log_scale", "translation"])
     return names
+
+
+def require_checkpoint_optimizer_param_names(
+    checkpoint: dict[str, object],
+    model: WhiteTigerStage1Model,
+    config: Stage1Config,
+) -> None:
+    saved_names = checkpoint.get("optimizer_param_names")
+    expected_names = stage1_optimizer_param_names(model, config)
+    if saved_names != expected_names:
+        raise RuntimeError(
+            "checkpoint optimizer parameter names mismatch: "
+            f"expected={expected_names}, got={saved_names}"
+        )
 
 
 @dataclass(frozen=True)
@@ -5647,6 +5679,7 @@ def zero_guide_gradients(model: WhiteTigerStage1Model) -> None:
         model.guide_width_taper_raw,
         model.guide_brush_stiffness_raw,
         model.guide_curl_radius_ratio_raw,
+        model.guide_curl_turns_raw,
         model.guide_frizz_amplitude_ratio_raw,
         model.guide_child_radius_raw,
         model.guide_clump_strength_raw,
@@ -5666,7 +5699,13 @@ def zero_primary_shape_detail_gradients(model: WhiteTigerStage1Model) -> None:
         model.groom.frizz_amplitude_ratio_raw,
     ]
     if model.guide_enabled():
-        params.extend([model.guide_curl_radius_ratio_raw, model.guide_frizz_amplitude_ratio_raw])
+        params.extend(
+            [
+                model.guide_curl_radius_ratio_raw,
+                model.guide_curl_turns_raw,
+                model.guide_frizz_amplitude_ratio_raw,
+            ]
+        )
     for param in params:
         if param is not None and param.grad is not None:
             param.grad.zero_()
@@ -6230,6 +6269,7 @@ def build_stage1_model_from_checkpoint(
 ) -> WhiteTigerStage1Model:
     """Reconstruct the exact Stage1 model topology stored in a checkpoint."""
 
+    require_current_checkpoint_version(checkpoint)
     state = checkpoint.get("model")
     if not isinstance(state, dict):
         raise RuntimeError("Stage1 checkpoint has no model state dictionary")
@@ -6416,6 +6456,7 @@ def load_stage1_checkpoint_model(
     mesh_path_override: Path | None = None,
 ) -> tuple[WhiteTigerStage1Model, Stage1Config, dict[str, object]]:
     checkpoint = load_training_checkpoint(checkpoint_path)
+    require_current_checkpoint_version(checkpoint)
     config_mapping = checkpoint.get("config")
     if config_mapping is None:
         config_path = checkpoint_path.parent / "config.json"
@@ -7287,13 +7328,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         if checkpoint is None:
             checkpoint_path = resolve_project_path(config.resume_checkpoint)
             checkpoint = load_training_checkpoint(checkpoint_path)
-        checkpoint_version = int(checkpoint.get("checkpoint_version", -1))
-        if checkpoint_version != CURRENT_CHECKPOINT_VERSION:
-            raise RuntimeError(
-                "checkpoint schema mismatch: "
-                f"expected {CURRENT_CHECKPOINT_VERSION}, got {checkpoint_version}; "
-                "the length-relative curl/frizz route must start from zero"
-            )
+        require_current_checkpoint_version(checkpoint)
         model.load_state_dict(checkpoint["model"], strict=True)
         start_iteration = int(checkpoint.get("iteration", 0))
 
@@ -7367,6 +7402,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
     optimizer = make_stage1_optimizer(model, config)
     if config.resume_checkpoint and config.resume_optimizer:
         if resume_checkpoint is not None and "optimizer" in resume_checkpoint:
+            require_checkpoint_optimizer_param_names(
+                resume_checkpoint,
+                model,
+                config,
+            )
             optimizer.load_state_dict(resume_checkpoint["optimizer"])
             optimizer_state_to_device(optimizer, device)
             setup_progress(

@@ -15,6 +15,7 @@ from anigroom.mesh_roots import SurfaceRoots, TriangleMesh
 from anigroom.roots.lifecycle import RootStructureUpdate
 from anigroom.surface_interpolation import SurfaceFieldInterpolator, SurfaceSupport
 from tools.train_white_tiger_stage1 import (
+    CURRENT_CHECKPOINT_VERSION,
     Stage1Config,
     WhiteTigerStage1Model,
     build_stage1_model_from_checkpoint,
@@ -297,6 +298,19 @@ def test_model_secondary_zero_state_matches_direct_primary_interpolation() -> No
         secondary_guide_interpolation_k=4,
     )
 
+    signed_turns = torch.linspace(
+        -1.5,
+        1.5,
+        int(direct.guide_curl_turns_raw.shape[0]),
+    ).view(-1, 1)
+    with torch.no_grad():
+        direct.guide_curl_turns_raw.copy_(signed_turns)
+        hierarchical.guide_curl_turns_raw.copy_(signed_turns)
+        direct.groom.curl_turns_raw.fill_(20.0)
+        hierarchical.groom.curl_turns_raw.fill_(20.0)
+        direct.groom.curl_phase.fill_(1.7)
+        hierarchical.groom.curl_phase.fill_(1.7)
+
     _, direct_normals, direct_roots = direct.roots_and_normals()
     _, hierarchical_normals, hierarchical_roots = hierarchical.roots_and_normals()
     direct_groom = direct.apply_guide_controls(
@@ -317,6 +331,8 @@ def test_model_secondary_zero_state_matches_direct_primary_interpolation() -> No
         "direction_local",
         "brush_stiffness",
         "curl_radius_ratio",
+        "curl_turns",
+        "curl_phase",
         "frizz_amplitude_ratio",
         "child_radius",
         "clump_strength",
@@ -328,8 +344,24 @@ def test_model_secondary_zero_state_matches_direct_primary_interpolation() -> No
             atol=1.0e-7,
         )
 
+    assert float(direct_groom.curl_turns.min()) < 0.0
+    assert float(direct_groom.curl_turns.max()) > 0.0
+    torch.testing.assert_close(
+        direct_groom.curl_phase,
+        torch.zeros_like(direct_groom.curl_phase),
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        hierarchical_groom.curl_phase,
+        torch.zeros_like(hierarchical_groom.curl_phase),
+        atol=0.0,
+        rtol=0.0,
+    )
+
     assert hierarchical.render_geometry_residual is None
     assert hierarchical.secondary_geometry_residual is not None
+    assert not hasattr(hierarchical.secondary_geometry_residual, "curl_turns_raw")
     with torch.no_grad():
         hierarchical.secondary_geometry_residual.length_raw[1].fill_(0.2)
         hierarchical.secondary_geometry_residual.direction_local_raw[2].copy_(
@@ -501,7 +533,11 @@ def test_formal_checkpoint_loader_restores_render_and_secondary_domains(
 
     for source, config in cases:
         restored = build_stage1_model_from_checkpoint(
-            {"model": source.state_dict(), "iteration": 15},
+            {
+                "checkpoint_version": CURRENT_CHECKPOINT_VERSION,
+                "model": source.state_dict(),
+                "iteration": 15,
+            },
             config,
             torch.device("cpu"),
         )
@@ -517,6 +553,18 @@ def test_formal_checkpoint_loader_restores_render_and_secondary_domains(
         assert restored_state.keys() == source_state.keys()
         for name, value in source_state.items():
             torch.testing.assert_close(value, restored_state[name])
+        missing_turn_state = dict(source_state)
+        del missing_turn_state["guide_curl_turns_raw"]
+        with pytest.raises(RuntimeError, match="Missing key"):
+            build_stage1_model_from_checkpoint(
+                {
+                    "checkpoint_version": CURRENT_CHECKPOINT_VERSION,
+                    "model": missing_turn_state,
+                    "iteration": 15,
+                },
+                config,
+                torch.device("cpu"),
+            )
 
 
 def test_formal_checkpoint_loader_rejects_incomplete_secondary_topology(
@@ -587,7 +635,64 @@ def test_formal_checkpoint_loader_rejects_incomplete_secondary_topology(
 
     with pytest.raises(RuntimeError, match="missing persistent topology"):
         build_stage1_model_from_checkpoint(
-            {"model": state, "iteration": 0},
+            {
+                "checkpoint_version": CURRENT_CHECKPOINT_VERSION,
+                "model": state,
+                "iteration": 0,
+            },
+            config,
+            torch.device("cpu"),
+        )
+
+
+def test_formal_checkpoint_loader_rejects_r065_schema_before_model_load(
+    monkeypatch,
+) -> None:
+    mesh = grid_mesh()
+    primary = primary_roots(mesh)
+    triangles = mesh.vertices[mesh.faces]
+    normals = np.cross(
+        triangles[:, 1] - triangles[:, 0],
+        triangles[:, 2] - triangles[:, 0],
+    )
+    normals /= np.maximum(np.linalg.norm(normals, axis=-1, keepdims=True), 1.0e-8)
+    source = WhiteTigerStage1Model(
+        mesh=mesh,
+        face_normals=normals.astype(np.float32),
+        face_tangents=None,
+        face_ids=primary.face_ids,
+        barycentric=primary.barycentric,
+        ranges=dense_groom_ranges(),
+        device=torch.device("cpu"),
+        guide_face_ids=primary.face_ids,
+        guide_barycentric=primary.barycentric,
+        guide_interpolation_k=4,
+        geometry_residual_domain="render",
+        render_geometry_parameterization="zero_centered_asinh_log_length_residual",
+        guide_length_residual_scale=1.0,
+    )
+    monkeypatch.setattr(
+        "tools.train_white_tiger_stage1.read_obj_mesh",
+        lambda _path: mesh,
+    )
+    config = Stage1Config(
+        data_root="unused",
+        mesh_path="unused.obj",
+        output_dir="unused",
+        guide_root_count=4,
+        guide_interpolation_k=4,
+        geometry_residual_domain="render",
+        render_geometry_parameterization="zero_centered_asinh_log_length_residual",
+        guide_length_residual_scale=1.0,
+    )
+
+    with pytest.raises(RuntimeError, match="checkpoint schema mismatch"):
+        build_stage1_model_from_checkpoint(
+            {
+                "checkpoint_version": 7,
+                "model": source.state_dict(),
+                "iteration": 30_000,
+            },
             config,
             torch.device("cpu"),
         )

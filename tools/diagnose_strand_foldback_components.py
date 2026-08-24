@@ -158,6 +158,41 @@ def summarize_group(values: np.ndarray, mask: np.ndarray) -> dict[str, object]:
     }
 
 
+def summarize_population(values: np.ndarray) -> dict[str, object]:
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    return summarize_group(values, np.zeros(values.shape, dtype=bool))
+
+
+def validate_attribute_shapes(
+    render_attributes: dict[str, np.ndarray],
+    guide_attributes: dict[str, np.ndarray],
+    *,
+    render_count: int,
+    guide_count: int,
+    focus_mask: np.ndarray,
+) -> None:
+    focus_mask = np.asarray(focus_mask, dtype=bool).reshape(-1)
+    if focus_mask.shape != (int(render_count),):
+        raise RuntimeError(
+            "render focus mask shape mismatch: "
+            f"{focus_mask.shape} != {(int(render_count),)}"
+        )
+    for name, values in render_attributes.items():
+        shape = np.asarray(values).reshape(-1).shape
+        if shape != (int(render_count),):
+            raise RuntimeError(
+                "render attribute shape mismatch: "
+                f"{name} {shape} != {(int(render_count),)}"
+            )
+    for name, values in guide_attributes.items():
+        shape = np.asarray(values).reshape(-1).shape
+        if shape != (int(guide_count),):
+            raise RuntimeError(
+                "primary-guide attribute shape mismatch: "
+                f"{name} {shape} != {(int(guide_count),)}"
+            )
+
+
 def percentile_ranks(values: np.ndarray, selected: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64).reshape(-1)
     selected = np.asarray(selected, dtype=np.float64).reshape(-1)
@@ -384,6 +419,7 @@ def main() -> None:
         guide_frizz_ratio = decode_positive_softplus(
             model.guide_frizz_amplitude_ratio_raw
         ).reshape(-1)
+        guide_curl_turns = model.guide_curl_turns_raw.detach().reshape(-1)
         guide_curl = guide_length * guide_curl_ratio
         guide_frizz = guide_length * guide_frizz_ratio
         guide_ratio = guide_curl_ratio
@@ -394,6 +430,7 @@ def main() -> None:
         guide_curl_np = guide_curl.detach().cpu().numpy()
         guide_frizz_np = guide_frizz.detach().cpu().numpy()
         guide_ratio_np = guide_ratio.detach().cpu().numpy()
+        guide_curl_turns_np = guide_curl_turns.detach().cpu().numpy()
         guide_confidence_np = guide_confidence.detach().cpu().numpy()
         guide_points_np = guide_points.detach().cpu().numpy()
         selected_guide_ids_np = selected_guide_ids.detach().cpu().numpy()
@@ -425,10 +462,16 @@ def main() -> None:
             "clean_flow_anchor_confidence": clean_confidence,
             "full_curl_radius_over_length": full_curl_ratio,
             "full_curl_wavenumber": (
+                2.0 * np.pi * full_curl_ratio * np.abs(curl_turns)
+            ),
+            "full_curl_signed_wavenumber": (
                 2.0 * np.pi * full_curl_ratio * curl_turns
             ),
             "primary_curl_radius_over_length": primary_curl_ratio,
             "primary_curl_wavenumber": (
+                2.0 * np.pi * primary_curl_ratio * np.abs(curl_turns)
+            ),
+            "primary_curl_signed_wavenumber": (
                 2.0 * np.pi * primary_curl_ratio * curl_turns
             ),
             "full_frizz_over_length": full_frizz_ratio,
@@ -438,9 +481,36 @@ def main() -> None:
             "secondary_frizz_ratio": full_frizz
             / np.maximum(primary_frizz, 1.0e-12),
         }
+        guide_attributes = {
+            "curl_turns": guide_curl_turns_np,
+            "curl_wavenumber_magnitude": (
+                2.0 * np.pi * guide_ratio_np * np.abs(guide_curl_turns_np)
+            ),
+            "curl_wavenumber_signed": (
+                2.0 * np.pi * guide_ratio_np * guide_curl_turns_np
+            ),
+        }
+        guide_count = int(guide_length_np.shape[0])
+        primary_guide_ids = np.arange(guide_count, dtype=np.int64)
+        if guide_points_np.shape != (guide_count, 3):
+            raise RuntimeError(
+                "primary-guide point shape mismatch: "
+                f"{guide_points_np.shape} != {(guide_count, 3)}"
+            )
+        validate_attribute_shapes(
+            attributes,
+            guide_attributes,
+            render_count=int(subset_count),
+            guide_count=guide_count,
+            focus_mask=full_mask,
+        )
         attribute_report = {
             name: summarize_group(values, full_mask)
             for name, values in attributes.items()
+        }
+        guide_attribute_report = {
+            name: summarize_population(values)
+            for name, values in guide_attributes.items()
         }
 
 
@@ -478,6 +548,10 @@ def main() -> None:
                     "length": float(guide_length_np[guide_id]),
                     "curl_radius": float(guide_curl_np[guide_id]),
                     "curl_radius_over_length": float(guide_ratio_np[guide_id]),
+                    "curl_turns": float(guide_attributes["curl_turns"][guide_id]),
+                    "curl_wavenumber_magnitude": float(
+                        guide_attributes["curl_wavenumber_magnitude"][guide_id]
+                    ),
                     "frizz": float(guide_frizz_np[guide_id]),
                     "clean_flow_confidence": float(guide_confidence_np[guide_id]),
                     "length_percentile_rank": float(
@@ -553,6 +627,15 @@ def main() -> None:
         colors=colors[focus],
         opacities=opacities[focus],
         **{name: values[focus] for name, values in attributes.items()},
+        primary_guide_ids=primary_guide_ids,
+        primary_guide_points=guide_points_np.astype(np.float32),
+        primary_guide_curl_turns=guide_attributes["curl_turns"],
+        primary_guide_curl_wavenumber_magnitude=guide_attributes[
+            "curl_wavenumber_magnitude"
+        ],
+        primary_guide_curl_wavenumber_signed=guide_attributes[
+            "curl_wavenumber_signed"
+        ],
     )
 
     focus_position = {
@@ -579,6 +662,12 @@ def main() -> None:
                         "length": float(guide_length_np[guide_id]),
                         "curl_radius": float(guide_curl_np[guide_id]),
                         "curl_radius_over_length": float(guide_ratio_np[guide_id]),
+                        "curl_turns": float(
+                            guide_attributes["curl_turns"][guide_id]
+                        ),
+                        "curl_wavenumber_magnitude": float(
+                            guide_attributes["curl_wavenumber_magnitude"][guide_id]
+                        ),
                         "frizz": float(guide_frizz_np[guide_id]),
                         "clean_flow_confidence": float(
                             guide_confidence_np[guide_id]
@@ -616,6 +705,19 @@ def main() -> None:
         "variants": reports,
         "full_foldback_root_ids": root_ids[full_mask].tolist(),
         "attribute_comparison": attribute_report,
+        "primary_guide_field": {
+            "guide_count": guide_count,
+            "npz_keys": {
+                "ids": "primary_guide_ids",
+                "points": "primary_guide_points",
+                "curl_turns": "primary_guide_curl_turns",
+                "curl_wavenumber_magnitude": (
+                    "primary_guide_curl_wavenumber_magnitude"
+                ),
+                "curl_wavenumber_signed": "primary_guide_curl_wavenumber_signed",
+            },
+            "attribute_report": guide_attribute_report,
+        },
         "primary_guide_attribution": {
             "guide_count": int(guide_length_np.shape[0]),
             "support_k": int(selected_guide_ids_np.shape[1]),

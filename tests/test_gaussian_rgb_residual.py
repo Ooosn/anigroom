@@ -9,6 +9,8 @@ from anigroom.grooming import (
     GroomRanges,
     apply_asinh_log_ratio_residual,
 )
+from anigroom.grooming.strand_deformations import backbone_transverse_frames
+from anigroom.grooming.strand_gaussians import build_brush_centerline, build_strands
 from anigroom.mesh_roots import TriangleMesh
 from anigroom.roots.lifecycle import RootStructureUpdate
 from tools.train_white_tiger_stage1 import (
@@ -16,6 +18,7 @@ from tools.train_white_tiger_stage1 import (
     WhiteTigerStage1Model,
     backward_rgb_and_flow_without_color_flow_gradients,
     gaussian_rgb_residual_multiplier_for_iteration,
+    groom_direction_3d,
     make_stage1_optimizer,
     optimizer_row_transition,
     rebuild_stage1_optimizer_with_state,
@@ -511,32 +514,95 @@ def test_shape_gate_is_zero_before_handoff_and_joint_controls_receive_gradients(
         for name in group
     }
     assert "guide_curl_radius_ratio_raw" in names
+    assert "guide_curl_turns_raw" in names
     assert "guide_frizz_amplitude_ratio_raw" in names
     assert "render_geometry_residual.curl_radius_ratio_raw" in names
     assert "render_geometry_residual.frizz_amplitude_ratio_raw" in names
+    assert "groom.curl_turns_raw" not in names
+    assert "groom.curl_phase" not in names
     assert "gaussian_rgb_residual.raw" in names
 
     _, _, roots_local = model.roots_and_normals()
+    with torch.no_grad():
+        model.groom.curl_turns_raw.fill_(20.0)
+        model.groom.curl_phase.fill_(1.7)
+        model.guide_curl_turns_raw.zero_()
     model.shape_detail_multiplier = 0.0
     frozen = model.apply_guide_controls(model.groom.decode(), roots_local)
     torch.testing.assert_close(frozen.curl_radius_ratio, torch.zeros_like(frozen.curl_radius_ratio))
     torch.testing.assert_close(frozen.frizz_amplitude_ratio, torch.zeros_like(frozen.frizz_amplitude_ratio))
+    torch.testing.assert_close(frozen.curl_turns, torch.zeros_like(frozen.curl_turns))
+    torch.testing.assert_close(frozen.curl_phase, torch.zeros_like(frozen.curl_phase))
 
     model.shape_detail_multiplier = 0.5
     active = model.apply_guide_controls(model.groom.decode(), roots_local)
-    (active.curl_radius_ratio.mean() + active.frizz_amplitude_ratio.mean()).backward()
+    (
+        active.curl_radius_ratio.mean()
+        + active.curl_turns.mean()
+        + active.frizz_amplitude_ratio.mean()
+    ).backward()
     assert model.guide_curl_radius_ratio_raw.grad is not None
+    assert model.guide_curl_turns_raw.grad is not None
     assert model.guide_frizz_amplitude_ratio_raw.grad is not None
     assert model.render_geometry_residual.curl_radius_ratio_raw.grad is not None
     assert model.render_geometry_residual.frizz_amplitude_ratio_raw.grad is not None
     for parameter in (
         model.guide_curl_radius_ratio_raw,
+        model.guide_curl_turns_raw,
         model.guide_frizz_amplitude_ratio_raw,
         model.render_geometry_residual.curl_radius_ratio_raw,
         model.render_geometry_residual.frizz_amplitude_ratio_raw,
     ):
         assert bool(torch.isfinite(parameter.grad).all())
         assert bool((parameter.grad.abs() > 0.0).any())
+
+
+def test_primary_zero_turn_geometry_gradient_is_nonzero_after_shape_unlock() -> None:
+    model = make_model()
+    model.shape_detail_multiplier = 0.5
+    with torch.no_grad():
+        model.groom.curl_turns_raw.fill_(20.0)
+        model.groom.curl_phase.fill_(1.7)
+        model.guide_curl_turns_raw.zero_()
+    roots, normals, roots_local = model.roots_and_normals()
+    tangents, bitangents = model.tangent_frames(normals)
+    groom = model.apply_guide_controls(model.groom.decode(), roots_local)
+    groom_direction = groom_direction_3d(
+        groom,
+        normals,
+        tangents,
+        bitangents,
+    )
+    backbone = build_brush_centerline(
+        roots,
+        normals,
+        groom_direction,
+        groom.length,
+        groom.brush_stiffness,
+        samples=33,
+    )
+    _, side, _ = backbone_transverse_frames(
+        backbone,
+        normals,
+        groom_direction,
+        tangents,
+    )
+    strands, _, _, _ = build_strands(
+        roots,
+        normals,
+        tangents,
+        bitangents,
+        groom,
+        samples=33,
+    )
+    assert bool((groom.length * groom.curl_radius_ratio > 0.0).all())
+    torch.testing.assert_close(groom.curl_turns, torch.zeros_like(groom.curl_turns))
+    torch.testing.assert_close(groom.curl_phase, torch.zeros_like(groom.curl_phase))
+    tip_side_projection = (strands[:, -1] * side[:, -1]).sum()
+    tip_side_projection.backward()
+    assert model.guide_curl_turns_raw.grad is not None
+    assert bool(torch.isfinite(model.guide_curl_turns_raw.grad).all())
+    assert bool((model.guide_curl_turns_raw.grad.abs() > 0.0).any())
 
 
 def test_primary_guide_shape_ownership_excludes_render_residuals() -> None:
@@ -557,6 +623,7 @@ def test_primary_guide_shape_ownership_excludes_render_residuals() -> None:
         for name in group
     }
     assert "guide_curl_radius_ratio_raw" in names
+    assert "guide_curl_turns_raw" in names
     assert "guide_frizz_amplitude_ratio_raw" in names
     assert "render_geometry_residual.curl_radius_ratio_raw" not in names
     assert "render_geometry_residual.frizz_amplitude_ratio_raw" not in names
