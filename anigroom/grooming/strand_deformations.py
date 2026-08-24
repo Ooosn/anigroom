@@ -1,10 +1,9 @@
-"""Differentiable detail deformations around a groomed strand backbone.
+"""Differentiable curl deformation and standalone procedural frizz utility.
 
 The backbone owns root attachment, nominal length, 3D groom direction, and the
-low-frequency normal-to-direction brush turn. Curl and frizz are independent
-transverse detail layers around that backbone. They keep the root and its
-tangent fixed, but may move the final point: forcing every detailed strand back
-to the nominal tip creates the artificial S-curves that this module avoids.
+low-frequency normal-to-direction brush turn. The differentiable mainline uses
+curl only. frizz_backbone remains a standalone procedural utility for post-edit
+experiments and is not part of the trainable groom state.
 """
 
 from __future__ import annotations
@@ -361,16 +360,12 @@ def deform_backbone(
     curl_radius: torch.Tensor,
     curl_turns: torch.Tensor,
     curl_phase: torch.Tensor,
-    frizz_amplitude: torch.Tensor,
-    frizz_seed_phase: torch.Tensor,
 ) -> torch.Tensor:
-    """Compose independent curl and frizz offsets around one base backbone.
+    """Apply the differentiable curl offset around one base backbone.
 
-    Both layers use the same undeformed local frame. This makes their meaning
-    independent and avoids the order-dependent behavior of applying frizz to
-    an already curled curve. ``curl_radius`` and ``frizz_amplitude`` are the
-    physical offsets already decoded by the caller; the learnable groom field
-    stores their dimensionless ratios to nominal strand length.
+    curl_radius is the physical offset already decoded by the caller; the
+    learnable groom field stores its dimensionless ratio to nominal strand
+    length. Procedural frizz is intentionally disconnected from this path.
     """
 
     samples = int(backbone.shape[1])
@@ -400,15 +395,4 @@ def deform_backbone(
         t=t,
         envelope=envelope,
     )
-    frizz = _frizz_offset(
-        backbone,
-        normals,
-        directions,
-        tangents,
-        frizz_amplitude,
-        frizz_seed_phase,
-        local_frames=local_frames,
-        t=t,
-        envelope=envelope,
-    )
-    return backbone + curl + frizz
+    return backbone + curl

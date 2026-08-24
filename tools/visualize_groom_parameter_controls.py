@@ -101,13 +101,6 @@ def field_with_pattern(name: str, root_count: int, roots: torch.Tensor, device: 
             field.curl_phase.copy_(phase)
             field.root_width_raw.add_(0.8)
             field.tip_width_ratio_raw.add_(0.1)
-        elif name == "frizz":
-            field.length_raw.add_(0.85)
-            frizz_length = field.decode().length.detach()
-            field.frizz_amplitude_ratio_raw.copy_(
-                encode_positive_softplus(0.0159 / frizz_length)
-            )
-            field.frizz_seed_phase.copy_(1.7 * phase)
         elif name == "root_tip_color_alpha":
             root_color = torch.tensor([0.09, 0.07, 0.045], device=device).view(1, 3)
             tip_color = torch.tensor([1.00, 0.86, 0.45], device=device).view(1, 3)
@@ -188,8 +181,6 @@ def render_field(
         "curl_radius_ratio_mean": float(groom.curl_radius_ratio.mean().detach().cpu()),
         "curl_radius_mean": float((groom.length * groom.curl_radius_ratio).mean().detach().cpu()),
         "curl_turns_mean": float(groom.curl_turns.mean().detach().cpu()),
-        "frizz_amplitude_ratio_mean": float(groom.frizz_amplitude_ratio.mean().detach().cpu()),
-        "frizz_mean": float((groom.length * groom.frizz_amplitude_ratio).mean().detach().cpu()),
     }
     return render[0].clamp(0.0, 1.0), alpha[0].clamp(0.0, 1.0), stats
 
@@ -436,7 +427,6 @@ def gradient_report(
         "curl_radius_ratio_raw",
         "curl_turns_raw",
         "curl_phase",
-        "frizz_amplitude_ratio_raw",
         "root_color_raw",
         "tip_color_raw",
         "opacity_raw",
@@ -459,47 +449,38 @@ def export_advanced_geometry_sweeps(output_dir: Path, *, samples: int) -> dict[s
     dtype = torch.float64
     cases: dict[str, list[dict[str, float]]] = {
         "curl_radius": [
-            {"length": 0.040, "curl_radius": radius, "curl_turns": 1.5, "frizz": 0.0, "phase": 0.35}
+            {"length": 0.040, "curl_radius": radius, "curl_turns": 1.5, "phase": 0.35}
             for radius in (0.0, 0.001, 0.002, 0.003, 0.004, 0.005, 0.006)
         ],
         "curl_turns": [
-            {"length": 0.040, "curl_radius": 0.004, "curl_turns": turns, "frizz": 0.0, "phase": 0.35}
+            {"length": 0.040, "curl_radius": 0.004, "curl_turns": turns, "phase": 0.35}
             for turns in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
-        ],
-        "frizz_amplitude": [
-            {"length": 0.040, "curl_radius": 0.0, "curl_turns": 1.2, "frizz": amplitude, "phase": 0.75}
-            for amplitude in (0.0, 0.0005, 0.0010, 0.0015, 0.0020, 0.0030, 0.0040)
         ],
         "combined": [
             {
                 "length": 0.040,
                 "curl_radius": 0.0035,
                 "curl_turns": 1.5,
-                "frizz": amplitude,
                 "phase": phase,
             }
-            for amplitude, phase in zip(
-                (0.0, 0.0004, 0.0008, 0.0012, 0.0016, 0.0020, 0.0024),
-                (0.15, 0.55, 0.95, 1.35, 1.75, 2.15, 2.55),
-            )
+            for phase in (0.15, 0.55, 0.95, 1.35, 1.75, 2.15, 2.55)
         ],
         "short_hair_stress": [
             {
                 "length": length,
                 "curl_radius": radius,
                 "curl_turns": turns,
-                "frizz": frizz,
                 "phase": phase,
             }
-            for length, radius, turns, frizz, phase in (
-                (0.012, 0.003, 1.2, 0.0015, 0.2),
-                (0.012, 0.006, 2.5, 0.0030, 0.6),
-                (0.015, 0.004, 1.2, 0.0020, 1.0),
-                (0.015, 0.008, 4.0, 0.0040, 1.4),
-                (0.030, 0.004, 1.2, 0.0020, 1.8),
-                (0.030, 0.008, 3.0, 0.0040, 2.2),
-                (0.060, 0.006, 1.2, 0.0030, 2.6),
-                (0.060, 0.012, 4.0, 0.0060, 3.0),
+            for length, radius, turns, phase in (
+                (0.012, 0.003, 1.2, 0.2),
+                (0.012, 0.006, 2.5, 0.6),
+                (0.015, 0.004, 1.2, 1.0),
+                (0.015, 0.008, 4.0, 1.4),
+                (0.030, 0.004, 1.2, 1.8),
+                (0.030, 0.008, 3.0, 2.2),
+                (0.060, 0.006, 1.2, 2.6),
+                (0.060, 0.012, 4.0, 3.0),
             )
         ],
     }
@@ -522,7 +503,6 @@ def export_advanced_geometry_sweeps(output_dir: Path, *, samples: int) -> dict[s
         lengths = torch.tensor([item["length"] for item in definitions], device=device, dtype=dtype).view(-1, 1)
         curl_radius = torch.tensor([item["curl_radius"] for item in definitions], device=device, dtype=dtype).view(-1, 1)
         curl_turns = torch.tensor([item["curl_turns"] for item in definitions], device=device, dtype=dtype).view(-1, 1)
-        frizz = torch.tensor([item["frizz"] for item in definitions], device=device, dtype=dtype).view(-1, 1)
         phase = torch.tensor([item["phase"] for item in definitions], device=device, dtype=dtype).view(-1, 1)
         direction_local = torch.nn.functional.normalize(
             torch.tensor([0.72, 0.0, 0.69], device=device, dtype=dtype).view(1, 3).expand(root_count, -1),
@@ -539,8 +519,6 @@ def export_advanced_geometry_sweeps(output_dir: Path, *, samples: int) -> dict[s
             curl_radius_ratio=curl_radius / lengths,
             curl_turns=curl_turns,
             curl_phase=phase,
-            frizz_amplitude_ratio=frizz / lengths,
-            frizz_seed_phase=phase + 0.91,
             root_color=torch.full((root_count, 3), 0.22, device=device, dtype=dtype),
             tip_color=torch.full((root_count, 3), 0.42, device=device, dtype=dtype),
             root_opacity=torch.ones((root_count, 1), device=device, dtype=dtype),
@@ -577,7 +555,6 @@ def export_advanced_geometry_sweeps(output_dir: Path, *, samples: int) -> dict[s
         "contract": {
             "backbone": "fixed root, nominal length, 3D direction, and normal-to-direction brush turn",
             "curl": "root-pinned physical transverse radius and turns around the backbone",
-            "frizz": "root-pinned independent band-limited transverse noise",
             "root_position_and_tangent_preserved": True,
             "tip_may_move_under_advanced_deformation": True,
         },
@@ -591,10 +568,10 @@ def export_advanced_geometry_sweeps(output_dir: Path, *, samples: int) -> dict[s
 
 
 def export_relative_shape_scale(output_dir: Path, *, samples: int) -> dict[str, object]:
-    """Export one canonical scene with identical curl/frizz shape ratios.
+    """Export one canonical scene with identical curl shape ratios.
 
     The three strands differ only in nominal length.  Their normalized point
-    coordinates must match, while their physical curl/frizz amplitudes scale
+    coordinates must match, while physical curl amplitude scales
     linearly with length.
     """
 
@@ -602,7 +579,6 @@ def export_relative_shape_scale(output_dir: Path, *, samples: int) -> dict[str, 
     dtype = torch.float64
     lengths = torch.tensor([[0.012], [0.024], [0.048]], device=device, dtype=dtype)
     curl_ratio = torch.full_like(lengths, 0.16)
-    frizz_ratio = torch.full_like(lengths, 0.055)
     root_count = int(lengths.shape[0])
     roots = torch.tensor(
         [[-0.050, 0.0, 0.0], [0.0, 0.0, 0.0], [0.068, 0.0, 0.0]],
@@ -627,8 +603,6 @@ def export_relative_shape_scale(output_dir: Path, *, samples: int) -> dict[str, 
         curl_radius_ratio=curl_ratio,
         curl_turns=torch.full_like(lengths, 1.75),
         curl_phase=torch.full_like(lengths, 0.2),
-        frizz_amplitude_ratio=frizz_ratio,
-        frizz_seed_phase=torch.full_like(lengths, 0.9),
         child_radius=torch.zeros_like(lengths),
         clump_strength=torch.zeros_like(lengths),
         root_color=torch.full((root_count, 3), 0.22, device=device, dtype=dtype),
@@ -666,12 +640,10 @@ def export_relative_shape_scale(output_dir: Path, *, samples: int) -> dict[str, 
         root_ids=np.arange(root_count, dtype=np.int64),
     )
     report = {
-        "contract": "same dimensionless curl/frizz controls at three nominal lengths",
+        "contract": "same dimensionless curl controls at three nominal lengths",
         "lengths": lengths[:, 0].tolist(),
         "curl_radius_ratio": float(curl_ratio[0, 0]),
-        "frizz_amplitude_ratio": float(frizz_ratio[0, 0]),
         "physical_curl_radii": (lengths * curl_ratio)[:, 0].tolist(),
-        "physical_frizz_amplitudes": (lengths * frizz_ratio)[:, 0].tolist(),
         "max_normalized_shape_difference": normalized_difference,
         "npz": str(output_path.resolve()),
     }
@@ -718,7 +690,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     roots, normals = make_roots(device)
-    labels = ["base", "long_brushed", "root_tip_taper", "curl", "frizz", "root_tip_color_alpha"]
+    labels = ["base", "long_brushed", "root_tip_taper", "curl", "root_tip_color_alpha"]
     image_paths: list[Path] = []
     stats: dict[str, dict[str, float | int]] = {}
     for label in labels:

@@ -84,7 +84,7 @@ def main() -> None:
     shape_detail_multiplier = float(model.shape_detail_multiplier)
     shape_detail_active = (
         abs(shape_detail_multiplier) > 0.0
-        and (float(model.shape_curl_scale) > 0.0 or float(model.shape_frizz_scale) > 0.0)
+        and float(model.shape_curl_scale) > 0.0
     )
     local_render_color_enabled = model.child_color_delta_raw is not None
     local_render_color_stats = None

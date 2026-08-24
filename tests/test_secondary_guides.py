@@ -333,7 +333,6 @@ def test_model_secondary_zero_state_matches_direct_primary_interpolation() -> No
         "curl_radius_ratio",
         "curl_turns",
         "curl_phase",
-        "frizz_amplitude_ratio",
         "child_radius",
         "clump_strength",
     ):

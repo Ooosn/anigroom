@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import inspect
 
 import pytest
 import torch
@@ -47,21 +48,10 @@ def chord_progress(points: torch.Tensor, direction: torch.Tensor) -> torch.Tenso
     return ((points - points[:, :1]) * direction[:, None]).sum(dim=-1)
 
 
-def test_frizz_seed_is_persistent_state_but_not_a_trainable_parameter() -> None:
-    field = GroomParameterField(7)
-    assert "frizz_seed_phase" in dict(field.named_buffers())
-    assert "frizz_seed_phase" not in dict(field.named_parameters())
-
-    clone = GroomParameterField(7)
-    clone.load_state_dict(field.state_dict(), strict=True)
-    torch.testing.assert_close(clone.frizz_seed_phase, field.frizz_seed_phase)
-
-
 def test_retired_advanced_geometry_checkpoint_schema_is_rejected() -> None:
     field = GroomParameterField(7)
     retired_state = dict(field.state_dict())
     retired_state["curl_frequency_raw"] = retired_state.pop("curl_turns_raw")
-    retired_state.pop("frizz_seed_phase")
 
     with pytest.raises(RuntimeError, match="Missing key|Unexpected key"):
         GroomParameterField(7).load_state_dict(retired_state, strict=True)
@@ -71,7 +61,6 @@ def test_r059_absolute_shape_checkpoint_schema_is_rejected() -> None:
     field = GroomParameterField(7)
     r059_state = dict(field.state_dict())
     r059_state["curl_radius_raw"] = r059_state.pop("curl_radius_ratio_raw")
-    r059_state["frizz_raw"] = r059_state.pop("frizz_amplitude_ratio_raw")
 
     with pytest.raises(RuntimeError, match="Missing key|Unexpected key"):
         GroomParameterField(7).load_state_dict(r059_state, strict=True)
@@ -80,7 +69,17 @@ def test_r059_absolute_shape_checkpoint_schema_is_rejected() -> None:
 def test_default_advanced_geometry_is_neutral() -> None:
     groom = GroomParameterField(7).decode()
     assert float(groom.curl_radius_ratio.max()) < 5.0e-7
-    assert float(groom.frizz_amplitude_ratio.max()) < 5.0e-7
+
+
+def test_r067_groom_state_and_deformation_signature_are_frizz_free() -> None:
+    field = GroomParameterField(7)
+    state_names = set(field.state_dict())
+    state_names.update(name for name, _ in field.named_parameters())
+    state_names.update(name for name, _ in field.named_buffers())
+    assert not any("frizz" in name.lower() for name in state_names)
+    assert not any("frizz" in name.lower() for name in field.decode().__dict__)
+    assert "frizz" not in inspect.signature(deform_backbone).parameters
+    assert "frizz" not in inspect.signature(build_strands).parameters
 
 
 def test_transverse_frame_is_orthonormal_when_direction_matches_normal() -> None:
@@ -121,7 +120,7 @@ def test_local_frames_follow_brush_backbone_without_twist() -> None:
     torch.testing.assert_close(side, side[:, :1].expand_as(side), atol=1.0e-12, rtol=0.0)
 
 
-def test_curl_and_frizz_preserve_root_and_root_tangent_but_may_move_tip() -> None:
+def test_curl_preserves_root_and_root_tangent_but_may_move_tip() -> None:
     backbone, normals, directions, tangents = canonical_backbone(samples=513)
     shaped = deform_backbone(
         backbone,
@@ -131,8 +130,6 @@ def test_curl_and_frizz_preserve_root_and_root_tangent_but_may_move_tip() -> Non
         curl_radius=torch.tensor([[0.004]], dtype=torch.float64),
         curl_turns=torch.tensor([[1.7]], dtype=torch.float64),
         curl_phase=torch.tensor([[0.7]], dtype=torch.float64),
-        frizz_amplitude=torch.tensor([[0.0015]], dtype=torch.float64),
-        frizz_seed_phase=torch.tensor([[1.3]], dtype=torch.float64),
     )
 
     torch.testing.assert_close(shaped[:, 0], backbone[:, 0], atol=0.0, rtol=0.0)
@@ -160,8 +157,6 @@ def test_detail_offsets_are_transverse_to_the_base_backbone() -> None:
         curl_radius=torch.tensor([[0.003]], dtype=torch.float64),
         curl_turns=torch.tensor([[1.4]], dtype=torch.float64),
         curl_phase=torch.tensor([[0.2]], dtype=torch.float64),
-        frizz_amplitude=torch.tensor([[0.001]], dtype=torch.float64),
-        frizz_seed_phase=torch.tensor([[1.1]], dtype=torch.float64),
     )
     longitudinal_offset = ((shaped - backbone) * curve_tangent).sum(dim=-1)
     torch.testing.assert_close(
@@ -172,7 +167,7 @@ def test_detail_offsets_are_transverse_to_the_base_backbone() -> None:
     )
 
 
-def test_zero_curl_and_frizz_are_exact_identity() -> None:
+def test_zero_curl_is_exact_identity() -> None:
     backbone, normals, directions, tangents = canonical_backbone()
     shaped = deform_backbone(
         backbone,
@@ -182,8 +177,6 @@ def test_zero_curl_and_frizz_are_exact_identity() -> None:
         curl_radius=torch.zeros((1, 1), dtype=torch.float64),
         curl_turns=torch.tensor([[5.0]], dtype=torch.float64),
         curl_phase=torch.tensor([[2.0]], dtype=torch.float64),
-        frizz_amplitude=torch.zeros((1, 1), dtype=torch.float64),
-        frizz_seed_phase=torch.tensor([[0.4]], dtype=torch.float64),
     )
     torch.testing.assert_close(shaped, backbone, atol=0.0, rtol=0.0)
 
@@ -273,69 +266,6 @@ def test_signed_turns_reverse_side_handedness_without_clamping() -> None:
     )
 
 
-def test_curl_and_frizz_are_additive_and_parameter_independent() -> None:
-    backbone, normals, directions, tangents = canonical_backbone()
-    curl = curl_backbone(
-        backbone,
-        normals,
-        directions,
-        tangents,
-        radius=torch.tensor([[0.003]], dtype=torch.float64),
-        turns=torch.tensor([[1.25]], dtype=torch.float64),
-        phase=torch.tensor([[0.3]], dtype=torch.float64),
-    )
-    frizz = frizz_backbone(
-        backbone,
-        normals,
-        directions,
-        tangents,
-        amplitude=torch.tensor([[0.001]], dtype=torch.float64),
-        seed_phase=torch.tensor([[1.4]], dtype=torch.float64),
-    )
-    combined = deform_backbone(
-        backbone,
-        normals,
-        directions,
-        tangents,
-        curl_radius=torch.tensor([[0.003]], dtype=torch.float64),
-        curl_turns=torch.tensor([[1.25]], dtype=torch.float64),
-        curl_phase=torch.tensor([[0.3]], dtype=torch.float64),
-        frizz_amplitude=torch.tensor([[0.001]], dtype=torch.float64),
-        frizz_seed_phase=torch.tensor([[1.4]], dtype=torch.float64),
-    )
-    torch.testing.assert_close(
-        combined - backbone,
-        (curl - backbone) + (frizz - backbone),
-        atol=2.0e-12,
-        rtol=0.0,
-    )
-
-    # Curl controls cannot alter frizz when curl radius is zero.
-    frizz_a = deform_backbone(
-        backbone,
-        normals,
-        directions,
-        tangents,
-        curl_radius=torch.zeros((1, 1), dtype=torch.float64),
-        curl_turns=torch.tensor([[0.1]], dtype=torch.float64),
-        curl_phase=torch.tensor([[0.2]], dtype=torch.float64),
-        frizz_amplitude=torch.tensor([[0.001]], dtype=torch.float64),
-        frizz_seed_phase=torch.tensor([[1.4]], dtype=torch.float64),
-    )
-    frizz_b = deform_backbone(
-        backbone,
-        normals,
-        directions,
-        tangents,
-        curl_radius=torch.zeros((1, 1), dtype=torch.float64),
-        curl_turns=torch.tensor([[7.0]], dtype=torch.float64),
-        curl_phase=torch.tensor([[2.7]], dtype=torch.float64),
-        frizz_amplitude=torch.tensor([[0.001]], dtype=torch.float64),
-        frizz_seed_phase=torch.tensor([[1.4]], dtype=torch.float64),
-    )
-    torch.testing.assert_close(frizz_a, frizz_b, atol=0.0, rtol=0.0)
-
-
 def test_curl_uses_both_transverse_axes() -> None:
     backbone, normals, directions, tangents = canonical_backbone()
     _, side, outward = backbone_transverse_frames(
@@ -352,8 +282,6 @@ def test_curl_uses_both_transverse_axes() -> None:
         curl_radius=torch.tensor([[0.01]], dtype=torch.float64),
         curl_turns=torch.tensor([[2.5]], dtype=torch.float64),
         curl_phase=torch.tensor([[0.3]], dtype=torch.float64),
-        frizz_amplitude=torch.zeros((1, 1), dtype=torch.float64),
-        frizz_seed_phase=torch.tensor([[1.1]], dtype=torch.float64),
     )
     displacement = shaped - backbone
     side_displacement = (displacement * side).sum(dim=-1)
@@ -374,8 +302,6 @@ def test_moderate_detail_does_not_create_axial_foldback() -> None:
         curl_radius=torch.tensor([[0.002]], dtype=torch.float64),
         curl_turns=torch.tensor([[1.25]], dtype=torch.float64),
         curl_phase=torch.tensor([[0.4]], dtype=torch.float64),
-        frizz_amplitude=torch.tensor([[0.0008]], dtype=torch.float64),
-        frizz_seed_phase=torch.tensor([[1.0]], dtype=torch.float64),
     )
     progress = torch.diff(chord_progress(shaped, directions), dim=1)
     assert bool((progress > 0.0).all())
@@ -410,8 +336,6 @@ def test_physical_shape_is_scale_equivariant() -> None:
         curl_radius=torch.tensor([[0.004]], dtype=torch.float64),
         curl_turns=torch.tensor([[1.75]], dtype=torch.float64),
         curl_phase=torch.tensor([[0.2]], dtype=torch.float64),
-        frizz_amplitude=torch.tensor([[0.002]], dtype=torch.float64),
-        frizz_seed_phase=torch.tensor([[0.9]], dtype=torch.float64),
     )
 
     scale = 3.0
@@ -423,8 +347,6 @@ def test_physical_shape_is_scale_equivariant() -> None:
         curl_radius=torch.tensor([[0.004 * scale]], dtype=torch.float64),
         curl_turns=torch.tensor([[1.75]], dtype=torch.float64),
         curl_phase=torch.tensor([[0.2]], dtype=torch.float64),
-        frizz_amplitude=torch.tensor([[0.002 * scale]], dtype=torch.float64),
-        frizz_seed_phase=torch.tensor([[0.9]], dtype=torch.float64),
     )
     torch.testing.assert_close(scaled, shaped * scale, atol=2.0e-11, rtol=1.0e-10)
 
@@ -450,8 +372,6 @@ def test_groom_shape_ratios_are_scale_equivariant() -> None:
         curl_radius_ratio=torch.full((2, 1), 0.16, dtype=dtype),
         curl_turns=torch.full((2, 1), 1.75, dtype=dtype),
         curl_phase=torch.full((2, 1), 0.2, dtype=dtype),
-        frizz_amplitude_ratio=torch.full((2, 1), 0.08, dtype=dtype),
-        frizz_seed_phase=torch.full((2, 1), 0.9, dtype=dtype),
         child_radius=torch.zeros((2, 1), dtype=dtype),
         clump_strength=torch.zeros((2, 1), dtype=dtype),
         root_color=torch.zeros((2, 3), dtype=dtype),
@@ -492,7 +412,6 @@ def test_groom_shape_ratio_geometry_has_finite_nonzero_gradients() -> None:
     base = GroomParameterField(1).decode()
     length = torch.tensor([[0.04]], dtype=dtype, requires_grad=True)
     curl_ratio = torch.tensor([[0.10]], dtype=dtype, requires_grad=True)
-    frizz_ratio = torch.tensor([[0.04]], dtype=dtype, requires_grad=True)
     groom = replace(
         base,
         length=length,
@@ -504,8 +423,6 @@ def test_groom_shape_ratio_geometry_has_finite_nonzero_gradients() -> None:
         curl_radius_ratio=curl_ratio,
         curl_turns=torch.full((1, 1), 1.6, dtype=dtype),
         curl_phase=torch.full((1, 1), 0.3, dtype=dtype),
-        frizz_amplitude_ratio=frizz_ratio,
-        frizz_seed_phase=torch.full((1, 1), 1.1, dtype=dtype),
         child_radius=torch.zeros((1, 1), dtype=dtype),
         clump_strength=torch.zeros((1, 1), dtype=dtype),
         root_color=torch.zeros((1, 3), dtype=dtype),
@@ -530,13 +447,42 @@ def test_groom_shape_ratio_geometry_has_finite_nonzero_gradients() -> None:
     ).reshape_as(strands)
     (strands * weights).sum().backward()
 
-    for gradient in (length.grad, curl_ratio.grad, frizz_ratio.grad):
+    for gradient in (length.grad, curl_ratio.grad):
         assert gradient is not None
         assert bool(torch.isfinite(gradient).all())
         assert float(gradient.abs().sum()) > 0.0
 
 
-def test_frizz_is_stable_across_sampling_density() -> None:
+def test_standalone_frizz_is_deterministic_and_differentiable() -> None:
+    backbone, normals, directions, tangents = canonical_backbone(samples=65)
+    amplitude = torch.tensor([[0.002]], dtype=torch.float64, requires_grad=True)
+    seed_phase = torch.tensor([[0.9]], dtype=torch.float64)
+    first = frizz_backbone(
+        backbone,
+        normals,
+        directions,
+        tangents,
+        amplitude=amplitude,
+        seed_phase=seed_phase,
+    )
+    second = frizz_backbone(
+        backbone,
+        normals,
+        directions,
+        tangents,
+        amplitude=amplitude,
+        seed_phase=seed_phase,
+    )
+    torch.testing.assert_close(first, second, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(first[:, 0], backbone[:, 0], atol=0.0, rtol=0.0)
+    weights = torch.linspace(0.2, 1.3, first.numel(), dtype=first.dtype).reshape_as(first)
+    (first * weights).sum().backward()
+    assert amplitude.grad is not None
+    assert bool(torch.isfinite(amplitude.grad).all())
+    assert float(amplitude.grad.abs().sum()) > 0.0
+
+
+def test_standalone_frizz_is_stable_across_sampling_density() -> None:
     low, normals, directions, tangents = canonical_backbone(samples=65)
     high, _, _, _ = canonical_backbone(samples=129)
     kwargs = {
@@ -548,13 +494,12 @@ def test_frizz_is_stable_across_sampling_density() -> None:
     torch.testing.assert_close(high_frizz[:, ::2], low_frizz, atol=5.0e-6, rtol=0.0)
 
 
-def test_curl_frizz_geometry_has_finite_nonzero_gradients() -> None:
+def test_curl_geometry_has_finite_nonzero_gradients() -> None:
     backbone, normals, directions, tangents = canonical_backbone()
     backbone = backbone.detach().requires_grad_(True)
     radius = torch.tensor([[0.004]], dtype=torch.float64, requires_grad=True)
     turns = torch.tensor([[1.4]], dtype=torch.float64, requires_grad=True)
     curl_phase = torch.tensor([[0.6]], dtype=torch.float64, requires_grad=True)
-    amplitude = torch.tensor([[0.002]], dtype=torch.float64, requires_grad=True)
 
     points = deform_backbone(
         backbone,
@@ -564,13 +509,11 @@ def test_curl_frizz_geometry_has_finite_nonzero_gradients() -> None:
         curl_radius=radius,
         curl_turns=turns,
         curl_phase=curl_phase,
-        frizz_amplitude=amplitude,
-        frizz_seed_phase=torch.tensor([[1.2]], dtype=torch.float64),
     )
     weights = torch.linspace(0.2, 1.3, points.numel(), dtype=points.dtype).reshape_as(points)
     (points * weights).sum().backward()
 
-    for gradient in (backbone.grad, radius.grad, turns.grad, curl_phase.grad, amplitude.grad):
+    for gradient in (backbone.grad, radius.grad, turns.grad, curl_phase.grad):
         assert gradient is not None
         assert bool(torch.isfinite(gradient).all())
         assert float(gradient.abs().sum()) > 0.0

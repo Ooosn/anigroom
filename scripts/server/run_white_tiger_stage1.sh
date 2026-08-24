@@ -90,7 +90,6 @@ required_config=(
   GUIDE_CHILD_RADIUS_RESIDUAL_SCALE
   GUIDE_CLUMP_RESIDUAL_SCALE
   GUIDE_CURL_RESIDUAL_SCALE
-  GUIDE_FRIZZ_RESIDUAL_SCALE
   GUIDE_PRIOR_WEIGHT
   GUIDE_PRIOR_DIRECTION_WEIGHT
   GUIDE_PRIOR_CURL_WEIGHT
@@ -111,7 +110,6 @@ required_config=(
   GUIDE_FREEZE_UNTIL
   SHAPE_DETAIL_FREEZE_UNTIL
   SHAPE_CURL_SCALE
-  SHAPE_FRIZZ_SCALE
   GUIDE_DENSIFY_START
   GUIDE_DENSIFY_INTERVAL
   GUIDE_DENSIFY_UNTIL
@@ -322,7 +320,6 @@ cmd=(
   --guide-child-radius-residual-scale "$GUIDE_CHILD_RADIUS_RESIDUAL_SCALE"
   --guide-clump-residual-scale "$GUIDE_CLUMP_RESIDUAL_SCALE"
   --guide-curl-residual-scale "$GUIDE_CURL_RESIDUAL_SCALE"
-  --guide-frizz-residual-scale "$GUIDE_FRIZZ_RESIDUAL_SCALE"
   --guide-prior-weight "$GUIDE_PRIOR_WEIGHT"
   --guide-prior-direction-weight "$GUIDE_PRIOR_DIRECTION_WEIGHT"
   --guide-prior-curl-weight "$GUIDE_PRIOR_CURL_WEIGHT"
@@ -346,7 +343,6 @@ cmd=(
   --secondary-shape-residual-unlock-start "$SECONDARY_SHAPE_RESIDUAL_UNLOCK_START"
   --secondary-shape-residual-unlock-end "$SECONDARY_SHAPE_RESIDUAL_UNLOCK_END"
   --shape-curl-scale "$SHAPE_CURL_SCALE"
-  --shape-frizz-scale "$SHAPE_FRIZZ_SCALE"
   --guide-densify-start "$GUIDE_DENSIFY_START"
   --guide-densify-interval "$GUIDE_DENSIFY_INTERVAL"
   --guide-densify-until "$GUIDE_DENSIFY_UNTIL"

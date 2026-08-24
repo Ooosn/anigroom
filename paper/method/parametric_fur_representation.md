@@ -67,9 +67,9 @@ already close to the surface normal. Thus $s_r=0$ recovers a straight strand,
 while larger values produce a stronger but single, smooth normal-to-flow turn
 without a threshold or a second bend field.
 
-### Independent curl and micro-frizz
+### Independent curl and root-to-tip opacity
 
-We augment the low-frequency backbone with independent transverse detail. Let
+We augment the low-frequency backbone with signed transverse curl. Let
 $\boldsymbol{\tau}_r(u)$ be the local backbone tangent and let
 $\mathbf{s}_r(u),\mathbf{o}_r(u)$ be transported orthonormal transverse axes.
 With the root-preserving envelope $E(u)=u^2(3-2u)$, curl is defined as
@@ -81,31 +81,22 @@ $$
 \right],
 $$
 
-where $\theta_r(u)=\phi_r+2\pi f_ru$, $f_r$ is the number of turns per
+where $\theta_r(u)=\phi_r+2\pi f_ru$, $f_r$ is the signed number of turns per
 strand, and $\phi_r$ is the curl phase. We optimize the dimensionless curl
 ratio $\rho_r$ and decode the physical radius as $r_r=L_r\rho_r$. This keeps
 the same control geometrically comparable across short and long fur.
-Small-scale geometric roughness is represented as band-limited micro-frizz,
+The differentiable centerline is the backbone plus this curl,
 
 $$
-\mathbf{R}_r(u)=a_rE(u)\left[
-\eta^s_r(u)\mathbf{s}_r(u)+\eta^o_r(u)\mathbf{o}_r(u)
-\right],
+\mathbf{P}_r(u)=\mathbf{B}_r(u)+\mathbf{C}_r(u),
 $$
 
-where the optimized dimensionless amplitude $\alpha_r$ is decoded as
-$a_r=L_r\alpha_r$, and $\eta^s_r,\eta^o_r$ are deterministic smooth noise
-signals generated from a persistent per-strand seed. Both offsets
-are evaluated around the same undeformed backbone,
-
-$$
-\mathbf{P}_r(u)=\mathbf{B}_r(u)+\mathbf{C}_r(u)+\mathbf{R}_r(u),
-$$
-
-which keeps curl and frizz additive, independently editable, and free of
-order-dependent twisting. The envelope preserves the root position and root
-tangent. In this manuscript, *micro-frizz* denotes geometric roughness; it
-should not be confused with a material BRDF roughness parameter.
+and the envelope preserves the root position and root tangent. The
+root-to-tip opacity profile is an appearance control. For curve presentation,
+the renderer uses the curve's root-to-tip `Parametric` coordinate to interpolate
+opacity in a shader mix between Transparent BSDF and the existing Principled
+BSDF, preserving color and BRDF response. Gaussian presentation uses the
+transported Gaussian opacities in the corresponding transparent/Principled mix.
 
 ### Root-to-tip appearance and width profile
 
@@ -157,10 +148,9 @@ functions of the underlying groom parameters.
 
 **Figure X. Interpretable differentiable groom controls.** Single-variable
 sweeps show the effects of 3D direction, length, brush stiffness, width
-profile, curl radius, curl turns, geometric micro-frizz, and root-to-tip color.
-The displayed geometric sweeps use $\hat L=L/L_{\mathrm{ref}}$,
-$\hat r=r/L$, and $\hat a=a/L$. Each strand is rendered over a shallow
-convex receiver to expose its
+profile, curl radius, signed curl turns, root-to-tip opacity, and root-to-tip
+color. The displayed geometric sweeps use $\hat L=L/L_{\mathrm{ref}}$ and
+$\hat r=r/L$. Each strand is rendered over a shallow convex receiver to expose its
 three-dimensional shape and contact shadow. The composed examples combine
 multiple controls; the aligned lower row shows the corresponding adaptive
 anisotropic Gaussian initialization after all geometric deformation.
@@ -168,8 +158,8 @@ anisotropic Gaussian initialization after all geometric deformation.
 ## Implementation boundary
 
 - Implemented geometric controls shown in the figure: length, local 3D
-  direction, brush stiffness, root/tip width and taper, curl radius/turns/phase,
-  and geometric frizz.
+  direction, brush stiffness, root/tip width and taper, and signed curl
+  radius/turns/phase.
 - Implemented appearance controls described in text: root/tip color and opacity.
 - Not claimed as an implemented groom control: material BRDF roughness.
 - The discrete adaptive segment count is detached; the generated strand and

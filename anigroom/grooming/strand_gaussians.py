@@ -111,7 +111,7 @@ class DecodedGroom:
 
     All tensors are shaped ``[R, C]``.  These are explicit editor-like controls:
     length, tapering width, a normalized 3D direction in the root frame, brush
-    stiffness, curl, frizz, child layout, color, and opacity. Extra
+    stiffness, curl, child layout, color, and opacity. Extra
     growth gates and color-darkening shortcuts are intentionally outside this
     core parameter set.
     """
@@ -125,8 +125,6 @@ class DecodedGroom:
     curl_radius_ratio: torch.Tensor
     curl_turns: torch.Tensor
     curl_phase: torch.Tensor
-    frizz_amplitude_ratio: torch.Tensor
-    frizz_seed_phase: torch.Tensor
     child_radius: torch.Tensor
     clump_strength: torch.Tensor
     root_color: torch.Tensor
@@ -229,14 +227,6 @@ class GroomParameterField(nn.Module):
         )
         self.curl_turns_raw = repeated(raw_from_range(1.20, self.ranges.curl_turns))
         self.curl_phase = nn.Parameter(torch.zeros((self.root_count, 1), dtype=torch.float32, device=dev))
-        self.frizz_amplitude_ratio_raw = repeated(
-            encode_positive_softplus(neutral_shape_ratio)
-        )
-        frizz_seed = torch.frac(
-            torch.arange(self.root_count, dtype=torch.float32, device=dev).view(-1, 1)
-            * 0.6180339887498949
-        ) * (2.0 * torch.pi)
-        self.register_buffer("frizz_seed_phase", frizz_seed)
         self.register_buffer(
             "child_radius_reference",
             torch.full(
@@ -280,10 +270,6 @@ class GroomParameterField(nn.Module):
             ),
             curl_turns=self._decode_range(self.curl_turns_raw, ranges.curl_turns),
             curl_phase=self.curl_phase,
-            frizz_amplitude_ratio=decode_positive_softplus(
-                self.frizz_amplitude_ratio_raw,
-            ),
-            frizz_seed_phase=self.frizz_seed_phase,
             child_radius=decode_positive_asinh_ratio(
                 self.child_radius_raw,
                 self.child_radius_reference,
@@ -416,11 +402,9 @@ def build_strands(
         groom.brush_stiffness,
         samples,
     )
-    # Curl and frizz are learned and interpolated as dimensionless shape
-    # ratios.  This is the sole conversion into physical offsets, so the same
-    # control produces the same relative shape on short and long strands.
+    # Curl is learned and interpolated as a dimensionless shape ratio. This is
+    # the sole conversion into a physical curl offset.
     curl_radius = groom.length * groom.curl_radius_ratio
-    frizz_amplitude = groom.length * groom.frizz_amplitude_ratio
     points = deform_backbone(
         points,
         normals,
@@ -429,8 +413,6 @@ def build_strands(
         curl_radius=curl_radius,
         curl_turns=groom.curl_turns,
         curl_phase=groom.curl_phase,
-        frizz_amplitude=frizz_amplitude,
-        frizz_seed_phase=groom.frizz_seed_phase,
     )
 
     taper_t = t.clamp(0.0, 1.0).pow(groom.width_taper[:, None])

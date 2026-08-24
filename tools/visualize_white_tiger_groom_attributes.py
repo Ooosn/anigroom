@@ -401,8 +401,6 @@ def main() -> None:
         "curl_radius": (groom.length * groom.curl_radius_ratio).reshape(-1)[ids].detach().cpu().numpy(),
         "curl_turns": groom.curl_turns.reshape(-1)[ids].detach().cpu().numpy(),
         "curl_amount_radius_x_abs_turns": ((groom.length * groom.curl_radius_ratio).reshape(-1)[ids] * groom.curl_turns.reshape(-1)[ids].abs()).detach().cpu().numpy(),
-        "frizz_amplitude_ratio": groom.frizz_amplitude_ratio.reshape(-1)[ids].detach().cpu().numpy(),
-        "frizz_amplitude": (groom.length * groom.frizz_amplitude_ratio).reshape(-1)[ids].detach().cpu().numpy(),
         "direction_local_tangent_x": groom.direction_local[:, 0][ids].detach().cpu().numpy(),
         "direction_local_tangent_y": groom.direction_local[:, 1][ids].detach().cpu().numpy(),
         "direction_local_outward": groom.direction_local[:, 2][ids].detach().cpu().numpy(),
@@ -415,8 +413,6 @@ def main() -> None:
         "curl_radius_ratio",
         "curl_radius",
         "curl_amount_radius_x_abs_turns",
-        "frizz_amplitude_ratio",
-        "frizz_amplitude",
     }
     flow_path = output_dir / f"view{int(args.view):02d}_flow_arrows_3d.png"
     _save_flow_arrows(base, xy_np, xy2_np, values["length"], flow_path, title=f"view{int(args.view):02d} projected 3D hair flow")

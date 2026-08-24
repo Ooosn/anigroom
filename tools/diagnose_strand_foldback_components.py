@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Attribute strict strand foldback to the brush backbone, primary "
-            "shape field, secondary residual, curl, or frizz."
+            "shape field, secondary residual, or curl."
         )
     )
     parser.add_argument("--checkpoint", required=True)
@@ -58,13 +58,10 @@ def replace_detail(
     groom,
     *,
     curl_radius_ratio=None,
-    frizz_amplitude_ratio=None,
 ):
     updates = {}
     if curl_radius_ratio is not None:
         updates["curl_radius_ratio"] = curl_radius_ratio
-    if frizz_amplitude_ratio is not None:
-        updates["frizz_amplitude_ratio"] = frizz_amplitude_ratio
     return replace(groom, **updates)
 
 
@@ -208,7 +205,6 @@ def top_guide_records(
     guide_points: np.ndarray,
     guide_length: np.ndarray,
     guide_curl: np.ndarray,
-    guide_frizz: np.ndarray,
     guide_ratio: np.ndarray,
     guide_confidence: np.ndarray,
 ) -> list[dict[str, object]]:
@@ -220,7 +216,6 @@ def top_guide_records(
             "length": float(guide_length[guide_id]),
             "curl_radius": float(guide_curl[guide_id]),
             "curl_radius_over_length": float(guide_ratio[guide_id]),
-            "frizz": float(guide_frizz[guide_id]),
             "clean_flow_confidence": float(guide_confidence[guide_id]),
         }
         for guide_id in selected.tolist()
@@ -291,40 +286,24 @@ def main() -> None:
         selected_bitangents = bitangents[subset]
 
         zeros_curl = torch.zeros_like(full.curl_radius_ratio)
-        zeros_frizz = torch.zeros_like(full.frizz_amplitude_ratio)
         variants = {
             "full_backbone": replace_detail(
-                full, curl_radius_ratio=zeros_curl, frizz_amplitude_ratio=zeros_frizz
+                full, curl_radius_ratio=zeros_curl
             ),
             "full_all": full,
-            "full_curl_only": replace_detail(full, frizz_amplitude_ratio=zeros_frizz),
-            "full_frizz_only": replace_detail(full, curl_radius_ratio=zeros_curl),
+            "full_curl_only": full,
             "no_secondary_shape_backbone": replace_detail(
                 no_secondary_shape,
                 curl_radius_ratio=torch.zeros_like(no_secondary_shape.curl_radius_ratio),
-                frizz_amplitude_ratio=torch.zeros_like(no_secondary_shape.frizz_amplitude_ratio),
             ),
             "no_secondary_shape_all": no_secondary_shape,
-            "no_secondary_shape_curl_only": replace_detail(
-                no_secondary_shape,
-                frizz_amplitude_ratio=torch.zeros_like(no_secondary_shape.frizz_amplitude_ratio),
-            ),
-            "no_secondary_shape_frizz_only": replace_detail(
-                no_secondary_shape,
-                curl_radius_ratio=torch.zeros_like(no_secondary_shape.curl_radius_ratio),
-            ),
+            "no_secondary_shape_curl_only": no_secondary_shape,
             "primary_backbone": replace_detail(
                 primary,
                 curl_radius_ratio=torch.zeros_like(primary.curl_radius_ratio),
-                frizz_amplitude_ratio=torch.zeros_like(primary.frizz_amplitude_ratio),
             ),
             "primary_all": primary,
-            "primary_curl_only": replace_detail(
-                primary, frizz_amplitude_ratio=torch.zeros_like(primary.frizz_amplitude_ratio)
-            ),
-            "primary_frizz_only": replace_detail(
-                primary, curl_radius_ratio=torch.zeros_like(primary.curl_radius_ratio)
-            ),
+            "primary_curl_only": primary,
         }
 
         variant_strands: dict[str, np.ndarray] = {}
@@ -380,26 +359,13 @@ def main() -> None:
         no_secondary_shape_curl_ratio = (
             no_secondary_shape.curl_radius_ratio.detach().cpu().numpy().reshape(-1)
         )
-        full_frizz_ratio = full.frizz_amplitude_ratio.detach().cpu().numpy().reshape(-1)
-        primary_frizz_ratio = primary.frizz_amplitude_ratio.detach().cpu().numpy().reshape(-1)
-        no_secondary_shape_frizz_ratio = (
-            no_secondary_shape.frizz_amplitude_ratio.detach().cpu().numpy().reshape(-1)
-        )
         full_curl = full_length * full_curl_ratio
         primary_curl = primary_length * primary_curl_ratio
         no_secondary_shape_curl = (
             no_secondary_shape_length * no_secondary_shape_curl_ratio
         )
-        full_frizz = full_length * full_frizz_ratio
-        primary_frizz = primary_length * primary_frizz_ratio
-        no_secondary_shape_frizz = (
-            no_secondary_shape_length * no_secondary_shape_frizz_ratio
-        )
         curl_turns = full.curl_turns.detach().cpu().numpy().reshape(-1)
         curl_phase = full.curl_phase.detach().cpu().numpy().reshape(-1)
-        frizz_seed_phase = (
-            full.frizz_seed_phase.detach().cpu().numpy().reshape(-1)
-        )
         stiffness = full.brush_stiffness.detach().cpu().numpy().reshape(-1)
         clean_confidence = model.clean_flow_anchor_confidence[subset]
         clean_confidence = clean_confidence.detach().cpu().numpy().reshape(-1)
@@ -416,19 +382,14 @@ def main() -> None:
         guide_curl_ratio = decode_positive_softplus(
             model.guide_curl_radius_ratio_raw
         ).reshape(-1)
-        guide_frizz_ratio = decode_positive_softplus(
-            model.guide_frizz_amplitude_ratio_raw
-        ).reshape(-1)
         guide_curl_turns = model.guide_curl_turns_raw.detach().reshape(-1)
         guide_curl = guide_length * guide_curl_ratio
-        guide_frizz = guide_length * guide_frizz_ratio
         guide_ratio = guide_curl_ratio
         guide_confidence = model.guide_clean_flow_anchor_confidence.reshape(-1)
         guide_points = model.guide_points_local
 
         guide_length_np = guide_length.detach().cpu().numpy()
         guide_curl_np = guide_curl.detach().cpu().numpy()
-        guide_frizz_np = guide_frizz.detach().cpu().numpy()
         guide_ratio_np = guide_ratio.detach().cpu().numpy()
         guide_curl_turns_np = guide_curl_turns.detach().cpu().numpy()
         guide_confidence_np = guide_confidence.detach().cpu().numpy()
@@ -446,17 +407,8 @@ def main() -> None:
             "primary_curl_radius_ratio": primary_curl_ratio,
             "no_secondary_shape_curl_radius": no_secondary_shape_curl,
             "no_secondary_shape_curl_radius_ratio": no_secondary_shape_curl_ratio,
-            "full_frizz": full_frizz,
-            "full_frizz_amplitude_ratio": full_frizz_ratio,
-            "primary_frizz": primary_frizz,
-            "primary_frizz_amplitude_ratio": primary_frizz_ratio,
-            "no_secondary_shape_frizz": no_secondary_shape_frizz,
-            "no_secondary_shape_frizz_amplitude_ratio": no_secondary_shape_frizz_ratio,
             "curl_turns": curl_turns,
             "curl_phase_mod_2pi": np.mod(curl_phase, 2.0 * np.pi),
-            "frizz_seed_phase_mod_2pi": np.mod(
-                frizz_seed_phase, 2.0 * np.pi
-            ),
             "brush_stiffness": stiffness,
             "direction_normal_cosine": direction_normal_cosine,
             "clean_flow_anchor_confidence": clean_confidence,
@@ -474,12 +426,8 @@ def main() -> None:
             "primary_curl_signed_wavenumber": (
                 2.0 * np.pi * primary_curl_ratio * curl_turns
             ),
-            "full_frizz_over_length": full_frizz_ratio,
-            "primary_frizz_over_length": primary_frizz_ratio,
             "secondary_curl_ratio": full_curl
             / np.maximum(primary_curl, 1.0e-12),
-            "secondary_frizz_ratio": full_frizz
-            / np.maximum(primary_frizz, 1.0e-12),
         }
         guide_attributes = {
             "curl_turns": guide_curl_turns_np,
@@ -552,7 +500,6 @@ def main() -> None:
                     "curl_wavenumber_magnitude": float(
                         guide_attributes["curl_wavenumber_magnitude"][guide_id]
                     ),
-                    "frizz": float(guide_frizz_np[guide_id]),
                     "clean_flow_confidence": float(guide_confidence_np[guide_id]),
                     "length_percentile_rank": float(
                         percentile_ranks(
@@ -668,7 +615,6 @@ def main() -> None:
                         "curl_wavenumber_magnitude": float(
                             guide_attributes["curl_wavenumber_magnitude"][guide_id]
                         ),
-                        "frizz": float(guide_frizz_np[guide_id]),
                         "clean_flow_confidence": float(
                             guide_confidence_np[guide_id]
                         ),
@@ -729,7 +675,6 @@ def main() -> None:
                 guide_points=guide_points_np,
                 guide_length=guide_length_np,
                 guide_curl=guide_curl_np,
-                guide_frizz=guide_frizz_np,
                 guide_ratio=guide_ratio_np,
                 guide_confidence=guide_confidence_np,
             ),
@@ -739,7 +684,6 @@ def main() -> None:
                 guide_points=guide_points_np,
                 guide_length=guide_length_np,
                 guide_curl=guide_curl_np,
-                guide_frizz=guide_frizz_np,
                 guide_ratio=guide_ratio_np,
                 guide_confidence=guide_confidence_np,
             ),

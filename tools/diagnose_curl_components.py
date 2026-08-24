@@ -14,8 +14,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from anigroom.grooming import build_strands  # noqa: E402
-from tools.train_white_tiger_stage1 import (  # noqa: E402
+from anigroom.grooming import build_strands
+from tools.train_white_tiger_stage1 import (
     build_stage1_model_from_checkpoint,
     load_training_checkpoint,
     resolve_project_path,
@@ -25,10 +25,7 @@ from tools.train_white_tiger_stage1 import (  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Decompose a fixed checkpoint into backbone, curl-only, frizz-only, "
-            "fixed-turn curl, primary-detail, and final-detail strand geometry."
-        )
+        description="Decompose a fixed checkpoint into curl-only strand geometry."
     )
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output-dir", required=True)
@@ -47,31 +44,34 @@ def select_groom(groom, ids: torch.Tensor):
     )
 
 
-def select_detail(groom, *, curl: bool, frizz: bool):
+def select_curl(groom, *, enabled: bool):
+    if enabled:
+        return groom
     return replace(
         groom,
-        curl_radius_ratio=(
-            groom.curl_radius_ratio
-            if curl
-            else torch.zeros_like(groom.curl_radius_ratio)
-        ),
-        frizz_amplitude_ratio=(
-            groom.frizz_amplitude_ratio
-            if frizz
-            else torch.zeros_like(groom.frizz_amplitude_ratio)
-        ),
+        curl_radius_ratio=torch.zeros_like(groom.curl_radius_ratio),
+        curl_turns=torch.zeros_like(groom.curl_turns),
+        curl_phase=torch.zeros_like(groom.curl_phase),
     )
 
 
-def fixed_turn_curl_only(groom, *, turns: float = 1.2):
-    """Keep the learned curl field but replace only its signed turns coordinate."""
-
-    curl_only = select_detail(groom, curl=True, frizz=False)
+def fixed_turn_curl(groom, *, turns: float = 1.2):
     return replace(
-        curl_only,
-        curl_turns=torch.full_like(curl_only.curl_turns, float(turns)),
-        curl_phase=torch.zeros_like(curl_only.curl_phase),
+        groom,
+        curl_turns=torch.full_like(groom.curl_turns, float(turns)),
+        curl_phase=torch.zeros_like(groom.curl_phase),
     )
+
+
+def exact_non_turn_controls_match(left, right) -> bool:
+    """Check that a counterfactual changed no control except turns/phase."""
+
+    for field in fields(left):
+        if field.name in {"curl_turns", "curl_phase"}:
+            continue
+        if not torch.equal(getattr(left, field.name), getattr(right, field.name)):
+            return False
+    return True
 
 
 def quantiles(values: np.ndarray) -> dict[str, float]:
@@ -93,7 +93,6 @@ def strand_metrics(strands: np.ndarray) -> dict[str, np.ndarray]:
     unit = segments / np.maximum(segment_length[..., None], 1.0e-12)
     cosine = np.einsum("nsd,nsd->ns", unit[:, :-1], unit[:, 1:])
     turns = np.arccos(np.clip(cosine, -1.0, 1.0))
-
     chord = strands64[:, -1] - strands64[:, 0]
     chord_length = np.linalg.norm(chord, axis=-1)
     chord_unit = chord / np.maximum(chord_length[:, None], 1.0e-12)
@@ -143,8 +142,7 @@ def top_mask(score: np.ndarray, count: int) -> np.ndarray:
     count = min(max(int(count), 0), int(score.size))
     mask = np.zeros(score.size, dtype=bool)
     if count:
-        selected = np.argpartition(score, -count)[-count:]
-        mask[selected] = True
+        mask[np.argpartition(score, -count)[-count:]] = True
     return mask
 
 
@@ -207,38 +205,32 @@ def main() -> None:
         original_secondary_multiplier = float(
             model.secondary_shape_residual_multiplier
         )
-
         model.guide_residual_multiplier = original_guide_multiplier
+        model.secondary_shape_residual_multiplier = 0.0
+        primary_groom = select_groom(
+            model.apply_guide_controls(template, roots_local), subset
+        )
         model.secondary_shape_residual_multiplier = original_secondary_multiplier
         final_groom = select_groom(
             model.apply_guide_controls(template, roots_local), subset
         )
-
-        model.guide_residual_multiplier = original_guide_multiplier
-        model.secondary_shape_residual_multiplier = 0.0
-        primary_detail_groom = select_groom(
-            model.apply_guide_controls(template, roots_local), subset
-        )
-
-        model.guide_residual_multiplier = original_guide_multiplier
-        model.secondary_shape_residual_multiplier = original_secondary_multiplier
 
         selected_roots = roots[subset]
         selected_normals = normals[subset]
         selected_tangents = tangents[subset]
         selected_bitangents = bitangents[subset]
         variants = {
-            "backbone": select_detail(final_groom, curl=False, frizz=False),
-            "curl_only": select_detail(final_groom, curl=True, frizz=False),
-            "curl_fixed_1p2_turns": fixed_turn_curl_only(final_groom),
-            "frizz_only": select_detail(final_groom, curl=False, frizz=True),
-            "primary_curl_frizz": primary_detail_groom,
-            "final_curl_frizz": final_groom,
+            "backbone": select_curl(final_groom, enabled=False),
+            "curl_only": select_curl(final_groom, enabled=True),
+            "curl_fixed_1p2_turns": fixed_turn_curl(final_groom),
+            "primary_curl": select_curl(primary_groom, enabled=True),
+            "final_curl": select_curl(final_groom, enabled=True),
         }
 
         variant_strands: dict[str, np.ndarray] = {}
         variant_metrics: dict[str, dict[str, np.ndarray]] = {}
         widths_np = colors_np = opacities_np = None
+        non_turn_attributes_exact = True
         for name, groom in variants.items():
             strands, widths, colors, opacities = build_strands(
                 selected_roots,
@@ -251,72 +243,59 @@ def main() -> None:
             strands_np = strands.detach().cpu().numpy().astype(np.float32)
             variant_strands[name] = strands_np
             variant_metrics[name] = strand_metrics(strands_np)
-            variant_widths_np = widths.detach().cpu().numpy().astype(np.float32)
-            variant_colors_np = colors.detach().cpu().numpy().astype(np.float32)
-            variant_opacities_np = opacities.detach().cpu().numpy().astype(np.float32)
+            candidate_widths = widths.detach().cpu().numpy().astype(np.float32)
+            candidate_colors = colors.detach().cpu().numpy().astype(np.float32)
+            candidate_opacities = opacities.detach().cpu().numpy().astype(np.float32)
             if widths_np is None:
-                widths_np = variant_widths_np
-                colors_np = variant_colors_np
-                opacities_np = variant_opacities_np
-            elif not (
-                np.array_equal(widths_np, variant_widths_np)
-                and np.array_equal(colors_np, variant_colors_np)
-                and np.array_equal(opacities_np, variant_opacities_np)
-            ):
-                raise RuntimeError(
-                    f"variant {name} changed non-turn strand attributes"
+                widths_np, colors_np, opacities_np = (
+                    candidate_widths,
+                    candidate_colors,
+                    candidate_opacities,
                 )
+            elif not (
+                np.array_equal(widths_np, candidate_widths)
+                and np.array_equal(colors_np, candidate_colors)
+                and np.array_equal(opacities_np, candidate_opacities)
+            ):
+                non_turn_attributes_exact = False
+                raise RuntimeError(f"variant {name} changed non-curl strand attributes")
 
         root_ids = subset_cpu.numpy().astype(np.int64)
         backbone = variant_strands["backbone"]
         curl_displacement = displacement_metrics(
             variant_strands["curl_only"], backbone
         )
-        fixed_curl_displacement = displacement_metrics(
+        fixed_displacement = displacement_metrics(
             variant_strands["curl_fixed_1p2_turns"], backbone
         )
-        frizz_displacement = displacement_metrics(
-            variant_strands["frizz_only"], backbone
+        primary_displacement = displacement_metrics(
+            variant_strands["primary_curl"], backbone
         )
         final_displacement = displacement_metrics(
-            variant_strands["final_curl_frizz"], backbone
+            variant_strands["final_curl"], backbone
         )
-        curl_turn_excess = (
+        curl_excess = (
             variant_metrics["curl_only"]["cumulative_turn_degrees"]
             - variant_metrics["backbone"]["cumulative_turn_degrees"]
         )
-        fixed_curl_turn_excess = (
+        fixed_excess = (
             variant_metrics["curl_fixed_1p2_turns"]["cumulative_turn_degrees"]
             - variant_metrics["backbone"]["cumulative_turn_degrees"]
         )
-        frizz_turn_excess = (
-            variant_metrics["frizz_only"]["cumulative_turn_degrees"]
-            - variant_metrics["backbone"]["cumulative_turn_degrees"]
-        )
-        final_turn_excess = (
-            variant_metrics["final_curl_frizz"]["cumulative_turn_degrees"]
+        final_excess = (
+            variant_metrics["final_curl"]["cumulative_turn_degrees"]
             - variant_metrics["backbone"]["cumulative_turn_degrees"]
         )
         masks = {
-            "top_curl_turn_excess": top_mask(curl_turn_excess, args.top_count),
-            "top_curl_fixed_1p2_turn_excess": top_mask(
-                fixed_curl_turn_excess,
-                args.top_count,
-            ),
-            "top_frizz_turn_excess": top_mask(frizz_turn_excess, args.top_count),
-            "top_final_turn_excess": top_mask(final_turn_excess, args.top_count),
+            "top_curl_turn_excess": top_mask(curl_excess, args.top_count),
+            "top_curl_fixed_1p2_turn_excess": top_mask(fixed_excess, args.top_count),
+            "top_final_turn_excess": top_mask(final_excess, args.top_count),
             "top_final_displacement": top_mask(
                 final_displacement["maximum_displacement"], args.top_count
             ),
         }
-
         length = final_groom.length.detach().cpu().numpy().reshape(-1)
-        curl_ratio = (
-            final_groom.curl_radius_ratio.detach().cpu().numpy().reshape(-1)
-        )
-        frizz_ratio = (
-            final_groom.frizz_amplitude_ratio.detach().cpu().numpy().reshape(-1)
-        )
+        curl_ratio = final_groom.curl_radius_ratio.detach().cpu().numpy().reshape(-1)
         curl_turns = final_groom.curl_turns.detach().cpu().numpy().reshape(-1)
         curl_phase = final_groom.curl_phase.detach().cpu().numpy().reshape(-1)
         attributes = {
@@ -325,8 +304,6 @@ def main() -> None:
             "curl_radius": length * curl_ratio,
             "curl_turns": curl_turns,
             "curl_phase": curl_phase,
-            "frizz_amplitude_ratio": frizz_ratio,
-            "frizz_amplitude": length * frizz_ratio,
         }
 
     output_dir = Path(args.output_dir)
@@ -344,27 +321,24 @@ def main() -> None:
             iteration=int(checkpoint.get("iteration", -1)),
         )
 
-    top_indices = np.argsort(final_turn_excess)[::-1][: int(args.top_count)]
-    top_records = []
-    for rank, index in enumerate(top_indices.tolist()):
-        top_records.append(
-            {
-                "rank": rank,
-                "subset_index": int(index),
-                "root_id": int(root_ids[index]),
-                "curl_turn_excess_degrees": float(curl_turn_excess[index]),
-                "frizz_turn_excess_degrees": float(frizz_turn_excess[index]),
-                "final_turn_excess_degrees": float(final_turn_excess[index]),
-                "final_maximum_displacement": float(
-                    final_displacement["maximum_displacement"][index]
-                ),
-                "attributes": {
-                    name: float(values[index])
-                    for name, values in attributes.items()
-                },
-            }
-        )
-
+    top_indices = np.argsort(final_excess)[::-1][: int(args.top_count)]
+    top_records = [
+        {
+            "rank": rank,
+            "subset_index": int(index),
+            "root_id": int(root_ids[index]),
+            "curl_turn_excess_degrees": float(curl_excess[index]),
+            "fixed_turn_excess_degrees": float(fixed_excess[index]),
+            "final_turn_excess_degrees": float(final_excess[index]),
+            "final_maximum_displacement": float(
+                final_displacement["maximum_displacement"][index]
+            ),
+            "attributes": {
+                name: float(values[index]) for name, values in attributes.items()
+            },
+        }
+        for rank, index in enumerate(top_indices.tolist())
+    ]
     report = {
         "checkpoint": str(checkpoint_path),
         "iteration": int(checkpoint.get("iteration", -1)),
@@ -380,33 +354,44 @@ def main() -> None:
         },
         "component_displacement": {
             "curl_only": {
-                name: quantiles(values)
-                for name, values in curl_displacement.items()
+                name: quantiles(values) for name, values in curl_displacement.items()
             },
             "curl_fixed_1p2_turns": {
-                name: quantiles(values)
-                for name, values in fixed_curl_displacement.items()
+                name: quantiles(values) for name, values in fixed_displacement.items()
             },
-            "frizz_only": {
-                name: quantiles(values)
-                for name, values in frizz_displacement.items()
+            "primary_curl": {
+                name: quantiles(values) for name, values in primary_displacement.items()
             },
-            "final_curl_frizz": {
-                name: quantiles(values)
-                for name, values in final_displacement.items()
+            "final_curl": {
+                name: quantiles(values) for name, values in final_displacement.items()
             },
         },
         "turn_excess_degrees": {
-            "curl_only": quantiles(curl_turn_excess),
-            "curl_fixed_1p2_turns": quantiles(fixed_curl_turn_excess),
-            "frizz_only": quantiles(frizz_turn_excess),
-            "final_curl_frizz": quantiles(final_turn_excess),
+            "curl_only": quantiles(curl_excess),
+            "curl_fixed_1p2_turns": quantiles(fixed_excess),
+            "final_curl": quantiles(final_excess),
         },
         "variant_controls": {
+            "non_turn_strand_attributes_exact": non_turn_attributes_exact,
+            "curl_only": {
+                "base_variant": "final_curl",
+                "non_turn_controls_match_final": exact_non_turn_controls_match(
+                    variants["curl_only"], variants["final_curl"]
+                ),
+                "curl_radius_ratio_matches_final": bool(
+                    torch.equal(
+                        variants["curl_only"].curl_radius_ratio,
+                        variants["final_curl"].curl_radius_ratio,
+                    )
+                ),
+            },
             "curl_fixed_1p2_turns": {
+                "base_variant": "final_curl",
                 "curl_turns": 1.2,
                 "curl_phase": 0.0,
-                "frizz_amplitude_ratio": 0.0,
+                "non_turn_controls_match_final": exact_non_turn_controls_match(
+                    variants["curl_fixed_1p2_turns"], variants["final_curl"]
+                ),
                 "length_matches_final": bool(
                     np.array_equal(
                         variants["curl_fixed_1p2_turns"].length.detach().cpu().numpy(),
@@ -419,11 +404,15 @@ def main() -> None:
                         final_groom.curl_radius_ratio.detach().cpu().numpy(),
                     )
                 ),
+            },
+            "primary_curl": {
+                "base_variant": "primary_curl",
+                "non_turn_controls_match_primary": exact_non_turn_controls_match(
+                    variants["primary_curl"], primary_groom
+                ),
             }
         },
-        "attributes": {
-            name: quantiles(values) for name, values in attributes.items()
-        },
+        "attributes": {name: quantiles(values) for name, values in attributes.items()},
         "curl_turns_unique": np.unique(curl_turns).astype(float).tolist(),
         "curl_phase_unique": np.unique(curl_phase).astype(float).tolist(),
         "top_final_turn_excess": top_records,
@@ -433,10 +422,8 @@ def main() -> None:
             else 0.0
         ),
     }
-    report_path = output_dir / "curl_frizz_component_report.json"
-    report_path.write_text(
-        json.dumps(report, indent=2) + "\n", encoding="utf-8"
-    )
+    report_path = output_dir / "curl_component_report.json"
+    report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
 
 

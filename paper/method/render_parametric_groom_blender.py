@@ -40,6 +40,11 @@ def parse_args() -> argparse.Namespace:
         help="Shade each displayed strand with its NPZ root-to-tip color profile.",
     )
     parser.add_argument(
+        "--use-input-opacities",
+        action="store_true",
+        help="Shade each displayed strand with its NPZ root-to-tip opacity profile.",
+    )
+    parser.add_argument(
         "--ground-plane",
         action="store_true",
         help="Add a shallow convex receiver below the strand for soft contact shadows.",
@@ -211,12 +216,19 @@ def look_at(obj, target: np.ndarray) -> None:
     obj.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
 
 
-def sample_strands(strands: np.ndarray, widths: np.ndarray, colors: np.ndarray, max_strands: int, seed: int):
+def sample_strands(
+    strands: np.ndarray,
+    widths: np.ndarray,
+    colors: np.ndarray,
+    opacities: np.ndarray,
+    max_strands: int,
+    seed: int,
+):
     if max_strands <= 0 or strands.shape[0] <= max_strands:
-        return strands, widths, colors
+        return strands, widths, colors, opacities
     rng = np.random.default_rng(seed)
     ids = np.sort(rng.choice(strands.shape[0], size=max_strands, replace=False))
-    return strands[ids], widths[ids], colors[ids]
+    return strands[ids], widths[ids], colors[ids], opacities[ids]
 
 
 def map_coordinates(strands: np.ndarray, coord_system: str) -> np.ndarray:
@@ -299,6 +311,94 @@ def add_strand_curve_objects(
     return object_count
 
 
+def _validate_opacity(value: float, name: str) -> float:
+    value = float(value)
+    if not np.isfinite(value) or value < 0.0 or value > 1.0:
+        raise ValueError(f"{name} must be finite and in [0, 1], got {value}")
+    return value
+
+
+def root_tip_alpha_node_metadata(
+    root_opacity: float,
+    tip_opacity: float,
+) -> dict[str, object]:
+    return {
+        "driver_node": "ShaderNodeNewGeometry",
+        "driver_output": "Parametric",
+        "driver_semantics": "curve intercept from root (0) to tip (1)",
+        "hair_info_node": "ShaderNodeHairInfo",
+        "hair_info_output": "Intercept",
+        "mapping_node": "ShaderNodeMapRange",
+        "mapping_from": [0.0, 1.0],
+        "mapping_to": [
+            _validate_opacity(root_opacity, "root_opacity"),
+            _validate_opacity(tip_opacity, "tip_opacity"),
+        ],
+        "transparent_node": "ShaderNodeBsdfTransparent",
+        "surface_node": "ShaderNodeMixShader",
+        "mix_factor_semantics": "0=transparent, 1=principled",
+    }
+
+
+def constant_alpha_node_metadata(opacity: float) -> dict[str, object]:
+    return {
+        "driver_node": None,
+        "mapping_node": None,
+        "constant_opacity": _validate_opacity(opacity, "opacity"),
+        "transparent_node": "ShaderNodeBsdfTransparent",
+        "surface_node": "ShaderNodeMixShader",
+        "mix_factor_semantics": "0=transparent, 1=principled",
+    }
+
+
+def _connect_alpha_surface(
+    *,
+    material,
+    bsdf,
+    root_opacity: float | None = None,
+    tip_opacity: float | None = None,
+    opacity: float | None = None,
+) -> None:
+    import bpy
+
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    transparent = nodes.new("ShaderNodeBsdfTransparent")
+    transparent.name = "root_tip_transparent_bsdf"
+    mix_shader = nodes.new("ShaderNodeMixShader")
+    mix_shader.name = "root_tip_transparent_principled_mix"
+    if opacity is not None:
+        factor = _validate_opacity(opacity, "opacity")
+        mix_shader.inputs[0].default_value = factor
+        material["alpha_node_metadata"] = constant_alpha_node_metadata(factor)
+    else:
+        if root_opacity is None or tip_opacity is None:
+            raise ValueError("root/tip opacity values are required together")
+        metadata = root_tip_alpha_node_metadata(root_opacity, tip_opacity)
+        alpha_map = nodes.new("ShaderNodeMapRange")
+        alpha_map.name = "root_tip_opacity_map"
+        alpha_map.clamp = True
+        alpha_map.inputs["From Min"].default_value = 0.0
+        alpha_map.inputs["From Max"].default_value = 1.0
+        alpha_map.inputs["To Min"].default_value = metadata["mapping_to"][0]
+        alpha_map.inputs["To Max"].default_value = metadata["mapping_to"][1]
+        # Legacy Blender CURVE splines expose their root-to-tip intercept through
+        # the geometry Parametric output; Hair Info remains the color driver.
+        curve_intercept = nodes.new("ShaderNodeNewGeometry")
+        curve_intercept.name = "root_tip_curve_intercept"
+        links.new(curve_intercept.outputs["Parametric"], alpha_map.inputs["Value"])
+        links.new(alpha_map.outputs["Result"], mix_shader.inputs[0])
+        material["alpha_node_metadata"] = metadata
+    links.new(transparent.outputs["BSDF"], mix_shader.inputs[1])
+    links.new(bsdf.outputs["BSDF"], mix_shader.inputs[2])
+    output = nodes.get("Material Output")
+    if output is None:
+        raise RuntimeError("material has no Material Output node")
+    for link in list(output.inputs["Surface"].links):
+        links.remove(link)
+    links.new(mix_shader.outputs["Shader"], output.inputs["Surface"])
+
+
 def make_root_tip_material(
     *,
     name: str,
@@ -306,6 +406,8 @@ def make_root_tip_material(
     tip_color: np.ndarray,
     roughness: float,
     specular: float,
+    root_opacity: float = 1.0,
+    tip_opacity: float = 1.0,
 ):
     import bpy
 
@@ -314,6 +416,7 @@ def make_root_tip_material(
     nodes = material.node_tree.nodes
     links = material.node_tree.links
     hair_info = nodes.new("ShaderNodeHairInfo")
+    hair_info.name = "root_tip_hair_info"
     mix = nodes.new("ShaderNodeMixRGB")
     mix.blend_type = "MIX"
     mix.inputs[1].default_value = tuple(float(v) for v in root_color) + (1.0,)
@@ -326,6 +429,38 @@ def make_root_tip_material(
     bsdf.inputs["Roughness"].default_value = float(roughness)
     if "Specular IOR Level" in bsdf.inputs:
         bsdf.inputs["Specular IOR Level"].default_value = float(specular)
+    _connect_alpha_surface(
+        material=material,
+        bsdf=bsdf,
+        root_opacity=root_opacity,
+        tip_opacity=tip_opacity,
+    )
+    return material
+
+
+def make_constant_alpha_material(
+    *,
+    name: str,
+    color: np.ndarray,
+    roughness: float,
+    metallic: float,
+    specular: float,
+    opacity: float,
+):
+    import bpy
+
+    material = bpy.data.materials.new(name)
+    material.use_nodes = True
+    bsdf = material.node_tree.nodes.get("Principled BSDF")
+    if bsdf is None:
+        raise RuntimeError("material has no Principled BSDF node")
+    bsdf.inputs["Base Color"].default_value = tuple(float(v) for v in color) + (1.0,)
+    bsdf.inputs["Roughness"].default_value = float(roughness)
+    if "Metallic" in bsdf.inputs:
+        bsdf.inputs["Metallic"].default_value = float(metallic)
+    if "Specular IOR Level" in bsdf.inputs:
+        bsdf.inputs["Specular IOR Level"].default_value = float(specular)
+    _connect_alpha_surface(material=material, bsdf=bsdf, opacity=opacity)
     return material
 
 
@@ -458,12 +593,15 @@ def add_gaussian_outline_curves(
     means: np.ndarray,
     directions: np.ndarray,
     scales: np.ndarray,
-    material,
-    accent_material,
+    materials: list,
+    accent_materials: list,
     line_radius: float,
     outline_scale: float,
 ) -> int:
     import bpy
+
+    if len(materials) != int(means.shape[0]) or len(accent_materials) != int(means.shape[0]):
+        raise ValueError("Gaussian outline materials must match Gaussian count")
 
     curve = bpy.data.curves.new("strand_gaussian_outline_curves", "CURVE")
     curve.dimensions = "3D"
@@ -472,13 +610,16 @@ def add_gaussian_outline_curves(
     curve.bevel_depth = float(line_radius)
     curve.use_path = False
     obj = bpy.data.objects.new("strand_gaussian_outlines", curve)
-    obj.data.materials.append(material)
-    obj.data.materials.append(accent_material)
+    for material, accent_material in zip(materials, accent_materials):
+        obj.data.materials.append(material)
+        obj.data.materials.append(accent_material)
     bpy.context.collection.objects.link(obj)
 
     angles = np.linspace(0.0, 2.0 * np.pi, 49, dtype=np.float32)
     ring_count = 0
-    for mean, direction, scale in zip(means, directions, scales):
+    for gaussian_index, (mean, direction, scale) in enumerate(
+        zip(means, directions, scales)
+    ):
         major, transverse_a, transverse_b = _orthogonal_frame(direction)
         radii = np.maximum(np.asarray(scale, dtype=np.float32) * float(outline_scale), 1.0e-5)
         rings = (
@@ -493,7 +634,8 @@ def add_gaussian_outline_curves(
                 + np.sin(angles)[:, None] * radius_b * axis_b[None, :]
             )
             spline = curve.splines.new("POLY")
-            spline.material_index = 1 if ring_index == 2 else 0
+            material_offset = 2 * gaussian_index
+            spline.material_index = material_offset + (1 if ring_index == 2 else 0)
             spline.points.add(points.shape[0] - 1)
             for spline_point, point in zip(spline.points, points):
                 spline_point.co = (float(point[0]), float(point[1]), float(point[2]), 1.0)
@@ -573,6 +715,28 @@ def main() -> None:
     strands = np.asarray(data["strands"], dtype=np.float32)
     widths = np.asarray(data["widths"], dtype=np.float32)
     colors = np.asarray(data["colors"], dtype=np.float32)
+    has_input_opacities = "opacities" in data.files
+    opacities = (
+        np.asarray(data["opacities"], dtype=np.float32)
+        if has_input_opacities
+        else np.empty((0, 0, 1), dtype=np.float32)
+    )
+    if has_input_opacities:
+        if opacities.shape != (strands.shape[0], strands.shape[1], 1):
+            raise RuntimeError(
+                "opacities must match strands as [N, S, 1], got "
+                f"{opacities.shape} for strands {strands.shape}"
+            )
+        if not bool(np.isfinite(opacities).all()) or bool(
+            np.logical_or(opacities < 0.0, opacities > 1.0).any()
+        ):
+            raise RuntimeError("opacities must be finite values in [0, 1]")
+    elif bool(args.use_input_opacities):
+        raise RuntimeError("--use-input-opacities requires an NPZ opacities array")
+    else:
+        opacities = np.ones(
+            (strands.shape[0], strands.shape[1], 1), dtype=np.float32
+        )
     sample_points = (
         np.asarray(data["sample_points"], dtype=np.float32)
         if "sample_points" in data.files
@@ -593,7 +757,19 @@ def main() -> None:
         if "gaussian_scales" in data.files
         else np.empty((0, 3), dtype=np.float32)
     )
-    strands, widths, colors = sample_strands(strands, widths, colors, int(args.max_strands), int(args.seed))
+    gaussian_opacities = (
+        np.asarray(data["gaussian_opacities"], dtype=np.float32).reshape(-1)
+        if "gaussian_opacities" in data.files
+        else np.empty((0,), dtype=np.float32)
+    )
+    strands, widths, colors, opacities = sample_strands(
+        strands,
+        widths,
+        colors,
+        opacities,
+        int(args.max_strands),
+        int(args.seed),
+    )
     if strands.ndim != 3 or strands.shape[-1] != 3:
         raise RuntimeError(f"strands must be [N,S,3], got {strands.shape}")
     strands = map_coordinates(strands, args.coord_system)
@@ -606,6 +782,15 @@ def main() -> None:
             raise RuntimeError(f"gaussian_means must be [N,3], got {gaussian_means.shape}")
         if gaussian_directions.shape != gaussian_means.shape or gaussian_scales.shape != gaussian_means.shape:
             raise RuntimeError("gaussian directions/scales must match gaussian means")
+        if gaussian_opacities.shape != (gaussian_means.shape[0],):
+            raise RuntimeError(
+                "gaussian_opacities must have one value per Gaussian: "
+                f"{gaussian_opacities.shape} != {(int(gaussian_means.shape[0]),)}"
+            )
+        if not bool(np.isfinite(gaussian_opacities).all()) or bool(
+            np.logical_or(gaussian_opacities < 0.0, gaussian_opacities > 1.0).any()
+        ):
+            raise RuntimeError("gaussian_opacities must be finite values in [0, 1]")
         gaussian_means = map_coordinates(gaussian_means, args.coord_system)
         gaussian_directions = map_coordinates(gaussian_directions, args.coord_system)
         if args.coord_system == "tiger_y_up":
@@ -670,16 +855,36 @@ def main() -> None:
         if "Alpha" in bsdf.inputs:
             bsdf.inputs["Alpha"].default_value = 1.0
     strand_materials = None
-    if bool(args.use_input_colors):
+    if bool(args.use_input_colors) or bool(args.use_input_opacities):
         if strands.shape[0] > 256:
-            raise RuntimeError("--use-input-colors is limited to 256 displayed strands")
+            raise RuntimeError(
+                "input color/opacity profiles are limited to 256 displayed strands"
+            )
         strand_materials = [
             make_root_tip_material(
                 name=f"strand_profile_{index:03d}",
-                root_color=strand_colors[0],
-                tip_color=strand_colors[-1],
+                root_color=(
+                    strand_colors[0]
+                    if bool(args.use_input_colors)
+                    else np.asarray(args.material_color, dtype=np.float32)
+                ),
+                tip_color=(
+                    strand_colors[-1]
+                    if bool(args.use_input_colors)
+                    else np.asarray(args.material_color, dtype=np.float32)
+                ),
                 roughness=float(args.material_roughness),
                 specular=float(args.material_specular),
+                root_opacity=(
+                    float(opacities[index, 0, 0])
+                    if bool(args.use_input_opacities)
+                    else 1.0
+                ),
+                tip_opacity=(
+                    float(opacities[index, -1, 0])
+                    if bool(args.use_input_opacities)
+                    else 1.0
+                ),
             )
             for index, strand_colors in enumerate(colors)
         ]
@@ -720,29 +925,34 @@ def main() -> None:
         if "Metallic" in sample_bsdf.inputs:
             sample_bsdf.inputs["Metallic"].default_value = 0.18
 
-    gaussian_outline_mat = bpy.data.materials.new("strand_gaussian_outline_material")
-    gaussian_outline_mat.use_nodes = True
-    gaussian_bsdf = gaussian_outline_mat.node_tree.nodes.get("Principled BSDF")
-    if gaussian_bsdf is not None:
-        gaussian_bsdf.inputs["Base Color"].default_value = tuple(
-            float(v) for v in args.gaussian_outline_color
-        ) + (1.0,)
-        gaussian_bsdf.inputs["Roughness"].default_value = 0.30
-        gaussian_bsdf.inputs["Metallic"].default_value = 0.32
-        if "Specular IOR Level" in gaussian_bsdf.inputs:
-            gaussian_bsdf.inputs["Specular IOR Level"].default_value = 0.42
-
-    gaussian_accent_mat = bpy.data.materials.new("strand_gaussian_accent_material")
-    gaussian_accent_mat.use_nodes = True
-    accent_bsdf = gaussian_accent_mat.node_tree.nodes.get("Principled BSDF")
-    if accent_bsdf is not None:
-        accent_bsdf.inputs["Base Color"].default_value = tuple(
-            float(v) for v in args.gaussian_accent_color
-        ) + (1.0,)
-        accent_bsdf.inputs["Roughness"].default_value = 0.24
-        accent_bsdf.inputs["Metallic"].default_value = 0.48
-        if "Specular IOR Level" in accent_bsdf.inputs:
-            accent_bsdf.inputs["Specular IOR Level"].default_value = 0.48
+    gaussian_outline_materials = []
+    gaussian_accent_materials = []
+    if bool(args.gaussian_outline_only):
+        if not gaussian_opacities.size:
+            raise RuntimeError(
+                "--gaussian-outline-only requires gaussian_opacities in the NPZ"
+            )
+        for index, opacity in enumerate(gaussian_opacities.tolist()):
+            gaussian_outline_materials.append(
+                make_constant_alpha_material(
+                    name=f"gaussian_outline_material_{index:04d}",
+                    color=np.asarray(args.gaussian_outline_color, dtype=np.float32),
+                    roughness=0.30,
+                    metallic=0.32,
+                    specular=0.42,
+                    opacity=float(opacity),
+                )
+            )
+            gaussian_accent_materials.append(
+                make_constant_alpha_material(
+                    name=f"gaussian_accent_material_{index:04d}",
+                    color=np.asarray(args.gaussian_accent_color, dtype=np.float32),
+                    roughness=0.24,
+                    metallic=0.48,
+                    specular=0.48,
+                    opacity=float(opacity),
+                )
+            )
 
     base_width = max(float(np.percentile(widths, 60)) * float(args.width_scale), 1.0e-5)
     chunk_size = max(int(args.curve_chunk_size), 1)
@@ -756,8 +966,8 @@ def main() -> None:
             means=gaussian_means,
             directions=gaussian_directions,
             scales=gaussian_scales,
-            material=gaussian_outline_mat,
-            accent_material=gaussian_accent_mat,
+            materials=gaussian_outline_materials,
+            accent_materials=gaussian_accent_materials,
             line_radius=float(args.gaussian_outline_width),
             outline_scale=float(args.gaussian_outline_scale),
         )
@@ -970,11 +1180,14 @@ def main() -> None:
         "highlight_backward_strands": bool(args.highlight_backward_strands),
         "highlighted_strand_count": int(highlight_mask.sum()),
         "highlight_width_scale": float(args.highlight_width_scale),
+        "input_opacities": bool(args.use_input_opacities),
+        "input_opacity_count": int(opacities.shape[0]),
         "base_width": base_width,
         "curve_chunk_size": chunk_size,
         "curve_object_count": int(curve_object_count),
         "gaussian_outline_only": bool(args.gaussian_outline_only),
         "gaussian_outline_ring_count": int(gaussian_outline_ring_count),
+        "gaussian_opacity_count": int(gaussian_opacities.shape[0]),
         "ground_plane": bool(args.ground_plane),
         "ground_depth_scale": float(resolved_ground_depth_scale),
         "ground_screen_height": float(args.ground_screen_height),

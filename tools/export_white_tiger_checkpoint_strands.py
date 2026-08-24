@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
         "--shape-detail-multiplier",
         type=float,
         default=None,
-        help="Override the checkpoint curl/frizz multiplier for diagnostic export.",
+        help="Override the checkpoint curl multiplier for diagnostic export.",
     )
     parser.add_argument(
         "--guide-residual-multiplier",
@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
         "--secondary-shape-residual-multiplier",
         type=float,
         default=None,
-        help="Override only the secondary curl/frizz residual multiplier.",
+        help="Override only the secondary curl residual multiplier.",
     )
     return parser.parse_args()
 

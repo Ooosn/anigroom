@@ -196,7 +196,6 @@ def guided_secondary_model() -> WhiteTigerStage1Model:
         guide_length_residual_scale=1.0,
         guide_direction_residual_scale=0.1,
         guide_curl_residual_scale=1.0,
-        guide_frizz_residual_scale=1.0,
     )
 
 
@@ -208,7 +207,6 @@ def test_crossing_shape_parameter_ownership_is_only_local_residual() -> None:
     assert names == {
         "secondary_geometry_residual.direction_local_raw",
         "secondary_geometry_residual.curl_radius_ratio_raw",
-        "secondary_geometry_residual.frizz_amplitude_ratio_raw",
     }
 
 
@@ -240,7 +238,6 @@ def test_model_crossing_loss_updates_shape_not_length_root_or_appearance() -> No
             guide_length_residual_scale=1.0,
             guide_direction_residual_scale=0.1,
             guide_curl_residual_scale=1.0,
-            guide_frizz_residual_scale=1.0,
         ),
     )
     optimizer.zero_grad(set_to_none=True)

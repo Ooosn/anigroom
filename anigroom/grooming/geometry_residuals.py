@@ -20,7 +20,6 @@ class DecodedGeometryResiduals:
     tip_width_logit_delta: torch.Tensor
     width_taper_log_ratio: torch.Tensor
     curl_radius_log_ratio: torch.Tensor
-    frizz_amplitude_log_ratio: torch.Tensor
     child_radius_log_ratio: torch.Tensor
     clump_strength: torch.Tensor
     direction_local: torch.Tensor
@@ -41,7 +40,6 @@ class RenderGeometryResidualField(nn.Module):
         "tip_width_ratio",
         "width_taper",
         "curl_radius_ratio",
-        "frizz_amplitude_ratio",
         "child_radius",
         "clump_strength",
     )
@@ -68,9 +66,6 @@ class RenderGeometryResidualField(nn.Module):
             tip_width_logit_delta=torch.asinh(self.tip_width_ratio_raw),
             width_taper_log_ratio=torch.asinh(self.width_taper_raw),
             curl_radius_log_ratio=torch.asinh(self.curl_radius_ratio_raw),
-            frizz_amplitude_log_ratio=torch.asinh(
-                self.frizz_amplitude_ratio_raw
-            ),
             child_radius_log_ratio=torch.asinh(self.child_radius_raw),
             clump_strength=torch.tanh(self.clump_strength_raw),
             direction_local=torch.tanh(self.direction_local_raw),

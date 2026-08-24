@@ -200,9 +200,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
     clump = groom.clump_strength.reshape(-1).float()
     child_radius = groom.child_radius.reshape(-1).float()
     curl_ratio = groom.curl_radius_ratio.reshape(-1).float()
-    frizz_ratio = groom.frizz_amplitude_ratio.reshape(-1).float()
     curl = length * curl_ratio
-    frizz = length * frizz_ratio
     luma = (
         0.2126 * groom.root_color[:, 0]
         + 0.7152 * groom.root_color[:, 1]
@@ -266,8 +264,6 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         "child_radius": summarize_tensor(child_radius),
         "curl_radius": summarize_tensor(curl),
         "curl_radius_ratio": summarize_tensor(curl_ratio),
-        "frizz": summarize_tensor(frizz),
-        "frizz_amplitude_ratio": summarize_tensor(frizz_ratio),
         "root_luma": summarize_tensor(luma),
         "gaussian_count_per_root": summarize_tensor(gaussian_count),
         "visible_gaussian_count_per_root": summarize_tensor(visible_gaussian_count),
@@ -292,7 +288,6 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         "overlength_low_clump": (length > 0.080) & (clump <= q["clump_strength"]["q10"]),
         "overlength_high_child_radius": (length > 0.080) & (child_radius >= q["child_radius"]["q90"]),
         "overlength_high_curl": (length > 0.080) & (curl >= q["curl_radius"]["q90"]),
-        "overlength_high_frizz": (length > 0.080) & (frizz >= q["frizz"]["q90"]),
         "screen_diag_p95": screen_diag >= q["screen_bbox_diag_px"]["q95"],
         "dark_screen_stroke": (luma <= 0.38)
         & (screen_diag >= q["screen_bbox_diag_px"]["q90"])
@@ -320,7 +315,6 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         "overlength_low_clump": (0.3, 0.9, 1.0),
         "overlength_high_child_radius": (0.7, 0.25, 1.0),
         "overlength_high_curl": (1.0, 0.5, 0.0),
-        "overlength_high_frizz": (0.0, 1.0, 0.65),
         "screen_diag_p95": (0.0, 0.75, 1.0),
         "dark_screen_stroke": (1.0, 0.0, 0.0),
         "visible_screen_stroke_p95": (0.25, 0.0, 1.0),
@@ -370,7 +364,6 @@ def run_diagnostics(args: argparse.Namespace) -> None:
                 "clump_strength_mean": float(clump[idx].mean().cpu()),
                 "child_radius_mean": float(child_radius[idx].mean().cpu()),
                 "curl_radius_mean": float(curl[idx].mean().cpu()),
-                "frizz_mean": float(frizz[idx].mean().cpu()),
                 "gaussian_count_mean": float(gaussian_count[idx].mean().cpu()),
                 "visible_gaussian_count_mean": float(visible_gaussian_count[idx].mean().cpu()),
                 "screen_bbox_diag_px_mean": float(screen_diag[idx].mean().cpu()),

@@ -126,7 +126,6 @@ def test_zero_residual_ignores_render_endpoint_geometry() -> None:
             )
         )
         model.groom.curl_radius_ratio_raw.fill_(20.0)
-        model.groom.frizz_amplitude_ratio_raw.fill_(20.0)
         model.groom.clump_strength_raw.fill_(20.0)
     after = effective_groom(model)
     for name in (
@@ -137,7 +136,6 @@ def test_zero_residual_ignores_render_endpoint_geometry() -> None:
         "brush_stiffness",
         "direction_local",
         "curl_radius_ratio",
-        "frizz_amplitude_ratio",
         "clump_strength",
     ):
         torch.testing.assert_close(getattr(after, name), getattr(before, name))
@@ -274,7 +272,7 @@ def test_optimizer_contains_residuals_not_legacy_geometry() -> None:
     assert id(model.groom.direction_local_raw) not in optimized_ids
 
 
-def test_disabled_curl_and_frizz_are_not_optimized() -> None:
+def test_disabled_curl_is_not_optimized() -> None:
     model = make_model()
     config = Stage1Config(
         data_root="data",
@@ -282,7 +280,6 @@ def test_disabled_curl_and_frizz_are_not_optimized() -> None:
         output_dir="output",
         render_geometry_parameterization="zero_centered_asinh_log_length_residual",
         shape_curl_scale=0.0,
-        shape_frizz_scale=0.0,
     )
     names = {
         name
@@ -291,7 +288,6 @@ def test_disabled_curl_and_frizz_are_not_optimized() -> None:
     }
 
     assert "guide_curl_radius_ratio_raw" not in names
-    assert "guide_frizz_amplitude_ratio_raw" not in names
 
 
 def test_signed_guide_turns_use_range_free_smoothness_and_magnitude_stats() -> None:
@@ -430,10 +426,6 @@ def test_structure_update_transports_residual_state_and_strict_checkpoint() -> N
         model.groom.curl_radius_ratio_raw.fill_(
             encode_positive_softplus(torch.tensor(0.17))
         )
-        model.groom.frizz_amplitude_ratio_raw.fill_(
-            encode_positive_softplus(torch.tensor(0.06))
-        )
-        model.groom.frizz_seed_phase.fill_(1.234)
     update = RootStructureUpdate(
         parent_indices=torch.tensor([0], dtype=torch.long),
         child_parent_indices=torch.tensor([0], dtype=torch.long),
@@ -447,10 +439,6 @@ def test_structure_update_transports_residual_state_and_strict_checkpoint() -> N
     assert model.render_geometry_residual.root_count == 4
     assert model.groom.length_reference.shape == (4, 1)
     assert bool((model.groom.length_reference > 0.0).all())
-    torch.testing.assert_close(
-        model.groom.frizz_seed_phase,
-        torch.full_like(model.groom.frizz_seed_phase, 1.234),
-    )
     decoded = model.groom.decode()
     torch.testing.assert_close(
         decoded.tip_width / decoded.root_width,
@@ -470,12 +458,6 @@ def test_structure_update_transports_residual_state_and_strict_checkpoint() -> N
         atol=1.0e-5,
         rtol=1.0e-5,
     )
-    torch.testing.assert_close(
-        decoded.frizz_amplitude_ratio,
-        torch.full_like(decoded.frizz_amplitude_ratio, 0.06),
-        atol=1.0e-5,
-        rtol=1.0e-5,
-    )
     for parameter in model.render_geometry_residual.parameters():
         torch.testing.assert_close(
             parameter,
@@ -492,10 +474,6 @@ def test_structure_update_transports_residual_state_and_strict_checkpoint() -> N
     torch.testing.assert_close(
         clone.groom.length_reference,
         model.groom.length_reference,
-    )
-    torch.testing.assert_close(
-        clone.groom.frizz_seed_phase,
-        model.groom.frizz_seed_phase,
     )
 
 
@@ -570,6 +548,7 @@ def test_lifecycle_rebuild_preserves_surviving_adam_rows() -> None:
         render_transition=render_transition,
         guide_transition=guide_transition,
     )
+    assert not any("frizz" in name.lower() for group in optimizer_names for name in group)
 
     bary_state = rebuilt.state[model.bary_logits]
     torch.testing.assert_close(bary_state["exp_avg"][:3], old_bary_moment[1:])
@@ -676,7 +655,6 @@ def test_guide_densification_updates_direct_direction_and_loads_strict_state() -
         "width_taper",
         "brush_stiffness",
         "curl_radius_ratio",
-        "frizz_amplitude_ratio",
         "child_radius",
     ):
         torch.testing.assert_close(

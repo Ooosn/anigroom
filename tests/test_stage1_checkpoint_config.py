@@ -5,6 +5,7 @@ import pytest
 from tools.train_white_tiger_stage1 import (
     Stage1Config,
     load_training_checkpoint,
+    require_checkpoint_optimizer_state,
     restored_lifecycle_history,
     stage1_config_from_checkpoint_mapping,
 )
@@ -27,12 +28,12 @@ def test_checkpoint_loader_retries_numpy2_pickle_on_numpy1(monkeypatch, tmp_path
             error.name = "numpy._core"
             raise error
         assert "numpy._core.multiarray" in __import__("sys").modules
-        return {"iteration": 1}
+        return {"checkpoint_version": 9, "iteration": 1}
 
     monkeypatch.setattr("tools.train_white_tiger_stage1.torch.load", fake_load)
     checkpoint = load_training_checkpoint(tmp_path / "checkpoint.pt")
 
-    assert checkpoint == {"iteration": 1}
+    assert checkpoint == {"checkpoint_version": 9, "iteration": 1}
     assert len(calls) == 2
 
 
@@ -41,35 +42,36 @@ def test_current_checkpoint_config_loads_without_migration() -> None:
     assert config.init_mesh_translation == (0.0, 0.32, 0.02)
 
 
-def test_old_checkpoint_defaults_geometry_residual_smooth_scale_to_one() -> None:
+def test_incomplete_checkpoint_config_is_rejected() -> None:
     data = checkpoint_config()
     del data["geometry_residual_smooth_scale"]
 
-    config = stage1_config_from_checkpoint_mapping(data)
+    with pytest.raises(TypeError, match="incomplete R067"):
+        stage1_config_from_checkpoint_mapping(data)
 
-    assert config.geometry_residual_smooth_scale == 1.0
+
+def test_removed_frizz_config_fields_are_rejected() -> None:
+    with pytest.raises(TypeError, match="unsupported"):
+        stage1_config_from_checkpoint_mapping(
+            checkpoint_config(
+                guide_frizz_residual_scale=1.0,
+                shape_frizz_scale=1.0,
+            )
+        )
 
 
-def test_pre_r050_checkpoint_defaults_gaussian_rgb_residual_off() -> None:
-    data = checkpoint_config()
-    for name in (
-        "gaussian_rgb_residual_support",
-        "gaussian_rgb_residual_control_points",
-        "gaussian_rgb_residual_scale",
-        "gaussian_rgb_residual_unlock_start",
-        "gaussian_rgb_residual_unlock_end",
-        "gaussian_rgb_residual_initial_multiplier",
-    ):
-        del data[name]
-
-    config = stage1_config_from_checkpoint_mapping(data)
-
-    assert config.gaussian_rgb_residual_support is False
-    assert config.gaussian_rgb_residual_control_points == 36
-    assert config.gaussian_rgb_residual_scale == 0.20
-    assert config.gaussian_rgb_residual_unlock_start == 10_000
-    assert config.gaussian_rgb_residual_unlock_end == 20_000
-    assert config.gaussian_rgb_residual_initial_multiplier == 0.0
+@pytest.mark.parametrize(
+    "checkpoint,match",
+    [
+        ({"optimizer_param_names": []}, "optimizer state"),
+        ({"optimizer": {}}, "optimizer_param_names"),
+    ],
+)
+def test_resume_optimizer_requires_complete_checkpoint_state(
+    checkpoint: dict[str, object], match: str
+) -> None:
+    with pytest.raises(RuntimeError, match=match):
+        require_checkpoint_optimizer_state(checkpoint)
 
 
 def test_unknown_checkpoint_field_is_rejected() -> None:

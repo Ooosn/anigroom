@@ -65,6 +65,18 @@ FUR_ROOT = (0.17, 0.075, 0.025)
 FUR_TIP = (0.72, 0.36, 0.075)
 SMOKED_CHAMPAGNE_FUR_ROOT = (0.145, 0.105, 0.070)
 SMOKED_CHAMPAGNE_FUR_TIP = (0.50, 0.39, 0.255)
+TOP_OPACITY_PROFILES = (
+    (1.00, 1.00),
+    (1.00, 0.55),
+    (1.00, 0.12),
+)
+COMPOSED_OPACITY_PROFILES = (
+    (1.00, 1.00),
+    (1.00, 0.80),
+    (0.95, 0.60),
+    (0.90, 0.40),
+    (1.00, 0.20),
+)
 
 
 def font_property(filename: str, *, size: float, style: str = "normal") -> font_manager.FontProperties:
@@ -109,10 +121,10 @@ class StrandSpec:
     curl_radius: float = 0.0
     curl_turns: float = 1.5
     curl_phase: float = 0.35
-    frizz: float = 0.0
-    frizz_seed: float = 1.23
     root_color: tuple[float, float, float] = FUR_ROOT
     tip_color: tuple[float, float, float] = FUR_TIP
+    root_opacity: float = 1.0
+    tip_opacity: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -205,15 +217,12 @@ def build_value_strands(
         / lengths,
         curl_turns=tensor_column([spec.curl_turns] * strand_count),
         curl_phase=tensor_column([spec.curl_phase] * strand_count),
-        frizz_amplitude_ratio=tensor_column([spec.frizz] * strand_count)
-        / lengths,
-        frizz_seed_phase=tensor_column([spec.frizz_seed] * strand_count),
         child_radius=torch.zeros((strand_count, 1), dtype=torch.float64),
         clump_strength=torch.zeros((strand_count, 1), dtype=torch.float64),
         root_color=tensor_rgb([spec.root_color] * strand_count),
         tip_color=tensor_rgb([spec.tip_color] * strand_count),
-        root_opacity=torch.ones((strand_count, 1), dtype=torch.float64),
-        tip_opacity=torch.ones((strand_count, 1), dtype=torch.float64),
+        root_opacity=tensor_column([spec.root_opacity] * strand_count),
+        tip_opacity=tensor_column([spec.tip_opacity] * strand_count),
         opacity=torch.ones((strand_count, 1), dtype=torch.float64),
     )
     strands, widths, colors, opacities = build_strands(
@@ -266,6 +275,9 @@ def build_value_strands(
         arrays["gaussian_scales"] = (
             gaussians.scales * SCENE_SCALE
         ).detach().cpu().float().numpy()
+        arrays["gaussian_opacities"] = (
+            gaussians.opacities
+        ).detach().cpu().float().numpy().reshape(-1)
         report["adaptive_segments"] = segment_count
         report["adaptive_points"] = segment_count + 1
         report["gaussian_strand_count"] = int(selected.strands.shape[0])
@@ -375,14 +387,19 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
             reference_extent=0.95,
         ),
         Panel(
-            "frizz",
-            "Micro-frizz",
-            r"$\mathbfit{a/L}$",
-            "normalized by strand length",
-            ("0", "0.035", "0.09"),
+            "opacity",
+            "Root-tip opacity",
+            r"$\mathbfit{\alpha(u)}$",
+            "",
+            ("1→1", "1→.55", "1→.12"),
             tuple(
-                replace(base, length=0.074, frizz=0.074 * value)
-                for value in (0.0, 0.035, 0.09)
+                replace(
+                    base,
+                    length=0.074,
+                    root_opacity=root_opacity,
+                    tip_opacity=tip_opacity,
+                )
+                for root_opacity, tip_opacity in TOP_OPACITY_PROFILES
             ),
             ortho_scale=1.95,
             reference_extent=0.95,
@@ -424,7 +441,7 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
         "Composed grooms",
         "",
         "multiple controls act on one editable strand model",
-        ("sleek taper", "swept plume", "ribbon wave", "compact coil", "airy frizz"),
+        ("sleek taper", "swept plume", "ribbon wave", "compact coil", "airy fade"),
         (
             replace(
                 base,
@@ -438,9 +455,10 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
                 curl_radius=0.0038,
                 curl_turns=0.72,
                 curl_phase=0.15,
-                frizz=0.0009,
                 root_color=composed_colors[0][0],
                 tip_color=composed_colors[0][1],
+                root_opacity=COMPOSED_OPACITY_PROFILES[0][0],
+                tip_opacity=COMPOSED_OPACITY_PROFILES[0][1],
             ),
             replace(
                 base,
@@ -454,9 +472,10 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
                 curl_radius=0.0062,
                 curl_turns=1.10,
                 curl_phase=0.0,
-                frizz=0.0018,
                 root_color=composed_colors[1][0],
                 tip_color=composed_colors[1][1],
+                root_opacity=COMPOSED_OPACITY_PROFILES[1][0],
+                tip_opacity=COMPOSED_OPACITY_PROFILES[1][1],
             ),
             replace(
                 base,
@@ -470,10 +489,10 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
                 curl_radius=0.0078,
                 curl_turns=1.70,
                 curl_phase=1.05,
-                frizz=0.0030,
-                frizz_seed=0.73,
                 root_color=composed_colors[2][0],
                 tip_color=composed_colors[2][1],
+                root_opacity=COMPOSED_OPACITY_PROFILES[2][0],
+                tip_opacity=COMPOSED_OPACITY_PROFILES[2][1],
             ),
             replace(
                 base,
@@ -487,10 +506,10 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
                 curl_radius=0.0105,
                 curl_turns=2.65,
                 curl_phase=0.20,
-                frizz=0.0026,
-                frizz_seed=1.61,
                 root_color=composed_colors[3][0],
                 tip_color=composed_colors[3][1],
+                root_opacity=COMPOSED_OPACITY_PROFILES[3][0],
+                tip_opacity=COMPOSED_OPACITY_PROFILES[3][1],
             ),
             replace(
                 base,
@@ -504,10 +523,10 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
                 curl_radius=0.0045,
                 curl_turns=1.25,
                 curl_phase=0.50,
-                frizz=0.0090,
-                frizz_seed=2.17,
                 root_color=composed_colors[4][0],
                 tip_color=composed_colors[4][1],
+                root_opacity=COMPOSED_OPACITY_PROFILES[4][0],
+                tip_opacity=COMPOSED_OPACITY_PROFILES[4][1],
             ),
         ),
         resolution=(4320, 700),
@@ -559,7 +578,12 @@ def build_composed_scene_arrays(
     }
     combined["root_ids"] = np.arange(combined["strands"].shape[0], dtype=np.int64)
     if gaussian_outlines:
-        for key in ("gaussian_means", "gaussian_directions", "gaussian_scales"):
+        for key in (
+            "gaussian_means",
+            "gaussian_directions",
+            "gaussian_scales",
+            "gaussian_opacities",
+        ):
             combined[key] = np.concatenate([group[key] for group in groups], axis=0)
     return combined, {
         "group_count": len(panel.specs),
@@ -660,7 +684,7 @@ def presentation_command(
             ]
         )
     else:
-        command.append("--use-input-colors")
+        command.extend(["--use-input-colors", "--use-input-opacities"])
     return command
 
 
@@ -1086,7 +1110,7 @@ def main() -> None:
     report: dict[str, object] = {
         "scope": "control panel only; no surface-frame or standalone conversion panels",
         "geometry": "formal build_strands output",
-        "sampling_order": "brush backbone -> curl/frizz -> final curve -> adaptive resampling",
+        "sampling_order": "brush backbone -> curl -> final curve -> adaptive resampling",
         "renderer": str(renderer.resolve()),
         "palette": args.palette,
         "renders": {},
