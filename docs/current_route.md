@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-08-15.
+Status date: 2026-08-25.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -140,6 +140,48 @@ The no-penetration audit remains matched. R063 and R064 are rejected ownership
 controls; R062 remains the immutable direct control. See
 `docs/r065_local_crossing_residual.md`.
 
+R066 is the accepted current learned-curl-turns baseline, with R065 retained
+as its exact parent and crossing reference. R066 keeps the R065 configuration
+snapshot unchanged and adds only a direct signed, zero-initialized primary-guide
+turn coordinate with explicit phase zero. Turns are interpolated from primary
+guides to render roots; secondary residuals do not own a turns field. The
+strict schema-8 loader rejects schema 7 without migration or aliasing.
+
+The formal R066 evidence is tied to training commit
+`46672fab4b1d6317fcdc041af067a955cb99f12b`, postprocess commit
+`d912ef2fdedbcd47ccdafacb1562fbec1d2e2d53`, and checkpoint SHA-256
+`21e0e3a66907067215ceb3f0232432c4cd9d0ef4bea0826a62ebd6e2d1410f06`. It
+passes `184` pre-training tests and `186` postprocess tests, exits zero after
+an uninterrupted 30k run, and records final train/test composite
+`33.149204/32.107651`, roots/Gaussians `471605/5391612`, peak allocation
+`20392.39 MB`, and wall time `15267.73 s`. The fixed eight-view mean is
+`33.125197` versus R065 `33.222302` (`-0.097105 dB`).
+
+R066 learned curl-only cumulative turn P50/P95 is `2.10359/20.48548` degrees
+versus its matched fixed-1.2 control `24.60057/129.16371`. Final cumulative
+P50/P95 is `15.294/68.646` versus R065 `34.179/119.282`; final arc/chord P95/P99
+is `1.01402/1.03095` versus R065 `1.03666/1.08083`. Backward strands and full
+foldbacks are zero. R066 has `217` versus R065 `198` contacts at least 45
+degrees; crossing is secondary and is not treated as solved. Final local-turn
+P99/max remains `18.973/45.387` degrees and the top extremes are
+frizz-dominated. The next target is frizz, not crossing or another turns
+change; frizz is not claimed solved.
+
+Remote R066 postprocess:
+`/home/wangyy/anigroom-r066-learned-curl-turns-runtime-20260824/postprocess/r066_protocol_20260825`.
+Remote manifest:
+`/home/wangyy/anigroom-r066-learned-curl-turns-runtime-20260824/postprocess/r066_protocol_20260825/r066_postprocess_manifest.json`.
+Local acceptance:
+`D:/RTS/_tmp/r066_acceptance_20260825/postprocess/r066_learned_curl_turns`.
+Local quantitative comparison:
+`D:/RTS/_tmp/r066_acceptance_20260825/postprocess/r066_learned_curl_turns/analysis/r066_vs_r065_metrics.json`.
+Signed guide maps are under the local acceptance tree's
+`attributes_view00`, `attributes_view09`, and `attributes_view32` directories;
+the fixed-1.2 NPZ/report are under `components`. R065 parent/crossing and its
+learned/fixed closeups remain under
+`D:/RTS/_tmp/r065_acceptance_20260815/postprocess/r065_local_crossing_residual`
+and `D:/RTS/_tmp/r065_curl_frizz_component_20260816`.
+
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
@@ -165,6 +207,8 @@ controls; R062 remains the immutable direct control. See
   `configs/r062_mesh_no_penetration_0_30k.env`
 - accepted R065 local crossing-residual configuration:
   `configs/r065_local_crossing_residual_0_30k.env`
+- accepted R066 learned-curl-turns configuration:
+  `configs/r066_learned_curl_turns_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`

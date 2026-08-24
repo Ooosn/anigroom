@@ -1,8 +1,9 @@
 # R-Series Evolution
 
-Status date: 2026-08-15. Active structural/lifecycle baseline: R043. Frozen
+Status date: 2026-08-25. Active structural/lifecycle baseline: R043. Frozen
 higher-PSNR metric control: R036. Accepted appearance and strict zero-foldback
-reference: R050. Current advanced validity/crossing baseline: R065.
+reference: R050. Exact parent/crossing reference: R065. Current learned-
+curl-turns baseline: R066.
 
 This document is the compact decision history. Detailed measurements and
 artifact paths remain in `docs/accept_line_recovery_ledger.md` and the
@@ -35,6 +36,7 @@ individual R-series documents.
 | R058 | Replaced invalid curl/frizz deformation with physical curl and independent band-limited frizz. |
 | R059 | Trained the R058 geometry under the unchanged R057 contract and removed most, but not all, sparse foldback. |
 | R060 | Made curl/frizz amplitudes relative to strand length and removed the remaining short-crown foldbacks without disabling optional shape. |
+| R066 | Replaced the fixed render-root turns coordinate with a signed, zero-initialized primary-guide turns field while preserving R065 systems and crossing ownership. |
 
 ## Recovery And Interpolation: R000-R007
 
@@ -150,7 +152,7 @@ final test metric, so
 R036 remains the metric control rather than being rewritten by the structural
 decision.
 
-## Appearance, Optional Shape, And Validity: R049-R065
+## Appearance, Optional Shape, And Validity: R049-R066
 
 | Run | Test | Decision and lasting result |
 | --- | --- | --- |
@@ -168,6 +170,7 @@ decision.
 | R063 | Add exact 3D crossing active-set loss with broad geometry ownership | Rejected ownership diagnostic. Contacts at least 45 degrees fall `230 -> 56`, but 20 sampled strands exceed `0.12` because crossing can escape through length/root changes. |
 | R064 | Restrict crossing to shared shape fields | Rejected ownership control. Contacts at least 45 degrees fall to `113`, but two primary guides stretch above `0.12` and drive 162 overlong effective roots. |
 | R065 | Route crossing only through active dense local geometry residuals | Accepted current advanced validity/crossing baseline. Contacts at least 45 degrees fall `230 -> 198`, fixed eight-view mean is `33.22230`, no audited length exceeds `0.12`, and no-penetration remains matched. |
+| R066 | Learn signed primary-guide curl turns from zero while preserving the R065 snapshot and secondary turns ownership | Accepted current learned-curl-turns baseline. Training commit `46672fab4b1d6317fcdc041af067a955cb99f12b`; postprocess commit `d912ef2fdedbcd47ccdafacb1562fbec1d2e2d53`; checkpoint SHA `21e0e3a66907067215ceb3f0232432c4cd9d0ef4bea0826a62ebd6e2d1410f06`. `184` pre-training and `186` postprocess tests pass; uninterrupted 30k exits 0. Final train/test `33.149204/32.107651`; fixed mean `33.125197` versus R065 `33.222302` (`-0.097105 dB`); roots/Gaussians `471605/5391612`; peak `20392.39 MB`; wall `15267.73 s`. Learned curl-only cumulative P50/P95 is `2.10359/20.48548` degrees versus fixed 1.2 `24.60057/129.16371`; final cumulative P50/P95 is `15.294/68.646` versus R065 `34.179/119.282`; arc/chord P95/P99 is `1.01402/1.03095` versus `1.03666/1.08083`; backward/foldback are zero. Crossing `217` versus `198` is secondary; rare local-turn P99/max `18.973/45.387` remains frizz-dominated, so frizz is next and is not claimed solved. | `docs/r066_learned_curl_turns.md`; local QA `D:/RTS/_tmp/r066_acceptance_20260825/postprocess/r066_learned_curl_turns`; report `D:/RTS/_tmp/r066_acceptance_20260825/postprocess/r066_learned_curl_turns/analysis/r066_vs_r065_metrics.json` |
 
 ## Effective Findings
 
@@ -197,10 +200,12 @@ The strongest reusable findings are:
 R043 remains the base structural/lifecycle route and does not enable
 curl/frizz or Gaussian-level RGB residual. R050 is the accepted appearance and
 near-straight zero-foldback checkpoint built on the smooth R049 geometry.
-R065 is the current advanced-geometry/appearance/validity/crossing baseline. It
-preserves R060's length-relative optional shape, R061's Gaussian-only
-high-frequency appearance outlet, and R062's no-penetration constraint, while
-adding a local-residual-only exact crossing route. These roles remain distinct:
-R043 for independent-root lifecycle, R050 for near-straight appearance and
-structure, R059 for the absolute-amplitude control, R062 for the direct
-no-crossing control, and R065 for subsequent controlled validity work.
+R065 remains the exact advanced-geometry/appearance/validity/crossing parent
+and crossing reference. R066 is the current learned-curl-turns baseline: it
+preserves the R065 snapshot and strict systems while replacing only the fixed
+render-root turns coordinate with the primary-guide signed field. These roles
+remain distinct: R043 for independent-root lifecycle, R050 for near-straight
+appearance and structure, R059 for the absolute-amplitude control, R062 for
+the direct no-penetration control, R065 for exact crossing comparison, and R066
+for learned curl turns. R066's remaining rare local-turn tail is frizz-led;
+frizz remains the next controlled target and is not solved here.
