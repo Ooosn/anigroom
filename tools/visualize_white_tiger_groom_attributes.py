@@ -70,6 +70,78 @@ def _normalize_values(values: np.ndarray, lo: float | None = None, hi: float | N
     return np.clip((values - lo) / (hi - lo), 0.0, 1.0).astype(np.float32), float(lo), float(hi)
 
 
+def summarize_attribute_values(values: np.ndarray) -> dict[str, float]:
+    finite = np.asarray(values).reshape(-1)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        raise RuntimeError("attribute statistics require at least one finite value")
+    return {
+        "mean": float(np.mean(finite)),
+        "std": float(np.std(finite)),
+        "min": float(np.min(finite)),
+        "p50": float(np.quantile(finite, 0.50)),
+        "p90": float(np.quantile(finite, 0.90)),
+        "p95": float(np.quantile(finite, 0.95)),
+        "p98": float(np.quantile(finite, 0.98)),
+        "max": float(np.max(finite)),
+    }
+
+
+def project_primary_guide_curl_turns(
+    guide_points_local: torch.Tensor,
+    guide_curl_turns: torch.Tensor,
+    *,
+    log_scale: torch.Tensor,
+    translation: torch.Tensor,
+    viewmat: torch.Tensor,
+    k: torch.Tensor,
+    width: int,
+    height: int,
+    mesh_depth: torch.Tensor | None = None,
+    mesh_depth_kernel: int = 1,
+    mesh_depth_abs_tolerance: float = 0.0,
+    mesh_depth_rel_tolerance: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Project primary-guide points and apply the root map visibility rules."""
+
+    if guide_points_local.ndim != 2 or guide_points_local.shape[-1] != 3:
+        raise ValueError(
+            "guide_points_local must have shape [guide_count, 3], got "
+            f"{tuple(guide_points_local.shape)}"
+        )
+    points_world = (
+        guide_points_local * torch.exp(log_scale).reshape(1, 1)
+        + translation.reshape(1, 3)
+    )
+    values = guide_curl_turns.reshape(-1)
+    if values.shape != (points_world.shape[0],):
+        raise ValueError(
+            "guide_curl_turns must have one value per guide: "
+            f"{tuple(values.shape)} != {(int(points_world.shape[0]),)}"
+        )
+    xy, depth = stage1.project_points(points_world, viewmat, k)
+    visible = (
+        (depth > 1.0e-6)
+        & (xy[:, 0] >= 0.0)
+        & (xy[:, 0] < int(width))
+        & (xy[:, 1] >= 0.0)
+        & (xy[:, 1] < int(height))
+    )
+    if mesh_depth is not None:
+        sampled_mesh_depth = stage1.sample_depth_nearest(
+            mesh_depth,
+            xy,
+            kernel_size=int(mesh_depth_kernel),
+        )
+        tolerance = float(mesh_depth_abs_tolerance) + depth.abs() * float(
+            mesh_depth_rel_tolerance
+        )
+        visible = visible & torch.isfinite(sampled_mesh_depth) & (
+            depth <= sampled_mesh_depth + tolerance
+        )
+    return points_world, xy, values, visible
+
+
 def _overlay_points(
     base: Image.Image,
     xy: np.ndarray,
@@ -277,12 +349,50 @@ def main() -> None:
     direction_np = direction[ids].detach().cpu().numpy()
     normal_np = normals[ids].detach().cpu().numpy()
 
+    if not model.guide_enabled():
+        raise RuntimeError(
+            "primary-guide signed curl-turn visualization requires primary guides"
+        )
+    (
+        _guide_points_world,
+        guide_xy,
+        guide_turns,
+        guide_visible,
+    ) = project_primary_guide_curl_turns(
+        model.guide_points_local,
+        model.guide_curl_turns_raw,
+        log_scale=model.log_scale,
+        translation=model.translation,
+        viewmat=viewmat,
+        k=k,
+        width=width,
+        height=height,
+        mesh_depth=(mesh_depth.depth if torch.cuda.is_available() else None),
+        mesh_depth_kernel=int(config.mesh_depth_local_kernel),
+        mesh_depth_abs_tolerance=float(config.mesh_depth_abs_tolerance),
+        mesh_depth_rel_tolerance=float(config.mesh_depth_rel_tolerance),
+    )
+    guide_ids = torch.nonzero(guide_visible, as_tuple=False).reshape(-1)
+    guide_xy_np = guide_xy[guide_ids].detach().cpu().numpy()
+    guide_turns_all_np = guide_turns.detach().cpu().numpy()
+    guide_turns_visible_np = guide_turns[guide_ids].detach().cpu().numpy()
+
     if args.base_image:
         base_path = Path(args.base_image)
     else:
         default_base = checkpoint_path.parent / f"diagnostics_006000_view{int(args.view):02d}" / f"view{int(args.view):02d}_pred.png"
         base_path = default_base
     base = _read_base(base_path, width, height)
+
+    guide_map_path = output_dir / f"view{int(args.view):02d}_primary_guide_curl_turns.png"
+    _overlay_points(
+        base,
+        guide_xy_np,
+        guide_turns_visible_np,
+        title=f"view{int(args.view):02d} primary guide curl turns",
+        out_path=guide_map_path,
+        signed=True,
+    )
 
     values = {
         "length": groom.length.reshape(-1)[ids].detach().cpu().numpy(),
@@ -327,19 +437,15 @@ def main() -> None:
         )
         outputs.append((name.replace("_", " "), path))
 
-    stats = {}
-    for name, value in values.items():
-        finite = value[np.isfinite(value)]
-        stats[name] = {
-            "mean": float(np.mean(finite)),
-            "std": float(np.std(finite)),
-            "min": float(np.min(finite)),
-            "p50": float(np.quantile(finite, 0.50)),
-            "p90": float(np.quantile(finite, 0.90)),
-            "p95": float(np.quantile(finite, 0.95)),
-            "p98": float(np.quantile(finite, 0.98)),
-            "max": float(np.max(finite)),
-        }
+    stats = {
+        name: summarize_attribute_values(value)
+        for name, value in values.items()
+    }
+    guide_visible_stats = (
+        summarize_attribute_values(guide_turns_visible_np)
+        if guide_turns_visible_np.size
+        else None
+    )
     (output_dir / f"view{int(args.view):02d}_groom_attribute_stats.json").write_text(
         json.dumps(
             {
@@ -347,6 +453,15 @@ def main() -> None:
                 "view": int(args.view),
                 "visible_root_count": int(ids.numel()),
                 "stats": stats,
+                "primary_guide": {
+                    "guide_count": int(guide_turns_all_np.size),
+                    "visible_guide_count": int(guide_ids.numel()),
+                    "curl_turns_map": str(guide_map_path),
+                    "curl_turns_stats": {
+                        "all_guides": summarize_attribute_values(guide_turns_all_np),
+                        "visible_guides": guide_visible_stats,
+                    },
+                },
             },
             indent=2,
         )

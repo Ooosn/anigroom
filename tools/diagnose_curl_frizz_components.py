@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Decompose a fixed checkpoint into backbone, curl-only, frizz-only, "
-            "primary-detail, and final-detail strand geometry."
+            "fixed-turn curl, primary-detail, and final-detail strand geometry."
         )
     )
     parser.add_argument("--checkpoint", required=True)
@@ -60,6 +60,17 @@ def select_detail(groom, *, curl: bool, frizz: bool):
             if frizz
             else torch.zeros_like(groom.frizz_amplitude_ratio)
         ),
+    )
+
+
+def fixed_turn_curl_only(groom, *, turns: float = 1.2):
+    """Keep the learned curl field but replace only its signed turns coordinate."""
+
+    curl_only = select_detail(groom, curl=True, frizz=False)
+    return replace(
+        curl_only,
+        curl_turns=torch.full_like(curl_only.curl_turns, float(turns)),
+        curl_phase=torch.zeros_like(curl_only.curl_phase),
     )
 
 
@@ -219,6 +230,7 @@ def main() -> None:
         variants = {
             "backbone": select_detail(final_groom, curl=False, frizz=False),
             "curl_only": select_detail(final_groom, curl=True, frizz=False),
+            "curl_fixed_1p2_turns": fixed_turn_curl_only(final_groom),
             "frizz_only": select_detail(final_groom, curl=False, frizz=True),
             "primary_curl_frizz": primary_detail_groom,
             "final_curl_frizz": final_groom,
@@ -239,15 +251,29 @@ def main() -> None:
             strands_np = strands.detach().cpu().numpy().astype(np.float32)
             variant_strands[name] = strands_np
             variant_metrics[name] = strand_metrics(strands_np)
+            variant_widths_np = widths.detach().cpu().numpy().astype(np.float32)
+            variant_colors_np = colors.detach().cpu().numpy().astype(np.float32)
+            variant_opacities_np = opacities.detach().cpu().numpy().astype(np.float32)
             if widths_np is None:
-                widths_np = widths.detach().cpu().numpy().astype(np.float32)
-                colors_np = colors.detach().cpu().numpy().astype(np.float32)
-                opacities_np = opacities.detach().cpu().numpy().astype(np.float32)
+                widths_np = variant_widths_np
+                colors_np = variant_colors_np
+                opacities_np = variant_opacities_np
+            elif not (
+                np.array_equal(widths_np, variant_widths_np)
+                and np.array_equal(colors_np, variant_colors_np)
+                and np.array_equal(opacities_np, variant_opacities_np)
+            ):
+                raise RuntimeError(
+                    f"variant {name} changed non-turn strand attributes"
+                )
 
         root_ids = subset_cpu.numpy().astype(np.int64)
         backbone = variant_strands["backbone"]
         curl_displacement = displacement_metrics(
             variant_strands["curl_only"], backbone
+        )
+        fixed_curl_displacement = displacement_metrics(
+            variant_strands["curl_fixed_1p2_turns"], backbone
         )
         frizz_displacement = displacement_metrics(
             variant_strands["frizz_only"], backbone
@@ -257,6 +283,10 @@ def main() -> None:
         )
         curl_turn_excess = (
             variant_metrics["curl_only"]["cumulative_turn_degrees"]
+            - variant_metrics["backbone"]["cumulative_turn_degrees"]
+        )
+        fixed_curl_turn_excess = (
+            variant_metrics["curl_fixed_1p2_turns"]["cumulative_turn_degrees"]
             - variant_metrics["backbone"]["cumulative_turn_degrees"]
         )
         frizz_turn_excess = (
@@ -269,6 +299,10 @@ def main() -> None:
         )
         masks = {
             "top_curl_turn_excess": top_mask(curl_turn_excess, args.top_count),
+            "top_curl_fixed_1p2_turn_excess": top_mask(
+                fixed_curl_turn_excess,
+                args.top_count,
+            ),
             "top_frizz_turn_excess": top_mask(frizz_turn_excess, args.top_count),
             "top_final_turn_excess": top_mask(final_turn_excess, args.top_count),
             "top_final_displacement": top_mask(
@@ -349,6 +383,10 @@ def main() -> None:
                 name: quantiles(values)
                 for name, values in curl_displacement.items()
             },
+            "curl_fixed_1p2_turns": {
+                name: quantiles(values)
+                for name, values in fixed_curl_displacement.items()
+            },
             "frizz_only": {
                 name: quantiles(values)
                 for name, values in frizz_displacement.items()
@@ -360,8 +398,28 @@ def main() -> None:
         },
         "turn_excess_degrees": {
             "curl_only": quantiles(curl_turn_excess),
+            "curl_fixed_1p2_turns": quantiles(fixed_curl_turn_excess),
             "frizz_only": quantiles(frizz_turn_excess),
             "final_curl_frizz": quantiles(final_turn_excess),
+        },
+        "variant_controls": {
+            "curl_fixed_1p2_turns": {
+                "curl_turns": 1.2,
+                "curl_phase": 0.0,
+                "frizz_amplitude_ratio": 0.0,
+                "length_matches_final": bool(
+                    np.array_equal(
+                        variants["curl_fixed_1p2_turns"].length.detach().cpu().numpy(),
+                        final_groom.length.detach().cpu().numpy(),
+                    )
+                ),
+                "curl_radius_ratio_matches_final": bool(
+                    np.array_equal(
+                        variants["curl_fixed_1p2_turns"].curl_radius_ratio.detach().cpu().numpy(),
+                        final_groom.curl_radius_ratio.detach().cpu().numpy(),
+                    )
+                ),
+            }
         },
         "attributes": {
             name: quantiles(values) for name, values in attributes.items()
