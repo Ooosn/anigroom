@@ -34,4 +34,33 @@ median/P95 time, peak allocation, scalar/output errors, and gradient errors:
 python tools/benchmark_r068_zero_curl_fastpath.py
 ```
 
-The benchmark is a local CUDA CLI and is not launched through HGC here.
+The benchmark CLI is exercised on both the local RTX 4080 SUPER and the held
+HGC H100 allocation; neither run changes a checkpoint or training state.
+
+## Measured Benchmarks
+
+The exact R067-size benchmark uses `471673` roots, `64` samples, five warmup
+repetitions, and twenty measured forward/backward repetitions.
+
+| Device | Existing zero-radius full path median / P95 | Explicit disabled median / P95 | Peak allocation full / disabled |
+| --- | ---: | ---: | ---: |
+| RTX 4080 SUPER | `232.428 / 234.039 ms` | `32.585 / 33.218 ms` | `9.238 / 4.569 GB` |
+| H100 80GB HBM3 | `52.556 / 52.714 ms` | `7.601 / 7.635 ms` | `9.221 / 4.558 GB` |
+
+Both devices report exact zero scalar, output, length-gradient,
+direction-gradient, and brush-stiffness-gradient differences. The disabled
+path intentionally has no curl-field gradient; in formal training the same
+fields are already frozen behind an exact zero shape-detail multiplier.
+
+At the H100 median, the avoided work is `44.955 ms` for each exact-zero
+iteration. Applying that measured kernel delta to the first `14000` frozen
+iterations gives an upper-bound estimate of `629.4 s` (`10.5 min`) saved. It
+does not accelerate the post-unlock phase and therefore cannot by itself
+explain or remove the full R055-to-R067 wall-time increase.
+
+## Decision Boundary
+
+This is a small, exact, and directly causal optimization worth retaining as an
+isolated candidate. It is not accepted into the R067 baseline and no formal
+30k run is launched until the broader module-cost review decides whether the
+current advanced-geometry route remains the intended default.
