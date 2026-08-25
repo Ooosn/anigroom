@@ -62,7 +62,11 @@ explain or remove the full R055-to-R067 wall-time increase.
 
 ## Decision Boundary
 
-This is a small, exact, and directly causal optimization worth retaining as an
-isolated candidate. It is not accepted into the R067 baseline and no formal
-30k run is launched until the broader module-cost review decides whether the
-current advanced-geometry route remains the intended default.
+This exact fast path is accepted as part of R068. In the formal run it is
+combined only with removal of crossing from default training; all other R067
+settings are fixed. The full run finishes in `11885.196 s` versus R067
+`15775.028 s`, while fixed eight-view composite improves `0.024046 dB` and
+matched strand structure remains stable. The aggregate runtime gain also
+includes removal of crossing, so the formal result is not attributed to this
+kernel alone. The packed K32 candidate remains rejected because its smaller
+isolated gain requires more code and memory.

@@ -1,12 +1,13 @@
 # Current Route
 
-Status date: 2026-08-25.
+Status date: 2026-08-26.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
 
-R067 is the accepted current single-sample method baseline. R066 remains the
-learned-turn parent and R065 remains the exact crossing reference. R043 remains
+R068 is the accepted current single-sample method baseline. R067 remains the
+exact no-frizz/crossing-enabled control, R066 remains the learned-turn parent,
+and R065 remains the earlier exact crossing reference. R043 remains
 the underlying structural/lifecycle baseline, R050 remains the accepted
 Gaussian-RGB appearance reference, and R062 remains the direct no-penetration
 control. These roles are distinct and are not interchangeable.
@@ -188,7 +189,7 @@ learned/fixed closeups remain under
 `D:/RTS/_tmp/r065_acceptance_20260815/postprocess/r065_local_crossing_residual`
 and `D:/RTS/_tmp/r065_curl_frizz_component_20260816`.
 
-R067 is the accepted current single-sample method baseline. It removes frizz
+R067 is the frozen crossing-enabled no-frizz control. It removes frizz
 cleanly from the differentiable reconstruction path while retaining the R066
 learned-turn parent, the R065 crossing ownership, Gaussian RGB appearance,
 clean-flow initialization, lifecycle, and mesh-SDF systems. The core
@@ -245,6 +246,42 @@ Its matched R065 comparison is validity evidence, not an improvement claim.
 Paper readiness, including the remaining external/generalization evidence, is recorded in
 `docs/paper_readiness_20260825.md`.
 
+R068 is the accepted current single-sample method baseline. It is an exact
+child of R067 that disables crossing support, weight, and refresh while adding
+an output- and active-gradient-equivalent fast path for the exact-zero curl
+phase. No schedule, K, loss outside crossing, resolution, lifecycle, SDF,
+learning rate, root initialization, or capacity setting changes.
+
+The uninterrupted from-zero 30k H100 run uses training commit
+`3dfff62e621a91ba0d30764fdf780b2d1e247672`; validator-only commit `a7f3601`
+corrects the post-run distinction between train/test metric rows and lifecycle
+JSON rows. Final train/test composite is `33.117367/32.083080`; fixed eight-view
+mean is `33.101055`. Roots/pre-step Gaussians are `471482/5380775`, peak
+allocation is `15869.80 MB`, and wall time is `11885.196 s`. Relative to R067,
+R068 is `24.66%` faster, uses `19.95%` less peak allocated memory, and improves
+fixed-view mean by `0.024046 dB` without reducing capacity materially.
+
+The matched 100k-strand audit keeps backward/foldback at zero. Local relative
+length P95 changes `0.082026 -> 0.081259`, direction P95 changes
+`11.4372 -> 11.4079` degrees, and local-turn max changes `3.6002 -> 4.3594`
+degrees. Canonical side, opposite-side, and top/front assets show no crossing,
+curl, or length regression. Exact crossing pairs change `14872 -> 14983`;
+contact-axis pairs at least 45 degrees change `171 -> 208`, while chord-axis
+pairs at least 45 degrees remain `157`. This small offline diagnostic change
+does not justify default crossing training cost. Crossing remains an offline
+diagnostic or optional refinement, not an active R068 loss.
+
+Remote R068 checkpoint, validation, and postprocess:
+
+- `/home/wangyy/anigroom-r068-no-crossing-zero-curl-runtime-20260826/outputs/r068_no_crossing_zero_curl_0_30k_h100_20260826/checkpoint_030000.pt`
+- `/home/wangyy/anigroom-r068-no-crossing-zero-curl-runtime-20260826/contracts/r068_postrun_strict_validation.json`
+- `/home/wangyy/anigroom-r068-no-crossing-zero-curl-runtime-20260826/postprocess/r068_protocol_20260826/r068_postprocess_manifest.json`
+
+Local acceptance root:
+`D:/RTS/_tmp/r068_acceptance_20260826/postprocess/r068_no_crossing_zero_curl`.
+See `docs/r068_no_crossing_zero_curl.md` and
+`docs/paper_readiness_20260826.md`.
+
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
@@ -274,6 +311,8 @@ Paper readiness, including the remaining external/generalization evidence, is re
   `configs/r066_learned_curl_turns_0_30k.env`
 - accepted R067 no-frizz configuration:
   `configs/r067_no_frizz_0_30k.env`
+- accepted R068 no-crossing configuration:
+  `configs/r068_no_crossing_zero_curl_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
@@ -307,11 +346,11 @@ The active explicit groom fields are:
 - root and tip color
 - root and tip opacity
 
-The current R067 method baseline has no differentiable frizz-amplitude field or
+The current R068 method baseline has no differentiable frizz-amplitude field or
 persistent frizz seed. `frizz_backbone` is retained only as a standalone
 procedural post-edit utility and is disconnected from reconstruction. The
 historical R043-R066 frizz-bearing contracts remain evidence and parent
-references, not current R067 state.
+references, not current R068 state.
 
 Brush stiffness controls one quadratic normal-to-groom transition while
 preserving the root, tip, straight length, and 3D endpoint direction. The
@@ -323,7 +362,7 @@ and turns plus independent band-limited frizz. No legacy formula, normal-mode
 switch, or checkpoint alias remains. R060 further decodes the two physical
 amplitudes from current strand length, so equal controls produce equal
 normalized geometry across short and long fur. Curl stays active in the current
-R067 method baseline, while frizz is absent from its differentiable state. The
+R068 method baseline, while frizz is absent from its differentiable state. The
 active route has one strand per render root
 (`child_count=1`); density comes from independent render roots and their finite
 lifecycle, not deterministic child expansion.
@@ -404,7 +443,7 @@ omits it.
 The retired directional decomposition and old gravity/sag controls are no
 longer present. R043 uses only length, normalized 3D endpoint direction, and
 guide-owned brush stiffness for the ordinary base centerline. Its historical
-frizz and clump controls remain evidence only for current R067; R067 retains
+frizz and clump controls remain evidence only for current R068; R068 retains
 active curl and removes frizz from the differentiable reconstruction path.
 R035 keeps R034's accepted segment repair, positive unbounded guide length, and
 semantic opacity. It replaces direct render-root width learning with a complete
