@@ -107,7 +107,7 @@ $$
 
 and the envelope preserves the root position and root tangent. The
 root-to-tip opacity profile is an appearance control. For curve presentation,
-the renderer uses the curve's root-to-tip `Parametric` coordinate to interpolate
+the renderer uses the curve's root-to-tip Hair Info `Intercept` coordinate to interpolate
 opacity in a shader mix between Transparent BSDF and the existing Principled
 BSDF, preserving color and BRDF response. Gaussian presentation uses the
 transported Gaussian opacities in the corresponding transparent/Principled mix.

@@ -67,8 +67,8 @@ SMOKED_CHAMPAGNE_FUR_ROOT = (0.145, 0.105, 0.070)
 SMOKED_CHAMPAGNE_FUR_TIP = (0.50, 0.39, 0.255)
 TOP_OPACITY_PROFILES = (
     (1.00, 1.00),
-    (1.00, 0.55),
-    (1.00, 0.12),
+    (1.00, 0.35),
+    (1.00, 0.00),
 )
 COMPOSED_OPACITY_PROFILES = (
     (1.00, 1.00),
@@ -391,7 +391,7 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
             "Root-tip opacity",
             r"$\mathbfit{\alpha(u)}$",
             "",
-            ("1→1", "1→.55", "1→.12"),
+            ("1→1", "1→.35", "1→0"),
             tuple(
                 replace(
                     base,
@@ -616,6 +616,7 @@ def presentation_command(
     ground_wave_frequency: float = 0.0,
     ground_wave_phase: float = 0.0,
     ground_base_z: float | None = None,
+    use_input_opacities: bool = True,
     ground_color: tuple[float, float, float] = (0.20, 0.20, 0.20),
     world_strength: float = 0.85,
     key_light_type: str = "area",
@@ -684,7 +685,9 @@ def presentation_command(
             ]
         )
     else:
-        command.extend(["--use-input-colors", "--use-input-opacities"])
+        command.append("--use-input-colors")
+        if use_input_opacities:
+            command.append("--use-input-opacities")
     return command
 
 
@@ -697,6 +700,7 @@ def render_panel(
     render_samples: int,
     final_sampling: bool,
     gaussian_outlines: bool = False,
+    use_input_opacities: bool = False,
 ) -> dict[str, object]:
     value_reports: list[dict[str, object]] = []
     if panel.target_x_shifts and len(panel.target_x_shifts) != len(panel.specs):
@@ -742,6 +746,7 @@ def render_panel(
             ground_depth_scale=0.55,
             ground_screen_height=0.10,
             gaussian_outlines=gaussian_outlines,
+            use_input_opacities=use_input_opacities,
         )
         completed = subprocess.run(command, capture_output=True, text=True)
         if completed.returncode != 0:
@@ -813,6 +818,7 @@ def render_composed_scene(
             fill_light_energy=110.0,
             fill_light_size=8.0,
             shadow_sun_energy=0.0,
+            use_input_opacities=True,
         )
         completed = subprocess.run(command, capture_output=True, text=True)
         if completed.returncode != 0:
@@ -1088,6 +1094,7 @@ def main() -> None:
                 work_dir=args.work_dir,
                 render_samples=args.render_samples,
                 final_sampling=False,
+                use_input_opacities=(panel.key == "opacity"),
             )
             (args.work_dir / "render_report.json").write_text(
                 json.dumps(panel_report, indent=2) + "\n",
@@ -1142,6 +1149,7 @@ def main() -> None:
                 work_dir=args.work_dir,
                 render_samples=args.render_samples,
                 final_sampling=False,
+                use_input_opacities=(panel.key == "opacity"),
             )
         report["renders"]["composed"] = render_composed_scene(
             composed,

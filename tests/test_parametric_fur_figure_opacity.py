@@ -4,6 +4,7 @@ import inspect
 
 import numpy as np
 import pytest
+import paper.method.render_parametric_groom_blender as blender_renderer
 
 from paper.method.render_parametric_fur_figure import (
     COMPOSED_CAMERA_OFFSET,
@@ -50,7 +51,7 @@ def test_figure_specs_replace_frizz_with_three_opacity_profiles() -> None:
     ]
     opacity = panels[6]
     assert opacity.title == "Root-tip opacity"
-    assert opacity.labels == ("1→1", "1→.55", "1→.12")
+    assert opacity.labels == ("1→1", "1→.35", "1→0")
     assert tuple((spec.root_opacity, spec.tip_opacity) for spec in opacity.specs) == TOP_OPACITY_PROFILES
     assert "frizz=" not in inspect.getsource(control_panels)
     assert "frizz=" not in inspect.getsource(composed_panel)
@@ -114,11 +115,14 @@ def test_sample_strands_transports_opacity_rows_with_sampling() -> None:
 
 def test_alpha_node_metadata_requires_true_transparent_mix() -> None:
     root_tip = root_tip_alpha_node_metadata(1.0, 0.23)
-    assert root_tip["driver_node"] == "ShaderNodeNewGeometry"
-    assert root_tip["driver_output"] == "Parametric"
-    assert root_tip["driver_semantics"] == "curve intercept from root (0) to tip (1)"
+    assert root_tip["driver_node"] == "ShaderNodeHairInfo"
+    assert root_tip["driver_output"] == "Intercept"
+    assert root_tip["driver_semantics"] == "Hair Info intercept from root (0) to tip (1)"
     assert root_tip["hair_info_node"] == "ShaderNodeHairInfo"
     assert root_tip["hair_info_output"] == "Intercept"
+    assert root_tip["color_alpha_shared_driver"] is True
+    assert "Parametric" not in root_tip
+    assert "ShaderNodeNewGeometry" not in root_tip
     assert root_tip["mapping_node"] == "ShaderNodeMapRange"
     assert root_tip["mapping_to"] == [1.0, 0.23]
     assert root_tip["transparent_node"] == "ShaderNodeBsdfTransparent"
@@ -131,6 +135,16 @@ def test_alpha_node_metadata_requires_true_transparent_mix() -> None:
 
     with pytest.raises(ValueError, match=r"in \[0, 1\]"):
         root_tip_alpha_node_metadata(1.01, 0.5)
+
+    alpha_source = inspect.getsource(blender_renderer._connect_alpha_surface)
+    curve_source = inspect.getsource(blender_renderer.add_strand_curve_objects)
+    material_source = inspect.getsource(blender_renderer.make_root_tip_material)
+    assert "intercept_socket" in alpha_source
+    assert 'links.new(intercept_socket, alpha_map.inputs["Value"])' in alpha_source
+    assert "ShaderNodeNewGeometry" not in alpha_source
+    assert "Parametric" not in alpha_source
+    assert 'bpy.data.hair_curves.new' in curve_source
+    assert 'hair_info.outputs["Intercept"]' in material_source
 
 
 def test_frozen_layout_and_presentation_command_are_unchanged_except_opacity_flag() -> None:

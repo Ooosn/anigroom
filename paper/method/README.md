@@ -30,7 +30,7 @@ are not paper assets.
 
 The accepted figure's detail appearance control is an honest root-to-tip alpha
 profile. Its differentiable centerline is the brush backbone plus signed curl.
-Curve presentation maps the curve's root-to-tip `Parametric` coordinate to a
+Curve presentation maps the curve's root-to-tip Hair Info `Intercept` coordinate to a
 Transparent/Principled shader mix; Gaussian presentation uses the transported
 Gaussian opacities in the corresponding transparent mix.
 

@@ -262,35 +262,47 @@ def add_strand_curve_objects(
     chunk_size: int,
     name_prefix: str,
     strand_materials: list | None = None,
+    use_native_hair_intercept: bool = False,
 ) -> int:
     import bpy
 
     object_count = 0
     for chunk_start in range(0, int(strands.shape[0]), chunk_size):
         chunk_end = min(chunk_start + chunk_size, int(strands.shape[0]))
-        curve = bpy.data.curves.new(
-            f"{name_prefix}_curves_{chunk_start:07d}", "CURVE"
-        )
-        curve.dimensions = "3D"
-        curve.resolution_u = 2
-        curve.bevel_resolution = 2
-        curve.bevel_depth = base_width
-        curve.use_path = False
+        chunk_strands = strands[chunk_start:chunk_end]
+        chunk_widths = widths[chunk_start:chunk_end]
+        native_hair = strand_materials is not None and use_native_hair_intercept
+        if not native_hair:
+            curve = bpy.data.curves.new(
+                f"{name_prefix}_curves_{chunk_start:07d}", "CURVE"
+            )
+            curve.dimensions = "3D"
+            curve.resolution_u = 2
+            curve.bevel_resolution = 2
+            curve.bevel_depth = base_width
+            curve.use_path = False
+        else:
+            # Hair Info.Intercept is evaluated along native hair curves; retain
+            # the legacy path when opacity interpolation is not active.
+            curve = bpy.data.hair_curves.new(
+                f"{name_prefix}_curves_{chunk_start:07d}"
+            )
+            curve.add_curves([int(strand.shape[0]) for strand in chunk_strands])
         obj = bpy.data.objects.new(f"{name_prefix}_{chunk_start:07d}", curve)
         if strand_materials is None:
             obj.data.materials.append(material)
         else:
             for strand_material in strand_materials[chunk_start:chunk_end]:
                 obj.data.materials.append(strand_material)
+            if native_hair:
+                material_indices = curve.attributes.new(
+                    "material_index", "INT", "CURVE"
+                )
+                for local_index in range(chunk_end - chunk_start):
+                    material_indices.data[local_index].value = local_index
         bpy.context.collection.objects.link(obj)
 
-        for local_index, (strand, width) in enumerate(
-            zip(strands[chunk_start:chunk_end], widths[chunk_start:chunk_end])
-        ):
-            spl = curve.splines.new("POLY")
-            if strand_materials is not None:
-                spl.material_index = local_index
-            spl.points.add(strand.shape[0] - 1)
+        for local_index, (strand, width) in enumerate(zip(chunk_strands, chunk_widths)):
             radius = np.clip(
                 width.reshape(-1)
                 * width_scale
@@ -299,14 +311,24 @@ def add_strand_curve_objects(
                 0.05,
                 3.0 * radius_multiplier,
             )
-            for point, co, rad in zip(spl.points, strand, radius):
-                point.co = (
-                    float(co[0]),
-                    float(co[1]),
-                    float(co[2]),
-                    1.0,
-                )
-                point.radius = float(rad)
+            if not native_hair:
+                spl = curve.splines.new("POLY")
+                if strand_materials is not None:
+                    spl.material_index = local_index
+                spl.points.add(strand.shape[0] - 1)
+                for point, co, rad in zip(spl.points, strand, radius):
+                    point.co = (
+                        float(co[0]),
+                        float(co[1]),
+                        float(co[2]),
+                        1.0,
+                    )
+                    point.radius = float(rad)
+            else:
+                hair_curve = curve.curves[local_index]
+                for point, co, rad in zip(hair_curve.points, strand, radius):
+                    point.position = (float(co[0]), float(co[1]), float(co[2]))
+                    point.radius = float(rad * base_width)
         object_count += 1
     return object_count
 
@@ -323,11 +345,12 @@ def root_tip_alpha_node_metadata(
     tip_opacity: float,
 ) -> dict[str, object]:
     return {
-        "driver_node": "ShaderNodeNewGeometry",
-        "driver_output": "Parametric",
-        "driver_semantics": "curve intercept from root (0) to tip (1)",
+        "driver_node": "ShaderNodeHairInfo",
+        "driver_output": "Intercept",
+        "driver_semantics": "Hair Info intercept from root (0) to tip (1)",
         "hair_info_node": "ShaderNodeHairInfo",
         "hair_info_output": "Intercept",
+        "color_alpha_shared_driver": True,
         "mapping_node": "ShaderNodeMapRange",
         "mapping_from": [0.0, 1.0],
         "mapping_to": [
@@ -355,6 +378,7 @@ def _connect_alpha_surface(
     *,
     material,
     bsdf,
+    intercept_socket=None,
     root_opacity: float | None = None,
     tip_opacity: float | None = None,
     opacity: float | None = None,
@@ -374,6 +398,8 @@ def _connect_alpha_surface(
     else:
         if root_opacity is None or tip_opacity is None:
             raise ValueError("root/tip opacity values are required together")
+        if intercept_socket is None:
+            raise ValueError("root/tip opacity requires a Hair Info Intercept socket")
         metadata = root_tip_alpha_node_metadata(root_opacity, tip_opacity)
         alpha_map = nodes.new("ShaderNodeMapRange")
         alpha_map.name = "root_tip_opacity_map"
@@ -382,11 +408,7 @@ def _connect_alpha_surface(
         alpha_map.inputs["From Max"].default_value = 1.0
         alpha_map.inputs["To Min"].default_value = metadata["mapping_to"][0]
         alpha_map.inputs["To Max"].default_value = metadata["mapping_to"][1]
-        # Legacy Blender CURVE splines expose their root-to-tip intercept through
-        # the geometry Parametric output; Hair Info remains the color driver.
-        curve_intercept = nodes.new("ShaderNodeNewGeometry")
-        curve_intercept.name = "root_tip_curve_intercept"
-        links.new(curve_intercept.outputs["Parametric"], alpha_map.inputs["Value"])
+        links.new(intercept_socket, alpha_map.inputs["Value"])
         links.new(alpha_map.outputs["Result"], mix_shader.inputs[0])
         material["alpha_node_metadata"] = metadata
     links.new(transparent.outputs["BSDF"], mix_shader.inputs[1])
@@ -432,6 +454,7 @@ def make_root_tip_material(
     _connect_alpha_surface(
         material=material,
         bsdf=bsdf,
+        intercept_socket=hair_info.outputs["Intercept"],
         root_opacity=root_opacity,
         tip_opacity=tip_opacity,
     )
@@ -986,6 +1009,7 @@ def main() -> None:
                 if strand_materials is not None
                 else None
             ),
+            use_native_hair_intercept=bool(args.use_input_opacities),
         )
         if np.any(highlight_mask):
             curve_object_count += add_strand_curve_objects(

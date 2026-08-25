@@ -88,7 +88,7 @@ and the figure's appearance detail is the root-to-tip opacity profile
     \alpha_r(u)=(1-u)\alpha_r^0+u\alpha_r^1,
 \end{equation}
 with semantic endpoint values in $[0,1]$. For curve presentation, the renderer
-uses the curve's root-to-tip \texttt{Parametric} coordinate to interpolate this
+uses the curve's root-to-tip Hair Info~\texttt{Intercept} coordinate to interpolate this
 opacity in a shader mix between Transparent BSDF and the existing Principled
 BSDF. Gaussian presentation uses transported Gaussian opacities in the
 corresponding transparent/Principled mix. Opacity is distinct from material
