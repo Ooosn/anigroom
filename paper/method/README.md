@@ -34,6 +34,15 @@ Curve presentation maps the curve's root-to-tip `Parametric` coordinate to a
 Transparent/Principled shader mix; Gaussian presentation uses the transported
 Gaussian opacities in the corresponding transparent mix.
 
+For the active R067 reconstruction, primary guides own semantic geometry and
+surface-interpolate it to render roots. Secondary guides carry zero-centered
+local geometry residuals without a turns field. Render roots own root/tip
+color and opacity, and the generated-Gaussian RGB residual carries
+high-frequency appearance. The learned curl controls are primary-guide radius
+and signed turns; curl phase is fixed at zero. Any nonzero phase in the
+synthetic figure controls is a fixed display convention, not an editable or
+optimized reconstruction control.
+
 ## Reproduce
 
 Run from the repository root:

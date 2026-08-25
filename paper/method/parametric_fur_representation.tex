@@ -10,8 +10,10 @@ differentiable up to the discrete choice of its Gaussian segment count.
 \paragraph{Surface-rooted 3D flow.}
 For a root $\mathbf{x}_r$ on the body mesh, we construct the orthonormal frame
 $\mathbf{F}_r=[\mathbf{t}_r,\mathbf{b}_r,\mathbf{n}_r]$ from the surface
-tangent, bitangent, and outward normal. A normalized local groom direction
-$\mathbf{d}^{\mathrm{loc}}_r$ is mapped to world space as
+tangent, bitangent, and outward normal. Each primary guide stores a normalized
+local groom direction $\mathbf{d}^{\mathrm{loc}}_r$. Each effective render root
+receives this field by surface interpolation, followed by any active local
+geometry residual, and the result is mapped to world space as
 \begin{equation}
     \mathbf{d}_r =
     \frac{\mathbf{F}_r\mathbf{d}^{\mathrm{loc}}_r}
@@ -19,6 +21,14 @@ $\mathbf{d}^{\mathrm{loc}}_r$ is mapped to world space as
 \end{equation}
 This defines a genuine 3D direction field rather than an image-plane flow,
 which is essential around limbs, the belly, and the tail.
+
+In the active R067 hierarchy, primary guides own the semantic geometry fields
+and surface-interpolate them to render roots. Secondary guides carry only
+zero-centered local geometry residuals and do not own curl turns. Render roots
+own root/tip color and opacity, while the generated-Gaussian RGB residual
+carries high-frequency appearance. Effective render values are composed at
+render roots rather than stored as independent copies of every semantic
+geometry field.
 
 \paragraph{Normal-to-flow brush backbone.}
 Given positive endpoint length $L_r$, the nominal strand tip is
@@ -63,10 +73,13 @@ root-preserving envelope $E(u)=u^2(3-2u)$, curl is
     &+(\cos\theta_r(u)-\cos\phi_r)\mathbf{o}_r(u)\big],
 \end{split}
 \end{equation}
-where $\theta_r(u)=\phi_r+2\pi f_ru$, $f_r$ is signed turns per strand, and $\phi_r$
-is phase. We optimize the dimensionless curl ratio $\rho_r$ and decode
-$r_r=L_r\rho_r$, so one control has comparable geometry across short and long
- fur. The differentiable centerline is
+where $\theta_r(u)=\phi_r+2\pi f_ru$, $f_r$ is signed turns per strand, and
+the active R067 reconstruction fixes $\phi_r=0$. Primary guides learn the
+dimensionless curl ratio $\rho_r$ and signed turns $f_r$ and decode
+$r_r=L_r\rho_r$, so the controls have comparable geometry across short and
+long fur. No secondary residual owns turns. A nonzero phase may appear only as
+a fixed synthetic display convention in the figure; it is not an editable or
+optimized reconstruction control. The differentiable centerline is
 \begin{equation}
     \mathbf{P}_r(u)=\mathbf{B}_r(u)+\mathbf{C}_r(u),
 \end{equation}
@@ -82,8 +95,9 @@ corresponding transparent/Principled mix. Opacity is distinct from material
 BRDF roughness.
 
 \paragraph{Root-to-tip profiles.}
-Each strand stores root and tip widths $(w^0_r,w^1_r)$ and taper exponent
-$\gamma_r>0$,
+After hierarchy composition, each effective strand has root and tip widths
+$(w^0_r,w^1_r)$ and taper exponent $\gamma_r>0$; semantic geometry values are
+guide-owned and local residuals are composed at the render root,
 \begin{equation}
     w_r(u)=w^0_r(1-u^{\gamma_r})+w^1_ru^{\gamma_r}.
 \end{equation}

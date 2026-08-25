@@ -5,6 +5,12 @@ Status date: 2026-08-25.
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
 
+R067 is the accepted current single-sample method baseline. R066 remains the
+learned-turn parent and R065 remains the exact crossing reference. R043 remains
+the underlying structural/lifecycle baseline, R050 remains the accepted
+Gaussian-RGB appearance reference, and R062 remains the direct no-penetration
+control. These roles are distinct and are not interchangeable.
+
 ## Baseline Status
 
 R043 is the active structural/lifecycle Stage 1 baseline:
@@ -140,7 +146,7 @@ The no-penetration audit remains matched. R063 and R064 are rejected ownership
 controls; R062 remains the immutable direct control. See
 `docs/r065_local_crossing_residual.md`.
 
-R066 is the accepted current learned-curl-turns baseline, with R065 retained
+R066 is the accepted learned-turn parent, with R065 retained
 as its exact parent and crossing reference. R066 keeps the R065 configuration
 snapshot unchanged and adds only a direct signed, zero-initialized primary-guide
 turn coordinate with explicit phase zero. Turns are interpolated from primary
@@ -182,6 +188,63 @@ learned/fixed closeups remain under
 `D:/RTS/_tmp/r065_acceptance_20260815/postprocess/r065_local_crossing_residual`
 and `D:/RTS/_tmp/r065_curl_frizz_component_20260816`.
 
+R067 is the accepted current single-sample method baseline. It removes frizz
+cleanly from the differentiable reconstruction path while retaining the R066
+learned-turn parent, the R065 crossing ownership, Gaussian RGB appearance,
+clean-flow initialization, lifecycle, and mesh-SDF systems. The core
+implementation is frozen: schema 9 is strict, no frizz key survives model,
+config, optimizer, checkpoint, or postprocess metadata, and the standalone
+`frizz_backbone` utility is disconnected from reconstruction.
+
+The formal R067 evidence is tied to training commit
+`8c010f09576f671df92ff40cdabff5886648c55e`, postprocess commit
+`18217be56dc468fdb8e1fffc9f0c9c39689ddce1`, and checkpoint SHA-256
+`2433812f8ab784f9b04d94c88a782121fc3c11ea9522f1053b8e5f7e150b5729`. It passes
+`204` pre-training and `210` postprocess tests; uninterrupted full-resolution
+30k training exits 0. Final train/test composite is
+`33.101788/32.069145`; fixed eight-view mean is `33.077009` versus R066
+`33.125197` (`-0.048189 dB`); roots/Gaussians are `471673/5382959`; peak
+allocation is `19825.54 MB`; wall time is `15775.028 s`.
+
+R067 final curl cumulative turn P50/P95 is `2.07234/21.20436` degrees versus
+R066 final `15.29414/68.64623`; local-turn P99/max is `2.32353/3.60025` versus
+`18.97307/45.38681`; arc/chord P95/P99 is `1.00553/1.02621` versus
+`1.01402/1.03095`. Backward strands and full foldbacks are zero. Crossing
+pairs are `14872` versus R066 `15418`, and crossing remains secondary. Direct
+root-opacity/tip-ratio/tip-opacity means are
+`0.9909846485/0.9454077401/0.9412825014`, versus R066
+`0.9909962107/0.9456069964/0.9414174664`. Gaussian RGB residual absolute
+mean/RMS/saturation are `0.0497083994/0.0790892018/0.0202916788`, versus R066
+`0.0502568274/0.0796196752/0.0207626478`; there is no compensation evidence.
+
+Remote R067 checkpoint, log, strict validation, and postprocess manifest:
+
+- `/home/wangyy/anigroom-r067-no-frizz-runtime-20260825/outputs/r067_no_frizz_0_30k_h100_20260825/checkpoint_030000.pt`
+- `/home/wangyy/anigroom-r067-no-frizz-runtime-20260825/logs/r067_no_frizz_0_30k_h100_20260825.log`
+- `/home/wangyy/anigroom-r067-no-frizz-runtime-20260825/contracts/r067_postrun_strict_validation.json`
+- `/home/wangyy/anigroom-r067-no-frizz-runtime-20260825/postprocess/r067_protocol_20260825/r067_postprocess_manifest.json`
+
+Local R067 acceptance and quantitative comparison:
+
+- `D:/RTS/_tmp/r067_acceptance_20260825/postprocess/r067_no_frizz`
+- `D:/RTS/_tmp/r067_acceptance_20260825/postprocess/r067_no_frizz/r067_postprocess_manifest.json`
+- `D:/RTS/_tmp/r067_acceptance_20260825/postprocess/r067_no_frizz/rgb_views/render_report.json`
+- `D:/RTS/_tmp/r067_acceptance_20260825/postprocess/r067_no_frizz/analysis/r067_vs_r066_metrics.json`
+- `D:/RTS/_tmp/r067_acceptance_20260825/postprocess/r067_no_frizz/analysis/r067_vs_r066_metrics.md`
+
+Full assets, corrected closeups, signed guide maps, and opacity maps are under
+the same acceptance root's `assets_blender_protocol_20260825`,
+`assets_blender_rump_closeup_ortho082_20260825`, `attributes_view00`,
+`attributes_view09`, and `attributes_view32` directories. The frozen method
+figure is `D:/RTS/_tmp/anigroom-r067-no-frizz/paper/method/fig_parametric_groom_controls.pdf`.
+
+A completed final-checkpoint R067 all-root no-penetration audit is recorded at
+`D:/RTS/_tmp/r067_acceptance_20260825/postprocess/r067_no_frizz/no_penetration_final/report.json`
+with SHA256 `da1f104c9a4f796720e72beff269525cda960c984bc46a2d240b382e527a3083`.
+Its matched R065 comparison is validity evidence, not an improvement claim.
+Paper readiness, including the remaining external/generalization evidence, is recorded in
+`docs/paper_readiness_20260825.md`.
+
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
@@ -209,6 +272,8 @@ and `D:/RTS/_tmp/r065_curl_frizz_component_20260816`.
   `configs/r065_local_crossing_residual_0_30k.env`
 - accepted R066 learned-curl-turns configuration:
   `configs/r066_learned_curl_turns_0_30k.env`
+- accepted R067 no-frizz configuration:
+  `configs/r067_no_frizz_0_30k.env`
 - historical R038/R039 configurations remain evidence, not fallbacks
 - server launcher: `scripts/server/run_white_tiger_stage1.sh`
 - strand export: `tools/export_white_tiger_checkpoint_strands.py`
@@ -238,10 +303,15 @@ The active explicit groom fields are:
 - normalized local 3D direction
 - guide-owned brush stiffness
 - dimensionless curl-radius ratio, turns, and phase
-- dimensionless frizz-amplitude ratio
 - child radius and clump strength
 - root and tip color
 - root and tip opacity
+
+The current R067 method baseline has no differentiable frizz-amplitude field or
+persistent frizz seed. `frizz_backbone` is retained only as a standalone
+procedural post-edit utility and is disconnected from reconstruction. The
+historical R043-R066 frizz-bearing contracts remain evidence and parent
+references, not current R067 state.
 
 Brush stiffness controls one quadratic normal-to-groom transition while
 preserving the root, tip, straight length, and 3D endpoint direction. The
@@ -252,8 +322,9 @@ forward geometry with one local-3D-frame implementation: physical curl radius
 and turns plus independent band-limited frizz. No legacy formula, normal-mode
 switch, or checkpoint alias remains. R060 further decodes the two physical
 amplitudes from current strand length, so equal controls produce equal
-normalized geometry across short and long fur. Curl and frizz stay disabled in the R043
-training control. The active route has one strand per render root
+normalized geometry across short and long fur. Curl stays active in the current
+R067 method baseline, while frizz is absent from its differentiable state. The
+active route has one strand per render root
 (`child_count=1`); density comes from independent render roots and their finite
 lifecycle, not deterministic child expansion.
 
@@ -332,9 +403,9 @@ omits it.
 
 The retired directional decomposition and old gravity/sag controls are no
 longer present. R043 uses only length, normalized 3D endpoint direction, and
-guide-owned brush stiffness for the ordinary base centerline. Curl/frizz and
-clump remain separate explicit controls; curl/frizz have zero effective scale
-in this short-fur baseline.
+guide-owned brush stiffness for the ordinary base centerline. Its historical
+frizz and clump controls remain evidence only for current R067; R067 retains
+active curl and removes frizz from the differentiable reconstruction path.
 R035 keeps R034's accepted segment repair, positive unbounded guide length, and
 semantic opacity. It replaces direct render-root width learning with a complete
 guide/render width hierarchy and removes the absolute root-width range. R036

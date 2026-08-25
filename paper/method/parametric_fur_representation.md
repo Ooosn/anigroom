@@ -14,9 +14,11 @@ the groom while preserving an editable asset structure.
 
 For a root attached to the body mesh at position $\mathbf{x}_r$, we construct
 an orthonormal local frame $\mathbf{F}_r=[\mathbf{t}_r,\mathbf{b}_r,\mathbf{n}_r]$
-from the surface tangent, bitangent, and outward normal. Each root stores a
-normalized local direction $\mathbf{d}_r^{\mathrm{loc}}\in\mathbb{R}^3$, which
-is lifted to a world-space grooming direction by
+from the surface tangent, bitangent, and outward normal. Each primary guide
+stores a normalized local direction $\mathbf{d}_r^{\mathrm{loc}}\in\mathbb{R}^3$.
+Each effective render root receives this field by surface interpolation,
+followed by any active local geometry residual, and the result is lifted to a
+world-space grooming direction by
 
 $$
 \mathbf{d}_r =
@@ -29,6 +31,14 @@ image-plane flow. Consequently, interpolation and regularization operate on
 surface-aware 3D directions and remain meaningful around the belly, limbs,
 tail, and other regions where a shared 2D direction would be geometrically
 ambiguous.
+
+In the active R067 hierarchy, primary guides own the semantic geometry fields
+and surface-interpolate them to render roots. Secondary guides carry only
+zero-centered local geometry residuals; they do not own curl turns. Render
+roots own root/tip color and opacity, while the generated-Gaussian RGB
+residual carries high-frequency appearance. Effective render values are
+composed at render roots and are not independent copies of every semantic
+geometry field.
 
 ### Normal-to-flow brush backbone
 
@@ -82,9 +92,13 @@ $$
 $$
 
 where $\theta_r(u)=\phi_r+2\pi f_ru$, $f_r$ is the signed number of turns per
-strand, and $\phi_r$ is the curl phase. We optimize the dimensionless curl
-ratio $\rho_r$ and decode the physical radius as $r_r=L_r\rho_r$. This keeps
-the same control geometrically comparable across short and long fur.
+strand, and the active R067 reconstruction fixes $\phi_r=0$. Primary guides
+learn the dimensionless curl ratio $\rho_r$ and signed turns $f_r$, and decode
+the physical radius as $r_r=L_r\rho_r$. No secondary residual owns turns.
+This keeps the learned controls geometrically comparable across short and
+long fur. A nonzero phase may appear only as a fixed synthetic display
+convention in the figure; it is not an editable or optimized reconstruction
+control.
 The differentiable centerline is the backbone plus this curl,
 
 $$
@@ -100,8 +114,10 @@ transported Gaussian opacities in the corresponding transparent/Principled mix.
 
 ### Root-to-tip appearance and width profile
 
-Each strand stores root and tip widths $(w_r^0,w_r^1)$ and a taper exponent
-$\gamma_r>0$. Its continuous width profile is
+After hierarchy composition, each effective strand has root and tip widths
+$(w_r^0,w_r^1)$ and a taper exponent $\gamma_r>0$; semantic geometry values
+are guide-owned and local residuals are composed at the render root. Its
+continuous width profile is
 
 $$
 w_r(u)=w_r^0(1-u^{\gamma_r})+w_r^1u^{\gamma_r}.
@@ -157,9 +173,15 @@ anisotropic Gaussian initialization after all geometric deformation.
 
 ## Implementation boundary
 
-- Implemented geometric controls shown in the figure: length, local 3D
+- Implemented active geometric controls shown in the figure: length, local 3D
   direction, brush stiffness, root/tip width and taper, and signed curl
-  radius/turns/phase.
+  radius/turns. Active reconstruction fixes curl phase to zero; phase is not an
+  editable or optimized control.
+- Active ownership: primary guides own semantic geometry and surface-
+  interpolate it to render roots; secondary guides carry zero-centered local
+  geometry residuals without a turns field; render roots own root/tip color and
+  opacity, and generated-Gaussian RGB residuals carry high-frequency
+  appearance.
 - Implemented appearance controls described in text: root/tip color and opacity.
 - Not claimed as an implemented groom control: material BRDF roughness.
 - The discrete adaptive segment count is detached; the generated strand and

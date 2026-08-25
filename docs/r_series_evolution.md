@@ -2,8 +2,8 @@
 
 Status date: 2026-08-25. Active structural/lifecycle baseline: R043. Frozen
 higher-PSNR metric control: R036. Accepted appearance and strict zero-foldback
-reference: R050. Exact parent/crossing reference: R065. Current learned-
-curl-turns baseline: R066.
+reference: R050. Exact parent/crossing reference: R065. Learned-turn parent:
+R066. Current single-sample method baseline: R067.
 
 This document is the compact decision history. Detailed measurements and
 artifact paths remain in `docs/accept_line_recovery_ledger.md` and the
@@ -37,6 +37,7 @@ individual R-series documents.
 | R059 | Trained the R058 geometry under the unchanged R057 contract and removed most, but not all, sparse foldback. |
 | R060 | Made curl/frizz amplitudes relative to strand length and removed the remaining short-crown foldbacks without disabling optional shape. |
 | R066 | Replaced the fixed render-root turns coordinate with a signed, zero-initialized primary-guide turns field while preserving R065 systems and crossing ownership. |
+| R067 | Removed frizz cleanly from the differentiable reconstruction path while preserving curl, RGB appearance, lifecycle, and R065 crossing ownership. |
 
 ## Recovery And Interpolation: R000-R007
 
@@ -152,7 +153,7 @@ final test metric, so
 R036 remains the metric control rather than being rewritten by the structural
 decision.
 
-## Appearance, Optional Shape, And Validity: R049-R066
+## Appearance, Optional Shape, And Validity: R049-R067
 
 | Run | Test | Decision and lasting result |
 | --- | --- | --- |
@@ -170,7 +171,8 @@ decision.
 | R063 | Add exact 3D crossing active-set loss with broad geometry ownership | Rejected ownership diagnostic. Contacts at least 45 degrees fall `230 -> 56`, but 20 sampled strands exceed `0.12` because crossing can escape through length/root changes. |
 | R064 | Restrict crossing to shared shape fields | Rejected ownership control. Contacts at least 45 degrees fall to `113`, but two primary guides stretch above `0.12` and drive 162 overlong effective roots. |
 | R065 | Route crossing only through active dense local geometry residuals | Accepted current advanced validity/crossing baseline. Contacts at least 45 degrees fall `230 -> 198`, fixed eight-view mean is `33.22230`, no audited length exceeds `0.12`, and no-penetration remains matched. |
-| R066 | Learn signed primary-guide curl turns from zero while preserving the R065 snapshot and secondary turns ownership | Accepted current learned-curl-turns baseline. Training commit `46672fab4b1d6317fcdc041af067a955cb99f12b`; postprocess commit `d912ef2fdedbcd47ccdafacb1562fbec1d2e2d53`; checkpoint SHA `21e0e3a66907067215ceb3f0232432c4cd9d0ef4bea0826a62ebd6e2d1410f06`. `184` pre-training and `186` postprocess tests pass; uninterrupted 30k exits 0. Final train/test `33.149204/32.107651`; fixed mean `33.125197` versus R065 `33.222302` (`-0.097105 dB`); roots/Gaussians `471605/5391612`; peak `20392.39 MB`; wall `15267.73 s`. Learned curl-only cumulative P50/P95 is `2.10359/20.48548` degrees versus fixed 1.2 `24.60057/129.16371`; final cumulative P50/P95 is `15.294/68.646` versus R065 `34.179/119.282`; arc/chord P95/P99 is `1.01402/1.03095` versus `1.03666/1.08083`; backward/foldback are zero. Crossing `217` versus `198` is secondary; rare local-turn P99/max `18.973/45.387` remains frizz-dominated, so frizz is next and is not claimed solved. | `docs/r066_learned_curl_turns.md`; local QA `D:/RTS/_tmp/r066_acceptance_20260825/postprocess/r066_learned_curl_turns`; report `D:/RTS/_tmp/r066_acceptance_20260825/postprocess/r066_learned_curl_turns/analysis/r066_vs_r065_metrics.json` |
+| R066 | Learn signed primary-guide curl turns from zero while preserving the R065 snapshot and secondary turns ownership | Accepted learned-turn parent; R067 is current single-sample baseline. Training commit `46672fab4b1d6317fcdc041af067a955cb99f12b`; postprocess commit `d912ef2fdedbcd47ccdafacb1562fbec1d2e2d53`; checkpoint SHA `21e0e3a66907067215ceb3f0232432c4cd9d0ef4bea0826a62ebd6e2d1410f06`. `184` pre-training and `186` postprocess tests pass; uninterrupted 30k exits 0. Final train/test `33.149204/32.107651`; fixed mean `33.125197` versus R065 `33.222302` (`-0.097105 dB`); roots/Gaussians `471605/5391612`; peak `20392.39 MB`; wall `15267.73 s`. Learned curl-only cumulative P50/P95 is `2.10359/20.48548` degrees versus fixed 1.2 `24.60057/129.16371`; final cumulative P50/P95 is `15.294/68.646` versus R065 `34.179/119.282`; arc/chord P95/P99 is `1.01402/1.03095` versus `1.03666/1.08083`; backward/foldback are zero. Crossing `217` versus `198` is secondary; rare local-turn P99/max `18.973/45.387` remains frizz-dominated, so frizz is next and is not claimed solved. | `docs/r066_learned_curl_turns.md`; local QA `D:/RTS/_tmp/r066_acceptance_20260825/postprocess/r066_learned_curl_turns`; report `D:/RTS/_tmp/r066_acceptance_20260825/postprocess/r066_learned_curl_turns/analysis/r066_vs_r065_metrics.json` |
+| R067 | Remove differentiable frizz from the R066 learned-turns route | Accepted current single-sample method baseline. Training commit `8c010f09576f671df92ff40cdabff5886648c55e`; postprocess commit `18217be56dc468fdb8e1fffc9f0c9c39689ddce1`; checkpoint SHA `2433812f8ab784f9b04d94c88a782121fc3c11ea9522f1053b8e5f7e150b5729`; schema 9 strict no-frizz; `204` pre-training and `210` postprocess tests; uninterrupted 30k exits 0. Final train/test `33.101788/32.069145`; fixed mean `33.077009` versus R066 `33.125197` (`-0.048189 dB`); roots/Gaussians `471673/5382959`; peak `19825.54 MB`; wall `15775.028 s`. Final cumulative P50/P95 is `2.07234/21.20436` versus R066 `15.29414/68.64623`; local-turn P99/max is `2.32353/3.60025` versus `18.97307/45.38681`; arc/chord P95/P99 is `1.00553/1.02621` versus `1.01402/1.03095`; backward/foldback are zero. Crossing pairs are `14872` versus `15418`, secondary only. Opacity and Gaussian residual means/RMS are slightly lower, with no compensation. The completed R067 final no-penetration audit is recorded at `D:/RTS/_tmp/r067_acceptance_20260825/postprocess/r067_no_frizz/no_penetration_final/report.json` (SHA256 `da1f104c9a4f796720e72beff269525cda960c984bc46a2d240b382e527a3083`); its matched R065 comparison is validity evidence, not an improvement claim. | `docs/r067_no_frizz.md`; local QA `D:/RTS/_tmp/r067_acceptance_20260825/postprocess/r067_no_frizz`; report `D:/RTS/_tmp/r067_acceptance_20260825/postprocess/r067_no_frizz/analysis/r067_vs_r066_metrics.json` |
 
 ## Effective Findings
 
@@ -201,11 +203,13 @@ R043 remains the base structural/lifecycle route and does not enable
 curl/frizz or Gaussian-level RGB residual. R050 is the accepted appearance and
 near-straight zero-foldback checkpoint built on the smooth R049 geometry.
 R065 remains the exact advanced-geometry/appearance/validity/crossing parent
-and crossing reference. R066 is the current learned-curl-turns baseline: it
-preserves the R065 snapshot and strict systems while replacing only the fixed
-render-root turns coordinate with the primary-guide signed field. These roles
-remain distinct: R043 for independent-root lifecycle, R050 for near-straight
-appearance and structure, R059 for the absolute-amplitude control, R062 for
-the direct no-penetration control, R065 for exact crossing comparison, and R066
-for learned curl turns. R066's remaining rare local-turn tail is frizz-led;
-frizz remains the next controlled target and is not solved here.
+and crossing reference. R066 is the learned-turn parent, preserving the R065
+snapshot while replacing the fixed render-root turns coordinate with the
+primary-guide signed field. R067 is the current single-sample method baseline:
+it removes frizz from the differentiable state while retaining curl, RGB
+appearance, lifecycle, and crossing ownership. These roles remain distinct:
+R043 for independent-root lifecycle, R050 for appearance and structure, R059
+for the absolute-amplitude control, R062 for direct no-penetration, R065 for
+crossing, R066 for learned turns, and R067 for the frozen no-frizz method.
+R067 does not claim multi-scene/multi-seed generalization; see
+`docs/paper_readiness_20260825.md` for the remaining publication gaps.
