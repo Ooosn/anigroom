@@ -124,6 +124,9 @@ def test_r068_runner_static_contract_is_strict() -> None:
         'enable_curl',
         'strand_crossing_active_set',
         'strand_crossing_history',
+        'training_metric_records = [',
+        'isinstance(record.get("train"), dict)',
+        'isinstance(record.get("test"), dict)',
         'checkpoint_version',
         'checkpoint_kind',
         'assert_no_frizz_keys',
@@ -132,6 +135,7 @@ def test_r068_runner_static_contract_is_strict() -> None:
         assert fragment in source, fragment
     assert "--resume-checkpoint" not in source
     assert "|| true" not in source
+    assert "for record in metric_records:\n    crossing" not in source
 
 
 def test_generic_launcher_shell_snapshot_emits_disabled_crossing_args() -> None:

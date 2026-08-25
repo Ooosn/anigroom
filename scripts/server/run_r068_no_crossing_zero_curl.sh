@@ -303,7 +303,16 @@ if state.get("history_count") != 0:
 metric_records = json_lines(sys.argv[3])
 if not metric_records:
     raise RuntimeError("R068 metrics log contains no JSON records")
-for record in metric_records:
+training_metric_records = [
+    record
+    for record in metric_records
+    if "iteration" in record
+    and isinstance(record.get("train"), dict)
+    and isinstance(record.get("test"), dict)
+]
+if not training_metric_records:
+    raise RuntimeError("R068 metrics log contains no training metric records")
+for record in training_metric_records:
     crossing = record.get("strand_crossing")
     if not isinstance(crossing, dict):
         raise RuntimeError(f"R068 metrics omit the crossing state: {record}")
@@ -312,7 +321,9 @@ for record in metric_records:
     if crossing.get("last_refresh_iteration") != 0:
         raise RuntimeError(f"R068 metrics contain a crossing refresh: {record}")
 final_records = [
-    record for record in metric_records if int(record.get("iteration", -1)) == 30000
+    record
+    for record in training_metric_records
+    if int(record.get("iteration", -1)) == 30000
 ]
 if not final_records:
     raise RuntimeError("R068 metrics log lacks the final 30k record")

@@ -53,8 +53,10 @@ path intentionally has no curl-field gradient; in formal training the same
 fields are already frozen behind an exact zero shape-detail multiplier.
 
 At the H100 median, the avoided work is `44.955 ms` for each exact-zero
-iteration. Applying that measured kernel delta to the first `14000` frozen
-iterations gives an upper-bound estimate of `629.4 s` (`10.5 min`) saved. It
+iteration. The formal R067 schedule keeps shape detail exactly zero through
+iteration `20000`, as confirmed by its resolved config and saved metrics.
+Applying the measured kernel delta to those `20000` frozen iterations gives
+an upper-bound estimate of `899.1 s` (`15.0 min`) saved. It
 does not accelerate the post-unlock phase and therefore cannot by itself
 explain or remove the full R055-to-R067 wall-time increase.
 
