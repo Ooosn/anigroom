@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -14,7 +16,10 @@ from anigroom.grooming import (
 )
 from tools.diagnose_curl_components import fixed_turn_curl, select_curl
 from tools.visualize_white_tiger_groom_attributes import (
+    EFFECTIVE_ROOT_OPACITY_ATTRIBUTE_NAMES,
     _signed_colormap,
+    effective_root_attribute_map_paths,
+    effective_root_opacity_attributes,
     project_primary_guide_curl_turns,
     summarize_attribute_values,
 )
@@ -130,6 +135,50 @@ def test_primary_guide_projection_and_signed_statistics_are_shape_safe() -> None
             width=10,
             height=10,
         )
+
+
+def test_effective_root_opacity_maps_have_exact_values_shapes_and_names() -> None:
+    attributes = effective_root_opacity_attributes(
+        np.asarray([1.0, 0.5, 0.0], dtype=np.float32),
+        np.asarray([0.25, 0.125, 0.0], dtype=np.float32),
+    )
+
+    assert tuple(attributes) == EFFECTIVE_ROOT_OPACITY_ATTRIBUTE_NAMES
+    assert all(values.shape == (3,) for values in attributes.values())
+    np.testing.assert_array_equal(attributes["root_opacity"], [1.0, 0.5, 0.0])
+    np.testing.assert_array_equal(attributes["tip_opacity"], [0.25, 0.125, 0.0])
+    np.testing.assert_allclose(attributes["tip_opacity_ratio"], [0.25, 0.25, 0.0])
+    for values in attributes.values():
+        assert bool(np.isfinite(values).all())
+        assert bool((values >= 0.0).all())
+        assert bool((values <= 1.0).all())
+
+    paths = effective_root_attribute_map_paths(Path("out"), 9)
+    assert tuple(paths) == EFFECTIVE_ROOT_OPACITY_ATTRIBUTE_NAMES
+    assert tuple(path.name for path in paths.values()) == (
+        "view09_root_opacity.png",
+        "view09_tip_opacity.png",
+        "view09_tip_opacity_ratio.png",
+    )
+
+
+@pytest.mark.parametrize(
+    ("root", "tip", "message"),
+    [
+        ([-0.1], [0.0], "root_opacity"),
+        ([1.1], [0.5], "root_opacity"),
+        ([0.5], [-0.1], "tip_opacity"),
+        ([0.5], [0.6], "must not exceed"),
+        ([np.nan], [0.0], "finite"),
+    ],
+)
+def test_effective_root_opacity_validation_rejects_invalid_values(
+    root: list[float],
+    tip: list[float],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        effective_root_opacity_attributes(np.asarray(root), np.asarray(tip))
 
 
 def test_adaptive_resample_preserves_final_curl_and_attribute_transport() -> None:

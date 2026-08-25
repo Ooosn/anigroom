@@ -87,6 +87,59 @@ def summarize_attribute_values(values: np.ndarray) -> dict[str, float]:
     }
 
 
+EFFECTIVE_ROOT_OPACITY_ATTRIBUTE_NAMES = (
+    "root_opacity",
+    "tip_opacity",
+    "tip_opacity_ratio",
+)
+EFFECTIVE_OPACITY_RATIO_EPS = 1.0e-8
+
+
+def effective_root_opacity_attributes(
+    root_opacity: np.ndarray,
+    tip_opacity: np.ndarray,
+    *,
+    eps: float = EFFECTIVE_OPACITY_RATIO_EPS,
+) -> dict[str, np.ndarray]:
+    """Return validated effective root opacity attributes for visualization."""
+
+    if not np.isfinite(eps) or eps <= 0.0:
+        raise ValueError(f"opacity ratio eps must be finite and positive, got {eps}")
+    root = np.asarray(root_opacity, dtype=np.float64).reshape(-1)
+    tip = np.asarray(tip_opacity, dtype=np.float64).reshape(-1)
+    if root.shape != tip.shape:
+        raise ValueError(
+            "root_opacity and tip_opacity must have matching shapes: "
+            f"{root.shape} != {tip.shape}"
+        )
+    if not np.isfinite(root).all() or not np.isfinite(tip).all():
+        raise ValueError("root_opacity and tip_opacity must be finite")
+    if np.any((root < 0.0) | (root > 1.0)):
+        raise ValueError("root_opacity must lie in [0, 1]")
+    if np.any((tip < 0.0) | (tip > 1.0)):
+        raise ValueError("tip_opacity must lie in [0, 1]")
+    if np.any(tip > root):
+        raise ValueError("tip_opacity must not exceed root_opacity")
+    ratio = tip / np.maximum(root, float(eps))
+    if not np.isfinite(ratio).all() or np.any((ratio < 0.0) | (ratio > 1.0)):
+        raise ValueError("tip_opacity_ratio must be finite and lie in [0, 1]")
+    return {
+        "root_opacity": root.astype(np.float32),
+        "tip_opacity": tip.astype(np.float32),
+        "tip_opacity_ratio": ratio.astype(np.float32),
+    }
+
+
+def effective_root_attribute_map_paths(
+    output_dir: Path,
+    view: int,
+) -> dict[str, Path]:
+    return {
+        name: output_dir / f"view{int(view):02d}_{name}.png"
+        for name in EFFECTIVE_ROOT_OPACITY_ATTRIBUTE_NAMES
+    }
+
+
 def project_primary_guide_curl_turns(
     guide_points_local: torch.Tensor,
     guide_curl_turns: torch.Tensor,
@@ -377,6 +430,16 @@ def main() -> None:
     guide_turns_all_np = guide_turns.detach().cpu().numpy()
     guide_turns_visible_np = guide_turns[guide_ids].detach().cpu().numpy()
 
+    opacity_attributes_all = effective_root_opacity_attributes(
+        groom.root_opacity.detach().cpu().numpy(),
+        groom.tip_opacity.detach().cpu().numpy(),
+    )
+    visible_root_indices = ids.detach().cpu().numpy()
+    opacity_attributes = {
+        name: values[visible_root_indices]
+        for name, values in opacity_attributes_all.items()
+    }
+
     if args.base_image:
         base_path = Path(args.base_image)
     else:
@@ -405,6 +468,7 @@ def main() -> None:
         "direction_local_tangent_y": groom.direction_local[:, 1][ids].detach().cpu().numpy(),
         "direction_local_outward": groom.direction_local[:, 2][ids].detach().cpu().numpy(),
         "normal_component_dot_dir_normal": np.sum(direction_np * normal_np, axis=-1),
+        **opacity_attributes,
     }
 
     outputs: list[tuple[str, Path]] = []
@@ -413,13 +477,18 @@ def main() -> None:
         "curl_radius_ratio",
         "curl_radius",
         "curl_amount_radius_x_abs_turns",
+        *EFFECTIVE_ROOT_OPACITY_ATTRIBUTE_NAMES,
     }
+    opacity_map_paths = effective_root_attribute_map_paths(output_dir, int(args.view))
     flow_path = output_dir / f"view{int(args.view):02d}_flow_arrows_3d.png"
     _save_flow_arrows(base, xy_np, xy2_np, values["length"], flow_path, title=f"view{int(args.view):02d} projected 3D hair flow")
     outputs.append(("3D flow arrows", flow_path))
 
     for name, value in values.items():
-        path = output_dir / f"view{int(args.view):02d}_{name}.png"
+        path = opacity_map_paths.get(
+            name,
+            output_dir / f"view{int(args.view):02d}_{name}.png",
+        )
         title = f"view{int(args.view):02d} {name.replace('_', ' ')}"
         if name in magnitude_attributes and np.any(value < 0.0):
             raise RuntimeError(f"magnitude attribute became negative: {name}")
@@ -449,6 +518,17 @@ def main() -> None:
                 "view": int(args.view),
                 "visible_root_count": int(ids.numel()),
                 "stats": stats,
+                "effective_root_opacity": {
+                    "ratio_eps": EFFECTIVE_OPACITY_RATIO_EPS,
+                    "maps": {
+                        name: str(opacity_map_paths[name])
+                        for name in EFFECTIVE_ROOT_OPACITY_ATTRIBUTE_NAMES
+                    },
+                    "stats": {
+                        name: stats[name]
+                        for name in EFFECTIVE_ROOT_OPACITY_ATTRIBUTE_NAMES
+                    },
+                },
                 "primary_guide": {
                     "guide_count": int(guide_turns_all_np.size),
                     "visible_guide_count": int(guide_ids.numel()),
