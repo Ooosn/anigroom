@@ -20,6 +20,24 @@ multi-scene or multi-seed generalization.
 - peak allocated CUDA memory: `19825.54 MB`
 - wall time: `15775.028 s`
 
+## Count Semantics: Training Metric Versus Checkpoint State
+
+The documented `5,382,959` is the final iteration's pre-step training metric.
+At iteration `30000`, `render_parameters()` produced that count before the
+backward pass and optimizer update; the metrics row retained that render
+statistics payload. The checkpoint was saved after the optimizer step and
+evaluation. Reconstructing the saved checkpoint with the formal exporter path
+produces `5,382,896` Gaussians, so the labeled difference is:
+
+`pre_step_training_metric_minus_checkpoint_state = 5,382,959 - 5,382,896 = 63`.
+
+The checkpoint-state count is the authoritative export count. Segment budgets
+must be derived directly from the returned `root_indices` and `segment_indices`
+using the formal device-side allocator and exact per-root maxima. The audit
+must repeat the reconstruction exactly and require identical per-root counts,
+histograms, and order hashes. No padding, deletion, rounding adjustment, or
+subsampling is permitted to force the checkpoint count to the earlier metric.
+
 R067 learned curl/final cumulative turn P50/P95 is `2.07234/21.20436`
 degrees, versus R066 final `15.29414/68.64623`. Final maximum local turn
 P99/max is `2.32353/3.60025` degrees, versus R066
