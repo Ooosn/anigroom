@@ -38,7 +38,9 @@ from paper.method.render_parametric_fur_figure import (
     control_panels,
     opacity_swatch_alpha_profile,
     opacity_swatch_checkerboard,
+    palette_colors,
     presentation_command,
+    render_composed_scene,
 )
 from paper.method.render_parametric_groom_blender import (
     constant_alpha_node_metadata,
@@ -138,26 +140,73 @@ def test_value_and_gaussian_npz_transport_root_tip_opacity_without_frizz() -> No
 
 
 def test_composed_profiles_are_distinct_and_spatial_alignment_is_unchanged() -> None:
-    panel = composed_panel()
-    assert panel.labels == (
-        "sleek taper",
-        "swept plume",
-        "ribbon wave",
-        "compact coil",
-        "airy fade",
-    )
-    profiles = tuple((spec.root_opacity, spec.tip_opacity) for spec in panel.specs)
-    assert profiles == COMPOSED_OPACITY_PROFILES
-    assert len(set(profiles)) == 5
+    for palette in ("smoked_champagne", "copper"):
+        panel = composed_panel(palette=palette)
+        assert panel.labels == (
+            "sleek taper",
+            "swept plume",
+            "ribbon wave",
+            "compact coil",
+            "airy fade",
+        )
+        profiles = tuple((spec.root_opacity, spec.tip_opacity) for spec in panel.specs)
+        assert profiles == COMPOSED_OPACITY_PROFILES
+        assert len(set(profiles)) == 5
+        root_color, tip_color = palette_colors(palette)
+        actual_roots = np.asarray([spec.root_color for spec in panel.specs])
+        actual_tips = np.asarray([spec.tip_color for spec in panel.specs])
+        progress = np.linspace(0.0, 1.0, len(panel.specs))[:, None]
+        expected_tips = (
+            np.asarray(root_color)[None, :]
+            + progress * (np.asarray(tip_color)[None, :] - np.asarray(root_color)[None, :])
+        )
+        np.testing.assert_allclose(
+            actual_roots,
+            np.repeat(np.asarray(root_color)[None, :], len(panel.specs), axis=0),
+        )
+        np.testing.assert_allclose(actual_tips, expected_tips)
+        assert np.all(np.diff(actual_tips, axis=0) >= -1e-8)
 
-    strands, _ = build_composed_scene_arrays(panel, gaussian_outlines=False)
-    gaussian, _ = build_composed_scene_arrays(panel, gaussian_outlines=True)
-    np.testing.assert_allclose(strands["strands"], gaussian["strands"])
-    np.testing.assert_allclose(strands["opacities"], gaussian["opacities"])
-    assert gaussian["gaussian_opacities"].shape == (
-        gaussian["gaussian_means"].shape[0],
+        strands, _ = build_composed_scene_arrays(panel, gaussian_outlines=False)
+        gaussian, _ = build_composed_scene_arrays(panel, gaussian_outlines=True)
+        np.testing.assert_allclose(strands["strands"], gaussian["strands"])
+        np.testing.assert_allclose(strands["opacities"], gaussian["opacities"])
+        assert gaussian["gaussian_opacities"].shape == (
+            gaussian["gaussian_means"].shape[0],
+        )
+        assert np.all(
+            (gaussian["gaussian_opacities"] >= 0.0)
+            & (gaussian["gaussian_opacities"] <= 1.0)
+        )
+
+
+def test_composed_only_lighting_is_broad_area_and_top_defaults_are_unchanged() -> None:
+    composed_source = inspect.getsource(render_composed_scene)
+    assert 'key_light_type="area"' in composed_source
+    assert "key_light_energy=900.0" in composed_source
+    assert "key_light_size=4.5" in composed_source
+    assert 'key_light_type="sun"' not in composed_source
+
+    command = presentation_command(
+        blender="blender",
+        renderer="renderer.py",
+        npz_path="input.npz",
+        image_path="output.png",
+        resolution=(360, 620),
+        render_samples=64,
+        camera_offset=(0.0, -1.0, 0.09),
+        target_root_offset=(0.1, 0.0, 0.2),
+        frame_margin=1.2,
+        reference_extent=0.95,
+        ortho_scale=1.95,
+        ground_relief=0.040,
+        ground_width_scale=2.40,
+        ground_depth_scale=0.55,
+        ground_screen_height=0.10,
+        gaussian_outlines=False,
     )
-    assert np.all((gaussian["gaussian_opacities"] >= 0.0) & (gaussian["gaussian_opacities"] <= 1.0))
+    size_index = command.index("--key-light-size")
+    assert command[size_index + 1] == "1.6"
 
 
 def test_sample_strands_transports_opacity_rows_with_sampling() -> None:
