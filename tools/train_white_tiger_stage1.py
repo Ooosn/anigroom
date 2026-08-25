@@ -164,6 +164,14 @@ CLEAN_FLOW_INIT_QUANTILE_LOW = 0.05
 CLEAN_FLOW_INIT_QUANTILE_HIGH = 0.95
 
 
+@dataclass(frozen=True)
+class RootGraphEdgeWeightCache:
+    """Detached weights shared by the packed appearance graph loss."""
+
+    edge_weights: torch.Tensor
+    denominator: torch.Tensor
+
+
 def release_cuda_cache() -> None:
     """Return unused cached CUDA blocks to the driver after large transient work."""
     gc.collect()
@@ -1037,6 +1045,98 @@ def symmetric_relative_edge_difference(
     lhs = value[src]
     rhs = value[dst]
     return (lhs - rhs) / (lhs + rhs).clamp_min(EPS)
+
+
+def precompute_root_graph_edge_weight_cache(
+    edges: torch.Tensor,
+    observation_confidence: torch.Tensor | None = None,
+    *,
+    dtype: torch.dtype | None = None,
+) -> RootGraphEdgeWeightCache:
+    """Precompute detached confidence weights for one ordered root graph."""
+
+    if edges.ndim != 2 or edges.shape[1] != 2:
+        raise ValueError("root graph edges must have shape [E, 2]")
+    if dtype is None:
+        dtype = (
+            observation_confidence.dtype
+            if observation_confidence is not None
+            else torch.get_default_dtype()
+        )
+    if observation_confidence is None:
+        edge_weights = torch.ones(
+            (int(edges.shape[0]),),
+            device=edges.device,
+            dtype=dtype,
+        )
+    else:
+        confidence = observation_confidence.detach().reshape(-1).clamp(0.0, 1.0)
+        src, dst = edges[:, 0], edges[:, 1]
+        edge_weights = 0.25 + (
+            1.0 - torch.minimum(confidence[src], confidence[dst])
+        )
+    edge_weights = edge_weights.detach()
+    denominator = edge_weights.sum().clamp_min(1.0).detach()
+    return RootGraphEdgeWeightCache(
+        edge_weights=edge_weights,
+        denominator=denominator,
+    )
+
+
+def packed_appearance_root_graph_smoothness(
+    field: GroomParameterField,
+    edges: torch.Tensor,
+    observation_confidence: torch.Tensor | None = None,
+    *,
+    edge_weight_cache: RootGraphEdgeWeightCache | None = None,
+) -> torch.Tensor:
+    """Compute exact appearance-only root smoothness from eight packed fields."""
+
+    if edges.numel() == 0:
+        return next(field.parameters()).new_tensor(0.0)
+    if edges.ndim != 2 or edges.shape[1] != 2:
+        raise ValueError("root graph edges must have shape [E, 2]")
+
+    root_opacity = torch.sigmoid(field.opacity_raw)
+    packed = torch.cat(
+        (
+            torch.sigmoid(field.root_color_raw),
+            torch.sigmoid(field.tip_color_raw),
+            root_opacity,
+            root_opacity * torch.sigmoid(field.tip_opacity_ratio_raw),
+        ),
+        dim=1,
+    )
+    if edge_weight_cache is None:
+        edge_weight_cache = precompute_root_graph_edge_weight_cache(
+            edges,
+            observation_confidence,
+            dtype=packed.dtype,
+        )
+    if edge_weight_cache.edge_weights.numel() != edges.shape[0]:
+        raise ValueError(
+            "root graph edge-weight cache length does not match graph edges"
+        )
+    edge_values = packed[edges]
+    edge_difference = edge_values[:, 0] - edge_values[:, 1]
+    channel_coefficients = packed.new_tensor(
+        [
+            0.25 / 3.0,
+            0.25 / 3.0,
+            0.25 / 3.0,
+            0.15 / 3.0,
+            0.15 / 3.0,
+            0.15 / 3.0,
+            0.50,
+            0.25,
+        ]
+    )
+    edge_weights = edge_weight_cache.edge_weights.to(device=packed.device)
+    denominator = edge_weight_cache.denominator.to(device=packed.device)
+    return (
+        (edge_difference.square() * channel_coefficients)
+        * edge_weights[:, None]
+    ).sum() / denominator
 
 
 def root_graph_smoothness(
@@ -7280,6 +7380,15 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
     else:
         geometry_graph_edges = graph_edges
         geometry_graph_report = dict(graph_report)
+    packed_appearance_weight_cache = (
+        precompute_root_graph_edge_weight_cache(
+            graph_edges,
+            model.root_observation_confidence,
+            dtype=model.groom.root_color_raw.dtype,
+        )
+        if model.secondary_guides_enabled()
+        else None
+    )
     face_adjacency_started = time.perf_counter()
     face_adjacency_index = FaceAdjacencyIndex.from_faces(model.faces)
     setup_progress(
@@ -7704,17 +7813,28 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 )
                 geometry_confidence = model.root_observation_confidence
             zero_loss = model.groom.length_raw.sum() * 0.0
-            smooth_loss = root_graph_smoothness(
-                model.groom,
-                graph_edges,
-                model.root_observation_confidence,
-                normals=normals_now,
-                tangents=tangents_now,
-                bitangents=bitangents_now,
-                smooth_field_metric=config.smooth_field_metric,
-                include_geometry=not model.uses_zero_centered_geometry(),
-                appearance_only=model.secondary_guides_enabled(),
-            )
+            if model.secondary_guides_enabled():
+                if packed_appearance_weight_cache is None:
+                    raise RuntimeError(
+                        "secondary-guide appearance smoothing requires a weight cache"
+                    )
+                smooth_loss = packed_appearance_root_graph_smoothness(
+                    model.groom,
+                    graph_edges,
+                    edge_weight_cache=packed_appearance_weight_cache,
+                )
+            else:
+                smooth_loss = root_graph_smoothness(
+                    model.groom,
+                    graph_edges,
+                    model.root_observation_confidence,
+                    normals=normals_now,
+                    tangents=tangents_now,
+                    bitangents=bitangents_now,
+                    smooth_field_metric=config.smooth_field_metric,
+                    include_geometry=not model.uses_zero_centered_geometry(),
+                    appearance_only=False,
+                )
             geometry_residual_smooth_loss = render_geometry_residual_graph_smoothness(
                 model,
                 geometry_graph_edges,
@@ -8047,6 +8167,15 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     if not model.secondary_guides_enabled():
                         geometry_graph_edges = graph_edges
                         geometry_graph_report = dict(graph_report)
+                    packed_appearance_weight_cache = (
+                        precompute_root_graph_edge_weight_cache(
+                            graph_edges,
+                            model.root_observation_confidence,
+                            dtype=model.groom.root_color_raw.dtype,
+                        )
+                        if model.secondary_guides_enabled()
+                        else None
+                    )
                     lifecycle_record["smoothing_graph"] = {
                         "render": graph_report,
                         "guide": guide_graph_report,
