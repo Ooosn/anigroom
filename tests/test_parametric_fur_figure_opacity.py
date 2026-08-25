@@ -22,13 +22,22 @@ from paper.method.render_parametric_fur_figure import (
     CONTROL_PANEL_IMAGE_TOP,
     CONTROL_PANEL_TOP_CROP,
     OPACITY_PANEL_COLOR,
+    OPACITY_SWATCH_CHECKER_COLUMNS,
+    OPACITY_SWATCH_CHECKER_DARK,
+    OPACITY_SWATCH_CHECKER_LIGHT,
     Panel,
     StrandSpec,
     TOP_OPACITY_PROFILES,
+    VALUE_SWATCH_ENDPOINT_SPAN,
+    VALUE_SWATCH_LINE_WIDTH,
+    VALUE_SWATCH_SEGMENT_COUNT,
+    VALUE_SWATCH_Y,
     build_composed_scene_arrays,
     build_value_strands,
     composed_panel,
     control_panels,
+    opacity_swatch_alpha_profile,
+    opacity_swatch_checkerboard,
     presentation_command,
 )
 from paper.method.render_parametric_groom_blender import (
@@ -53,7 +62,7 @@ def test_figure_specs_replace_frizz_with_three_opacity_profiles() -> None:
     ]
     opacity = panels[6]
     assert opacity.title == "Root-tip opacity"
-    assert opacity.labels == ("1→1", "1→.35", "1→0")
+    assert opacity.labels == ("", "", "")
     assert tuple((spec.root_opacity, spec.tip_opacity) for spec in opacity.specs) == TOP_OPACITY_PROFILES
     assert all(spec.root_color == OPACITY_PANEL_COLOR for spec in opacity.specs)
     assert all(spec.tip_color == OPACITY_PANEL_COLOR for spec in opacity.specs)
@@ -65,6 +74,49 @@ def test_figure_specs_replace_frizz_with_three_opacity_profiles() -> None:
     assert geometry_and_appearance[0] == geometry_and_appearance[1] == geometry_and_appearance[2]
     assert "frizz=" not in inspect.getsource(control_panels)
     assert "frizz=" not in inspect.getsource(composed_panel)
+
+
+def test_opacity_swatch_checker_and_alpha_profiles_are_deterministic() -> None:
+    checker = opacity_swatch_checkerboard()
+    assert checker.shape == (2, VALUE_SWATCH_SEGMENT_COUNT, 4)
+    np.testing.assert_allclose(checker[0, 0], OPACITY_SWATCH_CHECKER_LIGHT, rtol=0.0, atol=1e-7)
+    np.testing.assert_allclose(checker[0, 5], OPACITY_SWATCH_CHECKER_DARK, rtol=0.0, atol=1e-7)
+    np.testing.assert_allclose(checker[1, 0], OPACITY_SWATCH_CHECKER_DARK, rtol=0.0, atol=1e-7)
+    np.testing.assert_allclose(checker[1, 5], OPACITY_SWATCH_CHECKER_LIGHT, rtol=0.0, atol=1e-7)
+    assert VALUE_SWATCH_SEGMENT_COUNT % OPACITY_SWATCH_CHECKER_COLUMNS == 0
+
+    alpha = opacity_swatch_alpha_profile(1.0, 0.35)
+    assert alpha.shape == (VALUE_SWATCH_SEGMENT_COUNT,)
+    assert alpha[0] == pytest.approx(1.0)
+    assert alpha[-1] == pytest.approx(0.35)
+    assert np.all(np.diff(alpha) < 0.0)
+    np.testing.assert_allclose(
+        opacity_swatch_alpha_profile(1.0, 0.0)[[0, -1]],
+        [1.0, 0.0],
+    )
+
+
+def test_opacity_swatch_geometry_matches_root_tip_color_swatch_contract() -> None:
+    assert VALUE_SWATCH_ENDPOINT_SPAN == 0.170
+    assert VALUE_SWATCH_Y == 0.083
+    assert VALUE_SWATCH_LINE_WIDTH == 3.2
+    positions = np.linspace(1.0 / 6.0, 5.0 / 6.0, 3)
+    spans = tuple(
+        (
+            float(position - VALUE_SWATCH_ENDPOINT_SPAN / 2.0),
+            float(position + VALUE_SWATCH_ENDPOINT_SPAN / 2.0),
+            VALUE_SWATCH_Y,
+        )
+        for position in positions
+    )
+    assert spans[0] == pytest.approx((0.0816666667, 0.2516666667, 0.083))
+    assert spans[1] == pytest.approx((0.415, 0.585, 0.083))
+    assert spans[2] == pytest.approx((0.7483333333, 0.9183333333, 0.083))
+
+    appearance = control_panels()[-1]
+    assert appearance.labels == ("color_0", "color_1", "color_2")
+    assert appearance.specs[0].root_color == (0.68, 0.67, 0.63)
+    assert appearance.specs[0].tip_color == (0.68, 0.67, 0.63)
 
 
 def test_value_and_gaussian_npz_transport_root_tip_opacity_without_frizz() -> None:

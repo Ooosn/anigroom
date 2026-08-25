@@ -66,6 +66,13 @@ FUR_TIP = (0.72, 0.36, 0.075)
 SMOKED_CHAMPAGNE_FUR_ROOT = (0.145, 0.105, 0.070)
 SMOKED_CHAMPAGNE_FUR_TIP = (0.50, 0.39, 0.255)
 OPACITY_PANEL_COLOR = (0.145, 0.105, 0.070)
+VALUE_SWATCH_ENDPOINT_SPAN = 0.170
+VALUE_SWATCH_Y = 0.083
+VALUE_SWATCH_LINE_WIDTH = 3.2
+VALUE_SWATCH_SEGMENT_COUNT = 95
+OPACITY_SWATCH_CHECKER_COLUMNS = 19
+OPACITY_SWATCH_CHECKER_LIGHT = (0.82, 0.82, 0.82, 1.0)
+OPACITY_SWATCH_CHECKER_DARK = (0.60, 0.60, 0.60, 1.0)
 TOP_OPACITY_PROFILES = (
     (1.00, 1.00),
     (1.00, 0.35),
@@ -398,7 +405,7 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
             "Root-tip opacity",
             r"$\mathbfit{\alpha(u)}$",
             "",
-            ("1→1", "1→.35", "1→0"),
+            ("", "", ""),
             tuple(
                 replace(
                     opacity_base,
@@ -847,6 +854,105 @@ def render_composed_scene(
     }
 
 
+def opacity_swatch_alpha_profile(
+    root_opacity: float,
+    tip_opacity: float,
+) -> np.ndarray:
+    return np.linspace(
+        float(root_opacity),
+        float(tip_opacity),
+        VALUE_SWATCH_SEGMENT_COUNT,
+        dtype=np.float32,
+    )
+
+
+def opacity_swatch_checkerboard(
+    *,
+    segment_count: int = VALUE_SWATCH_SEGMENT_COUNT,
+) -> np.ndarray:
+    if segment_count <= 0 or segment_count % OPACITY_SWATCH_CHECKER_COLUMNS:
+        raise ValueError("segment_count must be a positive multiple of checker columns")
+    column_width = segment_count // OPACITY_SWATCH_CHECKER_COLUMNS
+    columns = np.arange(segment_count, dtype=np.int64) // column_width
+    light = np.asarray(OPACITY_SWATCH_CHECKER_LIGHT, dtype=np.float32)
+    dark = np.asarray(OPACITY_SWATCH_CHECKER_DARK, dtype=np.float32)
+    return np.stack(
+        [
+            np.where(
+                ((columns + row)[:, None] % 2) == 0,
+                light,
+                dark,
+            )
+            for row in range(2)
+        ],
+        axis=0,
+    )
+
+
+def _opacity_swatch_layer_offset(ax: plt.Axes) -> float:
+    axis_height_pixels = float(ax.bbox.height)
+    if not np.isfinite(axis_height_pixels) or axis_height_pixels <= 0.0:
+        raise RuntimeError("opacity swatch requires a measurable axes height")
+    return (
+        VALUE_SWATCH_LINE_WIDTH
+        * float(ax.figure.dpi)
+        / (72.0 * 4.0 * axis_height_pixels)
+    )
+
+
+def add_opacity_swatch(
+    ax: plt.Axes,
+    *,
+    position: float,
+    spec: StrandSpec,
+) -> None:
+    endpoint_span = VALUE_SWATCH_ENDPOINT_SPAN
+    profile_y = VALUE_SWATCH_Y
+    profile_t = np.linspace(
+        0.0,
+        1.0,
+        VALUE_SWATCH_SEGMENT_COUNT + 1,
+        dtype=np.float32,
+    )
+    root_x = position - 0.5 * endpoint_span
+    profile_x = root_x + endpoint_span * profile_t
+    profile_points = np.column_stack(
+        (profile_x, np.full_like(profile_x, profile_y))
+    )
+    profile_segments = np.stack((profile_points[:-1], profile_points[1:]), axis=1)
+
+    checker = opacity_swatch_checkerboard()
+    layer_offset = _opacity_swatch_layer_offset(ax)
+    for row, sign in enumerate((-1.0, 1.0)):
+        layer_points = profile_points.copy()
+        layer_points[:, 1] += sign * layer_offset
+        layer_segments = np.stack((layer_points[:-1], layer_points[1:]), axis=1)
+        checker_layer = LineCollection(
+            layer_segments,
+            colors=checker[row],
+            linewidths=VALUE_SWATCH_LINE_WIDTH / 2.0,
+            capstyle="butt",
+            transform=ax.transAxes,
+            zorder=7,
+        )
+        ax.add_collection(checker_layer)
+
+    alpha = opacity_swatch_alpha_profile(spec.root_opacity, spec.tip_opacity)
+    rgb = np.asarray(OPACITY_PANEL_COLOR, dtype=np.float32)
+    alpha_colors = np.column_stack(
+        (np.repeat(rgb[None, :], VALUE_SWATCH_SEGMENT_COUNT, axis=0), alpha)
+    )
+    opacity_profile = LineCollection(
+        profile_segments,
+        colors=alpha_colors,
+        linewidths=VALUE_SWATCH_LINE_WIDTH,
+        capstyle="butt",
+        transform=ax.transAxes,
+        zorder=8,
+    )
+    ax.add_collection(opacity_profile)
+
+
 def add_render_panel(
     ax: plt.Axes,
     *,
@@ -872,10 +978,15 @@ def add_render_panel(
             spec = panel.specs[value_index]
             root_color = np.asarray(spec.root_color, dtype=np.float32)
             tip_color = np.asarray(spec.tip_color, dtype=np.float32)
-            endpoint_span = 0.170
+            endpoint_span = VALUE_SWATCH_ENDPOINT_SPAN
             root_x = position - 0.5 * endpoint_span
-            profile_y = 0.083
-            profile_t = np.linspace(0.0, 1.0, 96, dtype=np.float32)
+            profile_y = VALUE_SWATCH_Y
+            profile_t = np.linspace(
+                0.0,
+                1.0,
+                VALUE_SWATCH_SEGMENT_COUNT + 1,
+                dtype=np.float32,
+            )
             profile_x = root_x + endpoint_span * profile_t
             profile_colors = (
                 (1.0 - profile_t[:-1, None]) * root_color
@@ -888,12 +999,18 @@ def add_render_panel(
             color_profile = LineCollection(
                 profile_segments,
                 colors=profile_colors,
-                linewidths=3.2,
+                linewidths=VALUE_SWATCH_LINE_WIDTH,
                 capstyle="butt",
                 transform=ax.transAxes,
                 zorder=7,
             )
             ax.add_collection(color_profile)
+        elif panel.key == "opacity":
+            add_opacity_swatch(
+                ax,
+                position=position,
+                spec=panel.specs[value_index],
+            )
         else:
             text = ax.text(
                 position,
