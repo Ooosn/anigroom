@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import inspect
 
 import numpy as np
@@ -20,6 +21,7 @@ from paper.method.render_parametric_fur_figure import (
     CONTROL_PANEL_BOTTOM_CROP,
     CONTROL_PANEL_IMAGE_TOP,
     CONTROL_PANEL_TOP_CROP,
+    OPACITY_PANEL_COLOR,
     Panel,
     StrandSpec,
     TOP_OPACITY_PROFILES,
@@ -53,6 +55,14 @@ def test_figure_specs_replace_frizz_with_three_opacity_profiles() -> None:
     assert opacity.title == "Root-tip opacity"
     assert opacity.labels == ("1→1", "1→.35", "1→0")
     assert tuple((spec.root_opacity, spec.tip_opacity) for spec in opacity.specs) == TOP_OPACITY_PROFILES
+    assert all(spec.root_color == OPACITY_PANEL_COLOR for spec in opacity.specs)
+    assert all(spec.tip_color == OPACITY_PANEL_COLOR for spec in opacity.specs)
+    assert all(spec.root_color == spec.tip_color for spec in opacity.specs)
+    assert len({(spec.root_color, spec.tip_color) for spec in opacity.specs}) == 1
+    geometry_and_appearance = tuple(
+        replace(spec, root_opacity=1.0, tip_opacity=1.0) for spec in opacity.specs
+    )
+    assert geometry_and_appearance[0] == geometry_and_appearance[1] == geometry_and_appearance[2]
     assert "frizz=" not in inspect.getsource(control_panels)
     assert "frizz=" not in inspect.getsource(composed_panel)
 

@@ -65,6 +65,7 @@ FUR_ROOT = (0.17, 0.075, 0.025)
 FUR_TIP = (0.72, 0.36, 0.075)
 SMOKED_CHAMPAGNE_FUR_ROOT = (0.145, 0.105, 0.070)
 SMOKED_CHAMPAGNE_FUR_TIP = (0.50, 0.39, 0.255)
+OPACITY_PANEL_COLOR = (0.145, 0.105, 0.070)
 TOP_OPACITY_PROFILES = (
     (1.00, 1.00),
     (1.00, 0.35),
@@ -297,6 +298,12 @@ def palette_colors(
 def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
     root_color, tip_color = palette_colors(palette)
     base = StrandSpec(root_color=root_color, tip_color=tip_color)
+    opacity_base = replace(
+        base,
+        length=0.074,
+        root_color=OPACITY_PANEL_COLOR,
+        tip_color=OPACITY_PANEL_COLOR,
+    )
     # Keep appearance examples independent from the presentation hair palette:
     # these three neutral profiles are the established root-tip color controls.
     appearance_specs = (
@@ -394,8 +401,7 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
             ("1→1", "1→.35", "1→0"),
             tuple(
                 replace(
-                    base,
-                    length=0.074,
+                    opacity_base,
                     root_opacity=root_opacity,
                     tip_opacity=tip_opacity,
                 )
