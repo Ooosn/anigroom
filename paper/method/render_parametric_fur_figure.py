@@ -78,10 +78,13 @@ TOP_OPACITY_PROFILES = (
     (1.00, 0.35),
     (1.00, 0.00),
 )
-COMPOSED_APPEARANCE_SEED = 67067
-COMPOSED_GROOM_COUNT = 5
-COMPOSED_ROOT_OPACITY_BOUNDS = (0.84, 1.00)
-COMPOSED_TIP_OPACITY_BOUNDS = (0.00, 1.00)
+COMPOSED_OPACITY_PROFILES = (
+    (1.00, 1.00),
+    (0.96, 0.28),
+    (0.62, 0.95),
+    (0.88, 0.48),
+    (0.76, 0.35),
+)
 
 
 def font_property(filename: str, *, size: float, style: str = "normal") -> font_manager.FontProperties:
@@ -145,14 +148,6 @@ class Panel:
     ortho_scale: float = 0.0
     reference_extent: float = 0.0
     target_x_shifts: tuple[float, ...] = ()
-
-
-@dataclass(frozen=True)
-class ComposedAppearance:
-    root_color: tuple[float, float, float]
-    tip_color: tuple[float, float, float]
-    root_opacity: float
-    tip_opacity: float
 
 
 def parse_args() -> argparse.Namespace:
@@ -307,44 +302,6 @@ def palette_colors(
     raise ValueError(f"Unsupported palette: {palette}")
 
 
-def sample_composed_appearances(
-    *,
-    palette: str = "smoked_champagne",
-    seed: int = COMPOSED_APPEARANCE_SEED,
-) -> tuple[ComposedAppearance, ...]:
-    palette_root, palette_tip = palette_colors(palette)
-    root = np.asarray(palette_root, dtype=np.float64)
-    span = np.asarray(palette_tip, dtype=np.float64) - root
-    rng = np.random.default_rng(seed)
-
-    color_coordinates = rng.random((COMPOSED_GROOM_COUNT, 2))
-    root_opacities = rng.uniform(
-        COMPOSED_ROOT_OPACITY_BOUNDS[0],
-        COMPOSED_ROOT_OPACITY_BOUNDS[1],
-        COMPOSED_GROOM_COUNT,
-    )
-    tip_strata = (
-        np.arange(COMPOSED_GROOM_COUNT, dtype=np.float64)
-        + rng.random(COMPOSED_GROOM_COUNT)
-    ) / COMPOSED_GROOM_COUNT
-    tip_strata = tip_strata[rng.permutation(COMPOSED_GROOM_COUNT)]
-    tip_opacities = (
-        COMPOSED_TIP_OPACITY_BOUNDS[0]
-        + tip_strata
-        * (COMPOSED_TIP_OPACITY_BOUNDS[1] - COMPOSED_TIP_OPACITY_BOUNDS[0])
-    )
-
-    return tuple(
-        ComposedAppearance(
-            root_color=tuple((root + color_coordinates[index, 0] * span).tolist()),
-            tip_color=tuple((root + color_coordinates[index, 1] * span).tolist()),
-            root_opacity=float(root_opacities[index]),
-            tip_opacity=float(tip_opacities[index]),
-        )
-        for index in range(COMPOSED_GROOM_COUNT)
-    )
-
-
 def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
     root_color, tip_color = palette_colors(palette)
     base = StrandSpec(root_color=root_color, tip_color=tip_color)
@@ -476,7 +433,22 @@ def control_panels(*, palette: str = "smoked_champagne") -> tuple[Panel, ...]:
 def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
     root_color, tip_color = palette_colors(palette)
     base = StrandSpec(root_color=root_color, tip_color=tip_color)
-    appearances = sample_composed_appearances(palette=palette)
+    if palette == "smoked_champagne":
+        composed_colors = (
+            ((0.080, 0.055, 0.035), (0.420, 0.310, 0.200)),
+            ((0.145, 0.105, 0.070), (0.660, 0.550, 0.400)),
+            ((0.540, 0.430, 0.300), (0.120, 0.085, 0.055)),
+            ((0.100, 0.065, 0.040), (0.460, 0.340, 0.220)),
+            ((0.150, 0.110, 0.075), (0.700, 0.620, 0.480)),
+        )
+    else:
+        composed_colors = (
+            (root_color, tip_color),
+            ((0.120, 0.050, 0.018), (0.625, 0.285, 0.060)),
+            ((0.170, 0.075, 0.025), (0.780, 0.465, 0.135)),
+            ((0.215, 0.095, 0.025), (0.620, 0.275, 0.055)),
+            ((0.135, 0.060, 0.025), (0.800, 0.530, 0.190)),
+        )
     return Panel(
         "composed",
         "Composed grooms",
@@ -496,10 +468,10 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
                 curl_radius=0.0038,
                 curl_turns=0.72,
                 curl_phase=0.15,
-                root_color=appearances[0].root_color,
-                tip_color=appearances[0].tip_color,
-                root_opacity=appearances[0].root_opacity,
-                tip_opacity=appearances[0].tip_opacity,
+                root_color=composed_colors[0][0],
+                tip_color=composed_colors[0][1],
+                root_opacity=COMPOSED_OPACITY_PROFILES[0][0],
+                tip_opacity=COMPOSED_OPACITY_PROFILES[0][1],
             ),
             replace(
                 base,
@@ -513,10 +485,10 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
                 curl_radius=0.0062,
                 curl_turns=1.10,
                 curl_phase=0.0,
-                root_color=appearances[1].root_color,
-                tip_color=appearances[1].tip_color,
-                root_opacity=appearances[1].root_opacity,
-                tip_opacity=appearances[1].tip_opacity,
+                root_color=composed_colors[1][0],
+                tip_color=composed_colors[1][1],
+                root_opacity=COMPOSED_OPACITY_PROFILES[1][0],
+                tip_opacity=COMPOSED_OPACITY_PROFILES[1][1],
             ),
             replace(
                 base,
@@ -530,10 +502,10 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
                 curl_radius=0.0078,
                 curl_turns=1.70,
                 curl_phase=1.05,
-                root_color=appearances[2].root_color,
-                tip_color=appearances[2].tip_color,
-                root_opacity=appearances[2].root_opacity,
-                tip_opacity=appearances[2].tip_opacity,
+                root_color=composed_colors[2][0],
+                tip_color=composed_colors[2][1],
+                root_opacity=COMPOSED_OPACITY_PROFILES[2][0],
+                tip_opacity=COMPOSED_OPACITY_PROFILES[2][1],
             ),
             replace(
                 base,
@@ -547,10 +519,10 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
                 curl_radius=0.0105,
                 curl_turns=2.65,
                 curl_phase=0.20,
-                root_color=appearances[3].root_color,
-                tip_color=appearances[3].tip_color,
-                root_opacity=appearances[3].root_opacity,
-                tip_opacity=appearances[3].tip_opacity,
+                root_color=composed_colors[3][0],
+                tip_color=composed_colors[3][1],
+                root_opacity=COMPOSED_OPACITY_PROFILES[3][0],
+                tip_opacity=COMPOSED_OPACITY_PROFILES[3][1],
             ),
             replace(
                 base,
@@ -564,10 +536,10 @@ def composed_panel(*, palette: str = "smoked_champagne") -> Panel:
                 curl_radius=0.0045,
                 curl_turns=1.25,
                 curl_phase=0.50,
-                root_color=appearances[4].root_color,
-                tip_color=appearances[4].tip_color,
-                root_opacity=appearances[4].root_opacity,
-                tip_opacity=appearances[4].tip_opacity,
+                root_color=composed_colors[4][0],
+                tip_color=composed_colors[4][1],
+                root_opacity=COMPOSED_OPACITY_PROFILES[4][0],
+                tip_opacity=COMPOSED_OPACITY_PROFILES[4][1],
             ),
         ),
         resolution=(4320, 700),
@@ -854,8 +826,8 @@ def render_composed_scene(
             world_strength=0.32,
             key_light_type="sun",
             key_light_energy=3.4,
-            key_light_offset=(-0.80, -0.05, 1.45),
-            sun_angle_deg=14.0,
+            key_light_offset=(-1.00, -0.05, 1.25),
+            sun_angle_deg=4.0,
             fill_light_energy=110.0,
             fill_light_size=8.0,
             shadow_sun_energy=0.0,

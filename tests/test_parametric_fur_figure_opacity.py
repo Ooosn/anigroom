@@ -5,20 +5,16 @@ import inspect
 
 import numpy as np
 import pytest
-import paper.method.render_parametric_groom_blender as blender_renderer
 
 from paper.method.render_parametric_fur_figure import (
     COMPOSED_CAMERA_OFFSET,
-    COMPOSED_APPEARANCE_SEED,
-    COMPOSED_GROOM_COUNT,
+    COMPOSED_OPACITY_PROFILES,
     COMPOSED_GROUND_SCREEN_HEIGHT,
     COMPOSED_IMAGE_SHIFT,
     COMPOSED_ORTHO_SCALE,
-    COMPOSED_ROOT_OPACITY_BOUNDS,
     COMPOSED_ROOT_SPACING,
     COMPOSED_ROW_HEIGHT_RATIO,
     COMPOSED_TARGET_ROOT_OFFSET,
-    COMPOSED_TIP_OPACITY_BOUNDS,
     COMPOSED_WAVE_AMPLITUDE,
     COMPOSED_WAVE_FREQUENCY,
     CONTROL_PANEL_BOTTOM_CROP,
@@ -41,10 +37,8 @@ from paper.method.render_parametric_fur_figure import (
     control_panels,
     opacity_swatch_alpha_profile,
     opacity_swatch_checkerboard,
-    palette_colors,
     presentation_command,
     render_composed_scene,
-    sample_composed_appearances,
 )
 from paper.method.render_parametric_groom_blender import (
     constant_alpha_node_metadata,
@@ -143,72 +137,74 @@ def test_value_and_gaussian_npz_transport_root_tip_opacity_without_frizz() -> No
     assert np.all((arrays["gaussian_opacities"] >= 0.0) & (arrays["gaussian_opacities"] <= 1.0))
 
 
-def test_composed_appearances_are_seeded_bounded_and_non_monotonic() -> None:
-    def segment_coordinates(
-        colors: tuple[tuple[float, float, float], ...],
-        palette: str,
-    ) -> np.ndarray:
-        palette_root, palette_tip = palette_colors(palette)
-        root = np.asarray(palette_root)
-        span = np.asarray(palette_tip) - root
-        channel_coordinates = (np.asarray(colors) - root[None, :]) / span[None, :]
-        np.testing.assert_allclose(
-            channel_coordinates,
-            np.repeat(channel_coordinates[:, :1], 3, axis=1),
-        )
-        coordinates = channel_coordinates[:, 0]
-        assert np.all((coordinates >= 0.0) & (coordinates <= 1.0))
-        return coordinates
-
+def test_composed_profiles_are_exact_and_nonmonotonic() -> None:
     def is_monotonic(values: np.ndarray) -> bool:
         differences = np.diff(values)
         return bool(np.all(differences >= 0.0) or np.all(differences <= 0.0))
 
-    smoked = sample_composed_appearances()
-    assert smoked == sample_composed_appearances(seed=COMPOSED_APPEARANCE_SEED)
-    assert smoked != sample_composed_appearances(seed=COMPOSED_APPEARANCE_SEED + 1)
-    assert len(smoked) == COMPOSED_GROOM_COUNT
+    expected_opacities = (
+        (1.00, 1.00),
+        (0.96, 0.28),
+        (0.62, 0.95),
+        (0.88, 0.48),
+        (0.76, 0.35),
+    )
+    assert COMPOSED_OPACITY_PROFILES == expected_opacities
+    assert all(root != tip for root, tip in expected_opacities[1:])
 
-    smoked_root_t = segment_coordinates(
-        tuple(appearance.root_color for appearance in smoked),
-        "smoked_champagne",
-    )
-    smoked_tip_t = segment_coordinates(
-        tuple(appearance.tip_color for appearance in smoked),
-        "smoked_champagne",
-    )
-    root_opacities = np.asarray([appearance.root_opacity for appearance in smoked])
-    tip_opacities = np.asarray([appearance.tip_opacity for appearance in smoked])
-    assert np.all(
-        (root_opacities >= COMPOSED_ROOT_OPACITY_BOUNDS[0])
-        & (root_opacities <= COMPOSED_ROOT_OPACITY_BOUNDS[1])
-    )
-    assert np.all(
-        (tip_opacities >= COMPOSED_TIP_OPACITY_BOUNDS[0])
-        & (tip_opacities <= COMPOSED_TIP_OPACITY_BOUNDS[1])
-    )
-    assert tip_opacities.min() < 0.2
-    assert tip_opacities.max() > 0.8
-    for values in (smoked_root_t, smoked_tip_t, root_opacities, tip_opacities):
+    expected_colors = {
+        "smoked_champagne": (
+            ((0.080, 0.055, 0.035), (0.420, 0.310, 0.200)),
+            ((0.145, 0.105, 0.070), (0.660, 0.550, 0.400)),
+            ((0.540, 0.430, 0.300), (0.120, 0.085, 0.055)),
+            ((0.100, 0.065, 0.040), (0.460, 0.340, 0.220)),
+            ((0.150, 0.110, 0.075), (0.700, 0.620, 0.480)),
+        ),
+        "copper": (
+            ((0.170, 0.075, 0.025), (0.720, 0.360, 0.075)),
+            ((0.120, 0.050, 0.018), (0.625, 0.285, 0.060)),
+            ((0.170, 0.075, 0.025), (0.780, 0.465, 0.135)),
+            ((0.215, 0.095, 0.025), (0.620, 0.275, 0.055)),
+            ((0.135, 0.060, 0.025), (0.800, 0.530, 0.190)),
+        ),
+    }
+    for palette, colors in expected_colors.items():
+        panel = composed_panel(palette=palette)
+        assert tuple((spec.root_color, spec.tip_color) for spec in panel.specs) == colors
+        assert tuple((spec.root_opacity, spec.tip_opacity) for spec in panel.specs) == expected_opacities
+        for endpoint in (0, 1):
+            luminance = np.asarray(
+                [np.dot(profile[endpoint], (0.2126, 0.7152, 0.0722)) for profile in colors]
+            )
+            assert not is_monotonic(luminance)
+
+    for endpoint in (0, 1):
+        values = np.asarray([profile[endpoint] for profile in COMPOSED_OPACITY_PROFILES])
+        assert np.all((values >= 0.0) & (values <= 1.0))
         assert not is_monotonic(values)
 
-    copper = sample_composed_appearances(palette="copper")
-    copper_root_t = segment_coordinates(
-        tuple(appearance.root_color for appearance in copper),
-        "copper",
+    panel = composed_panel()
+    assert panel.resolution == (4320, 700)
+    assert panel.frame_margin == 1.08
+    assert panel.ortho_scale == 0.82
+    assert panel.reference_extent == 0.92
+    _, scene_report = build_composed_scene_arrays(panel, gaussian_outlines=False)
+    np.testing.assert_allclose(
+        [group["root_position"] for group in scene_report["groups"]],
+        [
+            (-1.64, 0.0, 0.035),
+            (-0.82, 0.0, -0.035),
+            (0.0, 0.0, 0.035),
+            (0.82, 0.0, -0.035),
+            (1.64, 0.0, 0.035),
+        ],
+        rtol=0.0,
+        atol=1e-6,
     )
-    copper_tip_t = segment_coordinates(
-        tuple(appearance.tip_color for appearance in copper),
-        "copper",
-    )
-    np.testing.assert_allclose(copper_root_t, smoked_root_t, rtol=0.0, atol=2e-15)
-    np.testing.assert_allclose(copper_tip_t, smoked_tip_t, rtol=0.0, atol=2e-15)
-    assert copper != smoked
 
 
 def test_composed_appearance_is_shared_by_each_grooms_three_strands() -> None:
     panel = composed_panel()
-    appearances = sample_composed_appearances()
     assert panel.labels == (
         "sleek taper",
         "swept plume",
@@ -221,11 +217,8 @@ def test_composed_appearance_is_shared_by_each_grooms_three_strands() -> None:
     np.testing.assert_allclose(arrays["strands"], gaussian["strands"])
     np.testing.assert_allclose(arrays["opacities"], gaussian["opacities"])
 
-    for index, (spec, appearance) in enumerate(zip(panel.specs, appearances)):
-        assert spec.root_color == appearance.root_color
-        assert spec.tip_color == appearance.tip_color
-        assert spec.root_opacity == appearance.root_opacity
-        assert spec.tip_opacity == appearance.tip_opacity
+    for index, spec in enumerate(panel.specs):
+        assert (spec.root_opacity, spec.tip_opacity) == COMPOSED_OPACITY_PROFILES[index]
         group = slice(3 * index, 3 * (index + 1))
         np.testing.assert_allclose(
             arrays["colors"][group, 0],
@@ -253,15 +246,20 @@ def test_composed_appearance_is_shared_by_each_grooms_three_strands() -> None:
     )
 
 
-def test_composed_only_lighting_matches_variant_d_and_top_defaults_are_unchanged() -> None:
+def test_composed_lighting_matches_accepted_original_settings() -> None:
     composed_source = inspect.getsource(render_composed_scene)
+    assert "ground_color=(1.0, 1.0, 1.0)" in composed_source
+    assert "world_strength=0.32" in composed_source
     assert 'key_light_type="sun"' in composed_source
     assert "key_light_energy=3.4" in composed_source
-    assert "key_light_offset=(-0.80, -0.05, 1.45)" in composed_source
-    assert "sun_angle_deg=14.0" in composed_source
+    assert "key_light_offset=(-1.00, -0.05, 1.25)" in composed_source
+    assert "sun_angle_deg=4.0" in composed_source
     assert "fill_light_energy=110.0" in composed_source
     assert "fill_light_size=8.0" in composed_source
     assert "shadow_sun_energy=0.0" in composed_source
+    assert "shadow_sun_offset=" not in composed_source
+    assert "shadow_sun_angle_deg=" not in composed_source
+    assert "use_input_opacities=True" in composed_source
     assert "key_light_size=" not in composed_source
 
     presentation_source = inspect.getsource(presentation_command)
@@ -304,20 +302,13 @@ def test_sample_strands_transports_opacity_rows_with_sampling() -> None:
     np.testing.assert_array_equal(sampled_opacities, opacities[selected])
 
 
-def test_alpha_node_metadata_requires_true_transparent_mix() -> None:
+def test_renderer_opacity_metadata_contract() -> None:
     root_tip = root_tip_alpha_node_metadata(1.0, 0.23)
-    assert root_tip["driver_node"] == "ShaderNodeHairInfo"
-    assert root_tip["driver_output"] == "Intercept"
-    assert root_tip["driver_semantics"] == "Hair Info intercept from root (0) to tip (1)"
-    assert root_tip["hair_info_node"] == "ShaderNodeHairInfo"
-    assert root_tip["hair_info_output"] == "Intercept"
-    assert root_tip["color_alpha_shared_driver"] is True
-    assert "Parametric" not in root_tip
-    assert "ShaderNodeNewGeometry" not in root_tip
     assert root_tip["mapping_node"] == "ShaderNodeMapRange"
     assert root_tip["mapping_to"] == [1.0, 0.23]
     assert root_tip["transparent_node"] == "ShaderNodeBsdfTransparent"
     assert root_tip["surface_node"] == "ShaderNodeMixShader"
+    assert root_tip["mix_factor_semantics"] == "0=transparent, 1=principled"
 
     constant = constant_alpha_node_metadata(0.64)
     assert constant["constant_opacity"] == 0.64
@@ -326,16 +317,6 @@ def test_alpha_node_metadata_requires_true_transparent_mix() -> None:
 
     with pytest.raises(ValueError, match=r"in \[0, 1\]"):
         root_tip_alpha_node_metadata(1.01, 0.5)
-
-    alpha_source = inspect.getsource(blender_renderer._connect_alpha_surface)
-    curve_source = inspect.getsource(blender_renderer.add_strand_curve_objects)
-    material_source = inspect.getsource(blender_renderer.make_root_tip_material)
-    assert "intercept_socket" in alpha_source
-    assert 'links.new(intercept_socket, alpha_map.inputs["Value"])' in alpha_source
-    assert "ShaderNodeNewGeometry" not in alpha_source
-    assert "Parametric" not in alpha_source
-    assert 'bpy.data.hair_curves.new' in curve_source
-    assert 'hair_info.outputs["Intercept"]' in material_source
 
 
 def test_frozen_layout_and_presentation_command_are_unchanged_except_opacity_flag() -> None:
