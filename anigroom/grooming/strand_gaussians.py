@@ -370,6 +370,7 @@ def build_strands(
     bitangents: torch.Tensor,
     groom: DecodedGroom,
     samples: int,
+    enable_curl: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate differentiable strand samples from mesh roots and groom controls.
 
@@ -402,18 +403,19 @@ def build_strands(
         groom.brush_stiffness,
         samples,
     )
-    # Curl is learned and interpolated as a dimensionless shape ratio. This is
-    # the sole conversion into a physical curl offset.
-    curl_radius = groom.length * groom.curl_radius_ratio
-    points = deform_backbone(
-        points,
-        normals,
-        groom_direction,
-        tangents,
-        curl_radius=curl_radius,
-        curl_turns=groom.curl_turns,
-        curl_phase=groom.curl_phase,
-    )
+    if enable_curl:
+        # Curl is learned and interpolated as a dimensionless shape ratio. This
+        # is the sole conversion into a physical curl offset.
+        curl_radius = groom.length * groom.curl_radius_ratio
+        points = deform_backbone(
+            points,
+            normals,
+            groom_direction,
+            tangents,
+            curl_radius=curl_radius,
+            curl_turns=groom.curl_turns,
+            curl_phase=groom.curl_phase,
+        )
 
     taper_t = t.clamp(0.0, 1.0).pow(groom.width_taper[:, None])
     widths = groom.root_width[:, None] * (1.0 - taper_t) + groom.tip_width[:, None] * taper_t

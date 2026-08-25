@@ -3489,6 +3489,10 @@ class WhiteTigerStage1Model(torch.nn.Module):
         roots, normals, roots_local = self.roots_and_normals()
         tangents, bitangents = self.tangent_frames(normals)
         groom = self.apply_guide_controls(self.groom.decode(), roots_local)
+        curl_enabled = (
+            self.shape_detail_multiplier > 0.0
+            and self.shape_curl_scale > 0.0
+        )
         strands, widths, colors, opacities = build_strands(
             roots,
             normals,
@@ -3496,6 +3500,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             bitangents,
             groom,
             samples=samples,
+            enable_curl=curl_enabled,
         )
         if strand_crossing_active_set is None:
             strand_crossing_loss = strands.sum() * 0.0
@@ -3554,6 +3559,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 bitangents[mesh_no_penetration_root_indices],
                 selected_groom,
                 samples=samples,
+                enable_curl=curl_enabled,
             )
             mesh_no_penetration_depth = strand_penetration_depth(
                 selected_local,
