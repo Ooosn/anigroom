@@ -154,6 +154,11 @@ H100 checkpoint reconstructions are exactly identical:
 The PLY is correct for the persisted checkpoint. Padding or deleting 63
 Gaussians would make it incorrect.
 
+The completed audit is stored at
+`D:/RTS/_tmp/r067_acceptance_20260825/postprocess/r067_no_frizz/analysis/r067_gaussian_count_audit.json`
+with SHA256
+`17276d3ad57c1beac0cce453b0be1d03b04807b6d0068f1bd57b94fed4e6d989`.
+
 ## Recommended Next Decision
 
 1. Keep R061, R062, R066, and R067 method changes.
