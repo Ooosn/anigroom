@@ -9,13 +9,16 @@ import paper.method.render_parametric_groom_blender as blender_renderer
 
 from paper.method.render_parametric_fur_figure import (
     COMPOSED_CAMERA_OFFSET,
+    COMPOSED_APPEARANCE_SEED,
+    COMPOSED_GROOM_COUNT,
     COMPOSED_GROUND_SCREEN_HEIGHT,
     COMPOSED_IMAGE_SHIFT,
     COMPOSED_ORTHO_SCALE,
-    COMPOSED_OPACITY_PROFILES,
+    COMPOSED_ROOT_OPACITY_BOUNDS,
     COMPOSED_ROOT_SPACING,
     COMPOSED_ROW_HEIGHT_RATIO,
     COMPOSED_TARGET_ROOT_OFFSET,
+    COMPOSED_TIP_OPACITY_BOUNDS,
     COMPOSED_WAVE_AMPLITUDE,
     COMPOSED_WAVE_FREQUENCY,
     CONTROL_PANEL_BOTTOM_CROP,
@@ -41,6 +44,7 @@ from paper.method.render_parametric_fur_figure import (
     palette_colors,
     presentation_command,
     render_composed_scene,
+    sample_composed_appearances,
 )
 from paper.method.render_parametric_groom_blender import (
     constant_alpha_node_metadata,
@@ -139,53 +143,129 @@ def test_value_and_gaussian_npz_transport_root_tip_opacity_without_frizz() -> No
     assert np.all((arrays["gaussian_opacities"] >= 0.0) & (arrays["gaussian_opacities"] <= 1.0))
 
 
-def test_composed_profiles_are_distinct_and_spatial_alignment_is_unchanged() -> None:
-    for palette in ("smoked_champagne", "copper"):
-        panel = composed_panel(palette=palette)
-        assert panel.labels == (
-            "sleek taper",
-            "swept plume",
-            "ribbon wave",
-            "compact coil",
-            "airy fade",
+def test_composed_appearances_are_seeded_bounded_and_non_monotonic() -> None:
+    def segment_coordinates(
+        colors: tuple[tuple[float, float, float], ...],
+        palette: str,
+    ) -> np.ndarray:
+        palette_root, palette_tip = palette_colors(palette)
+        root = np.asarray(palette_root)
+        span = np.asarray(palette_tip) - root
+        channel_coordinates = (np.asarray(colors) - root[None, :]) / span[None, :]
+        np.testing.assert_allclose(
+            channel_coordinates,
+            np.repeat(channel_coordinates[:, :1], 3, axis=1),
         )
-        profiles = tuple((spec.root_opacity, spec.tip_opacity) for spec in panel.specs)
-        assert profiles == COMPOSED_OPACITY_PROFILES
-        assert len(set(profiles)) == 5
-        root_color, tip_color = palette_colors(palette)
-        actual_roots = np.asarray([spec.root_color for spec in panel.specs])
-        actual_tips = np.asarray([spec.tip_color for spec in panel.specs])
-        progress = np.linspace(0.0, 1.0, len(panel.specs))[:, None]
-        expected_tips = (
-            np.asarray(root_color)[None, :]
-            + progress * (np.asarray(tip_color)[None, :] - np.asarray(root_color)[None, :])
+        coordinates = channel_coordinates[:, 0]
+        assert np.all((coordinates >= 0.0) & (coordinates <= 1.0))
+        return coordinates
+
+    def is_monotonic(values: np.ndarray) -> bool:
+        differences = np.diff(values)
+        return bool(np.all(differences >= 0.0) or np.all(differences <= 0.0))
+
+    smoked = sample_composed_appearances()
+    assert smoked == sample_composed_appearances(seed=COMPOSED_APPEARANCE_SEED)
+    assert smoked != sample_composed_appearances(seed=COMPOSED_APPEARANCE_SEED + 1)
+    assert len(smoked) == COMPOSED_GROOM_COUNT
+
+    smoked_root_t = segment_coordinates(
+        tuple(appearance.root_color for appearance in smoked),
+        "smoked_champagne",
+    )
+    smoked_tip_t = segment_coordinates(
+        tuple(appearance.tip_color for appearance in smoked),
+        "smoked_champagne",
+    )
+    root_opacities = np.asarray([appearance.root_opacity for appearance in smoked])
+    tip_opacities = np.asarray([appearance.tip_opacity for appearance in smoked])
+    assert np.all(
+        (root_opacities >= COMPOSED_ROOT_OPACITY_BOUNDS[0])
+        & (root_opacities <= COMPOSED_ROOT_OPACITY_BOUNDS[1])
+    )
+    assert np.all(
+        (tip_opacities >= COMPOSED_TIP_OPACITY_BOUNDS[0])
+        & (tip_opacities <= COMPOSED_TIP_OPACITY_BOUNDS[1])
+    )
+    assert tip_opacities.min() < 0.2
+    assert tip_opacities.max() > 0.8
+    for values in (smoked_root_t, smoked_tip_t, root_opacities, tip_opacities):
+        assert not is_monotonic(values)
+
+    copper = sample_composed_appearances(palette="copper")
+    copper_root_t = segment_coordinates(
+        tuple(appearance.root_color for appearance in copper),
+        "copper",
+    )
+    copper_tip_t = segment_coordinates(
+        tuple(appearance.tip_color for appearance in copper),
+        "copper",
+    )
+    np.testing.assert_allclose(copper_root_t, smoked_root_t, rtol=0.0, atol=2e-15)
+    np.testing.assert_allclose(copper_tip_t, smoked_tip_t, rtol=0.0, atol=2e-15)
+    assert copper != smoked
+
+
+def test_composed_appearance_is_shared_by_each_grooms_three_strands() -> None:
+    panel = composed_panel()
+    appearances = sample_composed_appearances()
+    assert panel.labels == (
+        "sleek taper",
+        "swept plume",
+        "ribbon wave",
+        "compact coil",
+        "airy fade",
+    )
+    arrays, _ = build_composed_scene_arrays(panel, gaussian_outlines=False)
+    gaussian, _ = build_composed_scene_arrays(panel, gaussian_outlines=True)
+    np.testing.assert_allclose(arrays["strands"], gaussian["strands"])
+    np.testing.assert_allclose(arrays["opacities"], gaussian["opacities"])
+
+    for index, (spec, appearance) in enumerate(zip(panel.specs, appearances)):
+        assert spec.root_color == appearance.root_color
+        assert spec.tip_color == appearance.tip_color
+        assert spec.root_opacity == appearance.root_opacity
+        assert spec.tip_opacity == appearance.tip_opacity
+        group = slice(3 * index, 3 * (index + 1))
+        np.testing.assert_allclose(
+            arrays["colors"][group, 0],
+            np.repeat(np.asarray(spec.root_color)[None, :], 3, axis=0),
         )
         np.testing.assert_allclose(
-            actual_roots,
-            np.repeat(np.asarray(root_color)[None, :], len(panel.specs), axis=0),
+            arrays["colors"][group, -1],
+            np.repeat(np.asarray(spec.tip_color)[None, :], 3, axis=0),
         )
-        np.testing.assert_allclose(actual_tips, expected_tips)
-        assert np.all(np.diff(actual_tips, axis=0) >= -1e-8)
-
-        strands, _ = build_composed_scene_arrays(panel, gaussian_outlines=False)
-        gaussian, _ = build_composed_scene_arrays(panel, gaussian_outlines=True)
-        np.testing.assert_allclose(strands["strands"], gaussian["strands"])
-        np.testing.assert_allclose(strands["opacities"], gaussian["opacities"])
-        assert gaussian["gaussian_opacities"].shape == (
-            gaussian["gaussian_means"].shape[0],
+        np.testing.assert_allclose(
+            arrays["opacities"][group, 0, 0],
+            np.full(3, spec.root_opacity),
         )
-        assert np.all(
-            (gaussian["gaussian_opacities"] >= 0.0)
-            & (gaussian["gaussian_opacities"] <= 1.0)
+        np.testing.assert_allclose(
+            arrays["opacities"][group, -1, 0],
+            np.full(3, spec.tip_opacity),
         )
 
+    assert gaussian["gaussian_opacities"].shape == (
+        gaussian["gaussian_means"].shape[0],
+    )
+    assert np.all(
+        (gaussian["gaussian_opacities"] >= 0.0)
+        & (gaussian["gaussian_opacities"] <= 1.0)
+    )
 
-def test_composed_only_lighting_is_broad_area_and_top_defaults_are_unchanged() -> None:
+
+def test_composed_only_lighting_matches_variant_d_and_top_defaults_are_unchanged() -> None:
     composed_source = inspect.getsource(render_composed_scene)
-    assert 'key_light_type="area"' in composed_source
-    assert "key_light_energy=900.0" in composed_source
-    assert "key_light_size=4.5" in composed_source
-    assert 'key_light_type="sun"' not in composed_source
+    assert 'key_light_type="sun"' in composed_source
+    assert "key_light_energy=3.4" in composed_source
+    assert "key_light_offset=(-0.80, -0.05, 1.45)" in composed_source
+    assert "sun_angle_deg=14.0" in composed_source
+    assert "fill_light_energy=110.0" in composed_source
+    assert "fill_light_size=8.0" in composed_source
+    assert "shadow_sun_energy=0.0" in composed_source
+    assert "key_light_size=" not in composed_source
+
+    presentation_source = inspect.getsource(presentation_command)
+    assert "key_light_size:" not in presentation_source
 
     command = presentation_command(
         blender="blender",
