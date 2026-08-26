@@ -35,6 +35,32 @@ if [[ -n "$EXPLICIT_CLEAN_FLOW_TARGET" ]]; then
   CLEAN_FLOW_TARGET="$CLEAN_FLOW_TARGET_OVERRIDE"
 fi
 
+INIT_MESH_SCALE="${INIT_MESH_SCALE:-1.28}"
+INIT_MESH_TRANSLATION="${INIT_MESH_TRANSLATION:-0,0.32,0.02}"
+parse_init_mesh_translation() {
+  local raw="$1"
+  local first rest second third
+  if [[ "$raw" != *,* ]]; then
+    return 1
+  fi
+  first="${raw%%,*}"
+  rest="${raw#*,}"
+  if [[ "$rest" != *,* ]]; then
+    return 1
+  fi
+  second="${rest%%,*}"
+  third="${rest#*,}"
+  if [[ "$third" == *,* || -z "$first" || -z "$second" || -z "$third" ]]; then
+    return 1
+  fi
+  INIT_MESH_TRANSLATION_VALUES=("$first" "$second" "$third")
+}
+
+if ! parse_init_mesh_translation "$INIT_MESH_TRANSLATION"; then
+  echo "[stage1] INIT_MESH_TRANSLATION must contain exactly 3 non-empty comma-separated values: $INIT_MESH_TRANSLATION" >&2
+  exit 2
+fi
+
 # Historical locked configs predate the split primary/secondary shape clocks.
 # Explicit R055 values override these compatibility-preserving equivalents.
 SHAPE_DETAIL_UNLOCK_END="${SHAPE_DETAIL_UNLOCK_END:-${GUIDE_RESIDUAL_UNLOCK_END:-0}}"
@@ -277,6 +303,8 @@ cmd=(
   "$PYTHON" tools/train_white_tiger_stage1.py
   --data-root "$DATA_ROOT"
   --mesh-path "$MESH_PATH"
+  --init-mesh-scale "$INIT_MESH_SCALE"
+  --init-mesh-translation "${INIT_MESH_TRANSLATION_VALUES[@]}"
   --output-dir "$OUTPUT_DIR"
   --root-count "$ROOT_COUNT"
   --root-init-method "$ROOT_INIT_METHOD"

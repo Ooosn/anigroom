@@ -7,6 +7,9 @@ PYTHON="${PYTHON:?set PYTHON to the verified mygs interpreter}"
 DATA_ROOT="${DATA_ROOT:?set DATA_ROOT to the frozen white-tiger images}"
 MESH_PATH="${MESH_PATH:?set MESH_PATH to the frozen aligned mesh}"
 MESH_NO_PENETRATION_SDF="${MESH_NO_PENETRATION_SDF:?set the reviewed mesh SDF path}"
+CLEAN_FLOW_TARGET="${CLEAN_FLOW_TARGET:?set CLEAN_FLOW_TARGET to the reviewed flow target}"
+INIT_MESH_SCALE="${INIT_MESH_SCALE:?set INIT_MESH_SCALE to the reviewed mesh scale}"
+INIT_MESH_TRANSLATION="${INIT_MESH_TRANSLATION:?set INIT_MESH_TRANSLATION to the reviewed mesh translation}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:?set EXPECTED_COMMIT to the reviewed R068 commit}"
 RUN_ID="${RUN_ID:?set RUN_ID to a fresh R068 run id}"
 
@@ -42,6 +45,7 @@ fi
 [[ -d "$DATA_ROOT" ]] || fail "data root does not exist: $DATA_ROOT"
 [[ -f "$MESH_PATH" ]] || fail "mesh does not exist: $MESH_PATH"
 [[ -f "$MESH_NO_PENETRATION_SDF" ]] || fail "mesh SDF does not exist: $MESH_NO_PENETRATION_SDF"
+[[ -f "$CLEAN_FLOW_TARGET" ]] || fail "clean-flow target does not exist: $CLEAN_FLOW_TARGET"
 [[ -f "$R067_CONFIG_PATH" ]] || fail "R067 source config does not exist: $R067_CONFIG_PATH"
 [[ -f "$R068_CONFIG_PATH" ]] || fail "R068 candidate config does not exist: $R068_CONFIG_PATH"
 
@@ -194,6 +198,9 @@ env \
   DATA_ROOT="$DATA_ROOT" \
   MESH_PATH="$MESH_PATH" \
   MESH_NO_PENETRATION_SDF="$MESH_NO_PENETRATION_SDF" \
+  CLEAN_FLOW_TARGET="$CLEAN_FLOW_TARGET" \
+  INIT_MESH_SCALE="$INIT_MESH_SCALE" \
+  INIT_MESH_TRANSLATION="$INIT_MESH_TRANSLATION" \
   RUN_ID="$RUN_ID" \
   OUTPUT_DIR="$OUTPUT_DIR" \
   CONFIG_PATH="$R068_CONFIG_PATH" \
