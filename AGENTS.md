@@ -36,7 +36,7 @@ fields is a failed route.
 2. Before changing training logic, first produce visual evidence that the
    input signal is valid. For orientation/flow, this means readable direction
    line visualizations, not just point overlays or confidence heatmaps.
-3. The accepted clean-flow `v4_surface_direction` target and its
+3. The accepted clean-flow `v5_surface_direction` target and its
    normal-compatible parallel-transport runtime interpolation are one atomic
    part of the current formal Stage 1 route. Keep `v3_height_smooth` only as a
    controlled rollback/ablation target; do not mix a v4 target with the old
@@ -137,12 +137,12 @@ design or tune it as an isolated standalone module.
 
 ## Current Flow Target
 
-The frozen R036 baseline uses the accepted clean-flow target:
+The current route uses the accepted clean-flow target:
 
-`baseline_inputs/v4_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
+`baseline_inputs/v5_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
-`v3_height_smooth` and `v2_consensus` are retained only as controlled
-rollback/ablation lines. Do not treat either as the default.
+`v4_surface_direction`, `v3_height_smooth`, and `v2_consensus` are retained
+only as controlled rollback/ablation lines. Do not treat them as the default.
 
 Do not replace it with older `v11`, `8192`, or ad hoc flow outputs unless the
 replacement is explicitly accepted and documented in

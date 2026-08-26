@@ -10,7 +10,7 @@ quality, not the training schedule.
 
 Current accepted line:
 
-`D:\petsgaussianhair\_downloads\tiger_hair_flow_36\shell_fused_smal_head500_body4000_candidate65536_headk24_bodyk12_v4_surface_direction`
+`baseline_inputs/v5_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
 Current generation settings:
 
@@ -20,8 +20,8 @@ Current generation settings:
 - Guide roots: `500` head roots, `4000` body roots
 - Clean K: `24` for head, `12` for body
 - Observed roots: `4407 / 4500`
-- Direction consensus anchors: `552`
-- Direction-only change from `v3_height_smooth`:
+- Direction consensus anchors: `563`
+- V5 inherits the V4 direction changes from `v3_height_smooth`:
   - guide-root direction cleaning uses a mesh-geodesic neighborhood;
   - neighboring 3D directions are parallel-transported before comparison or
     averaging;
@@ -35,15 +35,21 @@ Current generation settings:
     initialization/interpolation;
   - anchor confidence answers whether a root direction is reliable enough for
     strong anchor supervision.
+- V5 correction:
+  - initial tangent-axis fusion uses parameter-free directional observability;
+  - unsupported edge-on projections no longer contribute false tangent axes;
+  - later normal/lift fitting, sign, consensus, and shell behavior are unchanged.
 
 Retained baselines:
+
+`baseline_inputs/v4_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
 `D:\petsgaussianhair\_downloads\tiger_hair_flow_36\shell_fused_smal_head500_body4000_candidate65536_headk24_bodyk12_v3_height_smooth`
 
 `D:\petsgaussianhair\_downloads\tiger_hair_flow_36\shell_fused_smal_head500_body4000_candidate65536_headk24_bodyk12_v2_consensus`
 
-Keep `v3_height_smooth` and `v2_consensus` for controlled experiments and
-ablations. Neither is the current training target.
+Keep V4, `v3_height_smooth`, and `v2_consensus` for controlled experiments and
+ablations. None is the current training target.
 
 Rejected diagnostic: sign-aware direction consensus improved unsigned local
 axis smoothness but introduced directed sign flips in the tail/body field, so it
@@ -124,7 +130,37 @@ dataset paths and identity mesh alignment changed. It produced 4500 roots,
 used the same 33 views with exclusions `4,24,25`, observed 4194 roots
 (`93.2%`), retained 504 direction anchors, and passed finite-array and
 single-component mesh-geodesic graph checks. The frozen local bundle is under
-`D:\RTS\datasets\panda_v4_flow_protocol_20260826\run_output`.
+`D:\RTS\datasets\panda_v5_flow_protocol_20260827\run_output`.
+
+### Directional observability correction
+
+The initial V4 axis lift used image confidence, mesh visibility, and a
+normal-to-view weight, but still forced every accepted 2D axis through a
+pseudoinverse of the projected tangent basis. Near an edge-on tangent plane,
+that inverse can be directionally ill-conditioned even when the surface-level
+view weight is nonzero. It can therefore turn a poorly observed screen axis
+into a confident but incorrect 3D tangent.
+
+The corrected lift multiplies only the initial tangent-axis evidence by a
+parameter-free directional observability. For projected tangent basis `B` and
+screen axis `o`, it measures both how much of `o` is reproducible by `B` and
+how strongly the recovered coefficient direction projects relative to the
+largest singular direction of `B`. Fully observable directions retain weight
+one; rank-deficient unsupported directions receive weight zero. Later
+normal/lift fitting, sign cleaning, consensus, shell settings, and all CLI
+parameters remain unchanged.
+
+This is a camera/mesh/axis condition, with no species, body region, view index,
+or image-coordinate rule. Synthetic rank tests cover identity, supported and
+unsupported rank-one projections, and anisotropic projection. Complete Panda
+and white-tiger reruns preserve root populations and pass the canonical visual
+gate. White tiger keeps `4407` observed roots, while its median direction change
+is `0.99` degrees. The Panda V5 target is:
+
+`D:\RTS\datasets\panda_v5_flow_protocol_20260827\run_output\output\v5_surface_direction\guide_flow3d_shell_targets_exclude_004_024_025.npz`
+
+SHA-256:
+`0c4705fbab50e4d9ed86aae2376ac71977f4bafff46f68ed643de25eaa333455`
 
 ## Acceptance Evidence
 
@@ -135,7 +171,7 @@ Before using a new target in training, produce:
 - At least one head/front view and one side/body view.
 - A short note explaining what changed from the previous accepted target.
 
-Current `v4_surface_direction` acceptance notes:
+V4 parent acceptance notes:
 
 - The reported visual defect is a real local crossing problem, not primarily a
   root-to-tip sign error. On v3 guides, local neighbor axes differ by at least

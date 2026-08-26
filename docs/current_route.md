@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-08-26.
+Status date: 2026-08-27.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -54,8 +54,11 @@ capacity cost, density-matched surface smoothing, and coherent fixed-protocol
 assets, not reported as a PSNR gain over R036. Relative to R042, final/best
 test composite changes by only `-0.00384/-0.00496 dB`, while the 100k-strand
 audit removes every length above `0.15` and reduces maximum local turn from
-`14.89` to `2.73` degrees. The exact v4 target remains tracked under
-`baseline_inputs/` with unchanged content.
+`14.89` to `2.73` degrees. The exact V5 target is tracked under
+`baseline_inputs/v5_surface_direction/`. It changes only initial tangent-axis
+evidence through parameter-free directional observability. The exact V4 parent
+remains tracked under `baseline_inputs/v4_surface_direction/` as the immutable
+rollback input.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual

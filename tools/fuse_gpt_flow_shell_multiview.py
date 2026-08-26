@@ -246,10 +246,44 @@ def recover_flow3d_from_screen_axis(
     flat_tangents: torch.Tensor,
     flat_bitangents: torch.Tensor,
 ) -> torch.Tensor:
+    coeff_direction, _ = _recover_tangent_axis(sampled_ori, screen_t, screen_b)
+    return F.normalize(
+        coeff_direction[:, 0:1] * flat_tangents + coeff_direction[:, 1:2] * flat_bitangents,
+        dim=-1,
+        eps=1.0e-8,
+    )
+
+
+def _recover_tangent_axis(
+    sampled_ori: torch.Tensor,
+    screen_t: torch.Tensor,
+    screen_b: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
     basis = torch.stack([screen_t, screen_b], dim=-1)
     coeff = (torch.linalg.pinv(basis) @ sampled_ori[:, :, None]).squeeze(-1)
-    coeff = F.normalize(coeff, dim=-1, eps=1.0e-8)
-    return F.normalize(coeff[:, 0:1] * flat_tangents + coeff[:, 1:2] * flat_bitangents, dim=-1, eps=1.0e-8)
+    reconstructed = (basis @ coeff[:, :, None]).squeeze(-1)
+    reprojection_fraction = torch.linalg.norm(reconstructed, dim=-1) / torch.linalg.norm(
+        sampled_ori,
+        dim=-1,
+    ).clamp_min(EPS)
+    coeff_direction = F.normalize(coeff, dim=-1, eps=1.0e-8)
+    recovered_screen = (basis @ coeff_direction[:, :, None]).squeeze(-1)
+    smax = torch.linalg.svdvals(basis)[..., 0]
+    observability = (
+        reprojection_fraction
+        * torch.linalg.norm(recovered_screen, dim=-1)
+        / smax.clamp_min(EPS)
+    ).clamp(0.0, 1.0)
+    return coeff_direction, observability
+
+
+def tangent_axis_observability(
+    sampled_ori: torch.Tensor,
+    screen_t: torch.Tensor,
+    screen_b: torch.Tensor,
+) -> torch.Tensor:
+    """Return continuous observability for normalized projected tangent axes."""
+    return _recover_tangent_axis(sampled_ori, screen_t, screen_b)[1]
 
 
 def accumulate_axis_evidence(
@@ -269,9 +303,14 @@ def accumulate_axis_evidence(
 ) -> tuple[int, float]:
     good = weight_flat >= float(min_confidence)
     if bool(good.any()):
-        flow3d_flat = recover_flow3d_from_screen_axis(sampled_ori, screen_t, screen_b, flat_tangents, flat_bitangents)
+        coeff_direction, observability = _recover_tangent_axis(sampled_ori, screen_t, screen_b)
+        flow3d_flat = F.normalize(
+            coeff_direction[:, 0:1] * flat_tangents + coeff_direction[:, 1:2] * flat_bitangents,
+            dim=-1,
+            eps=1.0e-8,
+        )
         flow3d = flow3d_flat.reshape(n_roots, n_shells, 3)
-        weight = weight_flat.reshape(n_roots, n_shells)
+        weight = (weight_flat * observability).reshape(n_roots, n_shells)
         has_prev = weight_sum > 0.0
         prev = F.normalize(flow3d_sum, dim=-1, eps=1.0e-8)
         flip = has_prev & ((flow3d * prev).sum(dim=-1) < 0.0)
