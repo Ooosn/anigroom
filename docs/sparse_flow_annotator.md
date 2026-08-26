@@ -1,17 +1,16 @@
-# Sparse Flow Annotator
+# Seed Flow Brush
 
-The sparse-flow annotator is the optional artist-guided input path for
-AniGroom. It does not replace automatic flow extraction. Both modes produce
-confidence-weighted root-to-tip anchors that feed the same 3D surface-field
-fusion and multilevel-root optimization.
+This optional artist-guided input path stores sparse directed image-space seed
+flow. It complements automatic flow extraction and does not encode strand
+length.
 
-Launch the Panda project on Windows:
+## Launch
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/windows/run_groom_flow_annotator.ps1
 ```
 
-Or select another input and output folder:
+An image and output folder can be supplied directly:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/windows/run_groom_flow_annotator.ps1 `
@@ -19,23 +18,29 @@ powershell -ExecutionPolicy Bypass -File scripts/windows/run_groom_flow_annotato
   -OutputDir D:\path\to\flow_guidance
 ```
 
-Each left-drag creates one directed root-to-tip arrow. The canvas supports
-wheel zoom, middle-button or Space+left-button pan, right-click selection,
-Delete, Ctrl+Z/Ctrl+Y, and automatic save while navigating. A confidence value
-is stored with each arrow.
+## Interaction
 
-Each image receives a separate `<stem>.flow.json` using schema
-`anigroom.sparse_flow.v1`. Pixel coordinates remain in original image space;
-normalized UV coordinates and image SHA-256 are stored alongside them. The
-output folder also contains `project.json`, which indexes every source image
-and annotation file.
+- `Seed` scatters points. Radius and density determine local coverage.
+- `Comb` turns nearby seed directions toward the brush stroke.
+- `Relax` releases manual anchors so surrounding anchors can interpolate them.
+- `Erase` removes seeds.
+- Manual anchors are pink; inferred followers are cyan.
+- Arrow size is one global display control and is never saved as hair length.
+- Space or middle-drag pans; wheel zooms; `1` through `4` select tools.
 
-Arrow length is retained for inspection but does not define physical fur
-length. Downstream guide construction consumes the root pixel, normalized
-root-to-tip direction, and confidence. Physical length remains an independent
-groom parameter learned and interpolated by the Stage 1 representation.
+After a comb stroke, a cached K8 seed graph updates only a bounded neighborhood
+of unmodified followers. Saving performs a deterministic full follower smooth
+while preserving every manual anchor exactly.
 
-The annotation reader is `anigroom.flow_annotations`. Manual arrows are sparse
-high-confidence evidence, not a dense hand-painted flow map. Unmarked regions
-remain the responsibility of automatic image evidence, mesh-surface
-interpolation, and local consistency.
+## Data Contract
+
+Each image receives `<stem>.flow.json` with schema
+`anigroom.seed_flow.v1`. Every seed stores only:
+
+```text
+id, position_px, position_uv, direction_px, manual
+```
+
+There is no endpoint and no per-seed length. Existing
+`anigroom.sparse_flow.v1` arrow files remain readable; their starts and unit
+directions load as manual seeds, and the next save writes the new schema.
