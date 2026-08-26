@@ -42,6 +42,19 @@ def test_canvas_seed_has_no_length_or_endpoint_field() -> None:
     assert not hasattr(seed, "end_px")
 
 
+def test_traditional_drag_arrow_produces_only_a_unit_direction() -> None:
+    direction = FlowAnnotatorApp.drag_direction((10.0, 20.0), (13.0, 24.0))
+    assert direction == pytest.approx((0.6, 0.8))
+    assert FlowAnnotatorApp.drag_direction((1.0, 1.0), (1.5, 1.5)) is None
+
+
+def test_modifier_wheel_control_adjustment_is_bounded() -> None:
+    adjust = FlowAnnotatorApp.adjusted_control_value
+    assert adjust(50.0, 1, step=4.0, minimum=8.0, maximum=180.0) == 54.0
+    assert adjust(179.0, 1, step=4.0, minimum=8.0, maximum=180.0) == 180.0
+    assert adjust(0.06, -1, step=0.04, minimum=0.05, maximum=1.0) == 0.05
+
+
 @pytest.mark.parametrize(("point", "expected"), [((5.0, 0.0), 0.0), ((5.0, 3.0), 3.0), ((-2.0, 0.0), 2.0), ((12.0, 0.0), 2.0)])
 def test_point_segment_distance(point, expected) -> None:
     assert FlowAnnotatorApp._point_segment_distance(point, (0.0, 0.0), (10.0, 0.0)) == pytest.approx(expected)

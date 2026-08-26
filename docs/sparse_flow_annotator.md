@@ -22,11 +22,16 @@ powershell -ExecutionPolicy Bypass -File scripts/windows/run_groom_flow_annotato
 
 - `Seed` scatters points. Radius and density determine local coverage.
 - `Comb` turns nearby seed directions toward the brush stroke.
+- `Arrow` preserves the traditional press-drag-release workflow. Drag distance
+  is only a gesture preview; the saved record remains a unit direction seed.
 - `Relax` releases manual anchors so surrounding anchors can interpolate them.
 - `Erase` removes seeds.
 - Manual anchors are pink; inferred followers are cyan.
 - Arrow size is one global display control and is never saved as hair length.
-- Space or middle-drag pans; wheel zooms; `1` through `4` select tools.
+- Space or middle-drag pans; wheel zooms; `1` through `5` select tools.
+- `S/C/A/R/E` select Seed, Comb, Arrow, Relax, and Erase.
+- `Alt+wheel` or `[`/`]` adjusts brush radius, `Shift+wheel` adjusts density,
+  and `Ctrl+wheel` adjusts the global arrow display size.
 
 After a comb stroke, a cached K8 seed graph updates only a bounded neighborhood
 of unmodified followers. Saving performs a deterministic full follower smooth

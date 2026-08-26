@@ -396,9 +396,9 @@ def propagate_follower_directions(
     anchors = output[manual].copy()
     for _ in range(max(0, int(iterations))):
         neighbor_average = (
-            output[graph.indices] * graph.weights[..., None]
+            output[graph.indices[active]] * graph.weights[active, :, None]
         ).sum(axis=1)
-        candidate = (1.0 - blend) * output[active] + blend * neighbor_average[active]
+        candidate = (1.0 - blend) * output[active] + blend * neighbor_average
         norms = np.linalg.norm(candidate, axis=1, keepdims=True)
         valid = norms[:, 0] > _EPS
         output[active[valid]] = candidate[valid] / norms[valid]

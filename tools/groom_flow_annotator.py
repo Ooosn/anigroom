@@ -33,7 +33,7 @@ from anigroom.seed_flow_annotations import (  # noqa: E402
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 PROJECT_SCHEMA = "anigroom.seed_flow.project.v1"
-TOOL_MODES = ("seed", "comb", "relax", "erase")
+TOOL_MODES = ("seed", "comb", "arrow", "relax", "erase")
 
 
 @dataclass(frozen=True)
@@ -129,10 +129,16 @@ class FlowAnnotatorApp:
         self.stroke_last_point: tuple[float, float] | None = None
         self.stroke_changed_ids: set[str] = set()
         self.stroke_positions_changed = False
+        self.arrow_preview_start: tuple[float, float] | None = None
+        self.arrow_preview_end: tuple[float, float] | None = None
         self.last_propagation_time = 0.0
-        self.seed_items: dict[str, tuple[int, int]] = {}
+        self.seed_items: dict[str, int] = {}
         self.graph: SeedNeighborGraph | None = None
         self.graph_signature: tuple[tuple[str, float, float], ...] | None = None
+        self.scatter_grid: dict[tuple[int, int], list[tuple[float, float]]] | None = None
+        self.scatter_cell = 0.0
+        self.last_brush_update_time = 0.0
+        self.last_arrow_size = 28.0
         self.rng = np.random.default_rng(29)
 
         self.undo_stack: list[HistoryEntry] = []
@@ -232,15 +238,16 @@ class FlowAnnotatorApp:
         mode_grid = ttk.Frame(right, style="Panel.TFrame")
         mode_grid.pack(fill=tk.X, pady=(0, 18))
         mode_specs = [
-            ("seed", "Seed", "Scatter follower seeds; density is point count"),
-            ("comb", "Comb", "Brush nearby arrows toward the stroke direction"),
-            ("relax", "Relax", "Release anchors so neighbors can interpolate them"),
-            ("erase", "Erase", "Remove seeds inside the brush"),
+            ("seed", "Seed", "Scatter follower seeds; density is point count", 0, 0, 1),
+            ("comb", "Comb", "Brush nearby arrows toward the stroke direction", 0, 1, 1),
+            ("arrow", "Arrow", "Drag one traditional manual direction anchor", 1, 0, 1),
+            ("relax", "Relax", "Release anchors so neighbors can interpolate them", 1, 1, 1),
+            ("erase", "Erase", "Remove seeds inside the brush", 2, 0, 2),
         ]
-        for index, (mode, label, tooltip) in enumerate(mode_specs):
+        for mode, label, tooltip, row, column, span in mode_specs:
             button = ttk.Button(mode_grid, text=label, command=lambda value=mode: self._set_mode(value), style="Mode.TButton")
-            button.grid(row=index // 2, column=index % 2, sticky="ew", padx=3, pady=3)
-            mode_grid.grid_columnconfigure(index % 2, weight=1)
+            button.grid(row=row, column=column, columnspan=span, sticky="ew", padx=3, pady=3)
+            mode_grid.grid_columnconfigure(column, weight=1)
             self.mode_buttons[mode] = button
             ToolTip(button, tooltip)
         self._control_slider(right, "Radius", self.radius_var, 8.0, 180.0, "Brush radius in source-image pixels")
@@ -298,7 +305,10 @@ class FlowAnnotatorApp:
             if label in self.control_values:
                 self.control_values[label].configure(text=text)
         if hasattr(self, "canvas") and self.current_image is not None:
-            self._sync_seed_items(full=True)
+            arrow_size = float(self.arrow_size_var.get())
+            if abs(arrow_size - self.last_arrow_size) > 1.0e-6:
+                self.last_arrow_size = arrow_size
+                self._sync_seed_items(full=True)
             self._draw_brush_cursor(self.cursor_image_point)
 
     def _bind_events(self) -> None:
@@ -312,6 +322,9 @@ class FlowAnnotatorApp:
         self.canvas.bind("<ButtonPress-2>", self._on_pan_press)
         self.canvas.bind("<B2-Motion>", self._on_pan_motion)
         self.canvas.bind("<ButtonRelease-2>", self._on_pan_release)
+        self.canvas.bind("<Alt-MouseWheel>", lambda event: self._on_control_wheel(event, "radius"))
+        self.canvas.bind("<Shift-MouseWheel>", lambda event: self._on_control_wheel(event, "density"))
+        self.canvas.bind("<Control-MouseWheel>", lambda event: self._on_control_wheel(event, "arrow"))
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind("<Button-4>", lambda event: self._zoom_at(1.15, event.x, event.y))
         self.canvas.bind("<Button-5>", lambda event: self._zoom_at(1.0 / 1.15, event.x, event.y))
@@ -323,8 +336,12 @@ class FlowAnnotatorApp:
         self.root.bind("<KeyPress-space>", self._on_space_press)
         self.root.bind("<KeyRelease-space>", self._on_space_release)
         self.root.bind("<KeyPress-f>", lambda _event: self.fit_image())
-        for key, mode in zip(("1", "2", "3", "4"), TOOL_MODES):
+        for key, mode in zip(("1", "2", "3", "4", "5"), TOOL_MODES):
             self.root.bind(f"<KeyPress-{key}>", lambda _event, value=mode: self._set_mode(value))
+        for key, mode in (("s", "seed"), ("c", "comb"), ("a", "arrow"), ("r", "relax"), ("e", "erase")):
+            self.root.bind(f"<KeyPress-{key}>", lambda _event, value=mode: self._set_mode(value))
+        self.root.bind("<KeyPress-bracketleft>", lambda _event: self._adjust_control("radius", -1))
+        self.root.bind("<KeyPress-bracketright>", lambda _event: self._adjust_control("radius", 1))
 
     def _set_mode(self, mode: str) -> None:
         if mode not in TOOL_MODES:
@@ -487,22 +504,18 @@ class FlowAnnotatorApp:
             self.canvas.coords(self.current_image_item, self.offset_x, self.offset_y)
         self._sync_seed_items(full=True)
         self._draw_brush_cursor(self.cursor_image_point)
+        self._draw_arrow_preview()
         self.canvas.tag_lower("source_image")
         self.zoom_label.configure(text=f"{self.scale * 100:.0f}%")
 
     def _sync_seed_items(self, *, full: bool, changed_ids: set[str] | None = None) -> None:
         seed_by_id = {seed.id: seed for seed in self._current_seeds()}
         if full:
-            for items in self.seed_items.values():
-                for item in items:
-                    self.canvas.delete(item)
-            self.seed_items.clear()
             ids = set(seed_by_id)
         else:
             ids = set(changed_ids or ())
-            for seed_id in set(self.seed_items) - set(seed_by_id):
-                for item in self.seed_items.pop(seed_id):
-                    self.canvas.delete(item)
+        for seed_id in set(self.seed_items) - set(seed_by_id):
+            self.canvas.delete(self.seed_items.pop(seed_id))
         arrow_length = float(self.arrow_size_var.get())
         for seed_id in ids:
             seed = seed_by_id.get(seed_id)
@@ -515,14 +528,11 @@ class FlowAnnotatorApp:
             width = 2.2 if seed.manual else 1.6
             if seed_id not in self.seed_items:
                 line = self.canvas.create_line(x0, y0, x1, y1, fill=color, width=width, arrow=tk.LAST, arrowshape=(10, 12, 4), tags=("seed", f"seed:{seed_id}"))
-                dot = self.canvas.create_oval(x0 - 2.5, y0 - 2.5, x0 + 2.5, y0 + 2.5, fill=color, outline="#080a0d", width=1, tags=("seed", f"seed:{seed_id}"))
-                self.seed_items[seed_id] = line, dot
+                self.seed_items[seed_id] = line
             else:
-                line, dot = self.seed_items[seed_id]
+                line = self.seed_items[seed_id]
                 self.canvas.coords(line, x0, y0, x1, y1)
                 self.canvas.itemconfigure(line, fill=color, width=width)
-                self.canvas.coords(dot, x0 - 2.5, y0 - 2.5, x0 + 2.5, y0 + 2.5)
-                self.canvas.itemconfigure(dot, fill=color)
 
     def _draw_brush_cursor(self, point: tuple[float, float] | None) -> None:
         self.canvas.delete("brush_cursor")
@@ -530,8 +540,29 @@ class FlowAnnotatorApp:
             return
         x, y = self.image_to_canvas(*point)
         radius = float(self.radius_var.get()) * self.scale
-        color = {"seed": "#39c9df", "comb": "#ff2f85", "relax": "#ffd166", "erase": "#ff625f"}[self.mode_var.get()]
-        self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, outline=color, width=2, dash=(5, 4), tags=("brush_cursor",))
+        color = {"seed": "#39c9df", "comb": "#ff2f85", "arrow": "#ffd166", "relax": "#ffd166", "erase": "#ff625f"}[self.mode_var.get()]
+        if self.mode_var.get() == "arrow":
+            self.canvas.create_oval(x - 4, y - 4, x + 4, y + 4, outline=color, width=2, tags=("brush_cursor",))
+        else:
+            self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, outline=color, width=2, dash=(5, 4), tags=("brush_cursor",))
+
+    def _draw_arrow_preview(self) -> None:
+        self.canvas.delete("arrow_preview")
+        if self.arrow_preview_start is None or self.arrow_preview_end is None:
+            return
+        x0, y0 = self.image_to_canvas(*self.arrow_preview_start)
+        x1, y1 = self.image_to_canvas(*self.arrow_preview_end)
+        self.canvas.create_line(
+            x0,
+            y0,
+            x1,
+            y1,
+            fill="#ffd166",
+            width=3,
+            arrow=tk.LAST,
+            arrowshape=(12, 15, 5),
+            tags=("arrow_preview",),
+        )
 
     def image_to_canvas(self, x: float, y: float) -> tuple[float, float]:
         return self.offset_x + float(x) * self.scale, self.offset_y + float(y) * self.scale
@@ -562,6 +593,14 @@ class FlowAnnotatorApp:
         self.stroke_last_point = point
         self.stroke_changed_ids.clear()
         self.stroke_positions_changed = False
+        self.scatter_grid = None
+        self.scatter_cell = 0.0
+        self.last_brush_update_time = 0.0
+        if self.mode_var.get() == "arrow":
+            self.arrow_preview_start = point
+            self.arrow_preview_end = point
+            self._draw_arrow_preview()
+            return
         self._apply_mode_stamp(point, previous=None)
 
     def _on_brush_motion(self, event: tk.Event) -> None:
@@ -573,6 +612,14 @@ class FlowAnnotatorApp:
         self._draw_brush_cursor(point)
         if self.stroke_before is None or self.stroke_last_point is None or point is None:
             return
+        if self.mode_var.get() == "arrow":
+            self.arrow_preview_end = point
+            self._draw_arrow_preview()
+            return
+        now = time.perf_counter()
+        if now - self.last_brush_update_time < 0.014:
+            return
+        self.last_brush_update_time = now
         spacing = max(2.0, float(self.radius_var.get()) * 0.28)
         for sample in self.stroke_samples(self.stroke_last_point, point, spacing=spacing):
             previous = self.stroke_last_point
@@ -589,6 +636,21 @@ class FlowAnnotatorApp:
         if self.stroke_before is None:
             return
         point = self.canvas_to_image(event.x, event.y, clamp=True)
+        if self.mode_var.get() == "arrow":
+            self._commit_arrow_drag(point)
+            before, after = self.stroke_before, tuple(self._current_seeds())
+            self.stroke_before = None
+            self.stroke_last_point = None
+            self.arrow_preview_start = None
+            self.arrow_preview_end = None
+            self._draw_arrow_preview()
+            if before != after:
+                self._record_history(before, after)
+                self._mark_dirty()
+                self._refresh_counts()
+            self.stroke_changed_ids.clear()
+            self.stroke_positions_changed = False
+            return
         if point is not None and self.stroke_last_point is not None:
             self._apply_mode_stamp(point, previous=self.stroke_last_point)
         if self.stroke_positions_changed:
@@ -618,6 +680,37 @@ class FlowAnnotatorApp:
             self._erase_seeds(point)
 
     @staticmethod
+    def drag_direction(
+        start: tuple[float, float],
+        end: tuple[float, float],
+    ) -> tuple[float, float] | None:
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        norm = math.hypot(dx, dy)
+        if norm < 2.0:
+            return None
+        return dx / norm, dy / norm
+
+    def _commit_arrow_drag(self, end: tuple[float, float] | None) -> None:
+        if self.arrow_preview_start is None or end is None:
+            return
+        direction = self.drag_direction(self.arrow_preview_start, end)
+        if direction is None:
+            return
+        seed = CanvasSeed(
+            uuid.uuid4().hex[:16],
+            self.arrow_preview_start,
+            direction,
+            True,
+        )
+        self._current_seeds().append(seed)
+        self.stroke_changed_ids.add(seed.id)
+        self.stroke_positions_changed = True
+        self._invalidate_graph()
+        if self.auto_smooth_var.get():
+            self._propagate_incremental({seed.id}, iterations=8)
+        self._sync_seed_items(full=False, changed_ids=self.stroke_changed_ids)
+
+    @staticmethod
     def stroke_samples(start: tuple[float, float], end: tuple[float, float], *, spacing: float) -> list[tuple[float, float]]:
         distance = math.dist(start, end)
         if distance < spacing:
@@ -633,10 +726,13 @@ class FlowAnnotatorApp:
         minimum_spacing = 22.0 - 17.0 * float(self.density_var.get())
         target_count = min(650, max(1, int(math.pi * radius * radius / (minimum_spacing * minimum_spacing) * 1.35)))
         cell = max(1.0, minimum_spacing)
-        grid: dict[tuple[int, int], list[tuple[float, float]]] = {}
-        for seed in seeds:
-            position = seed.position_px
-            grid.setdefault((int(position[0] // cell), int(position[1] // cell)), []).append(position)
+        if self.scatter_grid is None or abs(self.scatter_cell - cell) > 1.0e-6:
+            self.scatter_grid = {}
+            self.scatter_cell = cell
+            for seed in seeds:
+                position = seed.position_px
+                self.scatter_grid.setdefault((int(position[0] // cell), int(position[1] // cell)), []).append(position)
+        grid = self.scatter_grid
 
         def clear(candidate: tuple[float, float]) -> bool:
             key = int(candidate[0] // cell), int(candidate[1] // cell)
@@ -944,6 +1040,32 @@ class FlowAnnotatorApp:
 
     def _on_mousewheel(self, event) -> None:
         self._zoom_at(1.15 if event.delta > 0 else 1.0 / 1.15, event.x, event.y)
+
+    @staticmethod
+    def adjusted_control_value(
+        value: float,
+        direction: int,
+        *,
+        step: float,
+        minimum: float,
+        maximum: float,
+    ) -> float:
+        return max(minimum, min(maximum, float(value) + int(direction) * step))
+
+    def _adjust_control(self, control: str, direction: int) -> None:
+        if control == "radius":
+            self.radius_var.set(self.adjusted_control_value(self.radius_var.get(), direction, step=4.0, minimum=8.0, maximum=180.0))
+        elif control == "density":
+            self.density_var.set(self.adjusted_control_value(self.density_var.get(), direction, step=0.04, minimum=0.05, maximum=1.0))
+        elif control == "arrow":
+            self.arrow_size_var.set(self.adjusted_control_value(self.arrow_size_var.get(), direction, step=2.0, minimum=8.0, maximum=72.0))
+        else:
+            raise ValueError(f"unknown control: {control}")
+        self._controls_changed()
+
+    def _on_control_wheel(self, event, control: str) -> str:
+        self._adjust_control(control, 1 if event.delta > 0 else -1)
+        return "break"
 
     def _zoom_at(self, factor: float, canvas_x: float, canvas_y: float) -> None:
         if self.current_image is None:
