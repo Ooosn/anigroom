@@ -75,6 +75,11 @@ must not be used as a formal target-generation path.
 - `tools/fuse_gpt_flow_shell_multiview.py`
   - Fuses multi-view GPT/Gabor flow evidence with normal-shell outward
     evidence and direction consensus.
+- `tools/fuse_gpt_flow_multiview.py`
+  - Provides the shared image-flow parsing, graph cleaning, and canonical
+    overlay primitives used by the shell fusion entry point.
+  - Its older direct-fusion CLI is not the accepted target generator, but the
+    module itself is a required dependency of the accepted shell route.
 - `tools/visualize_flow_targets_as_strands.py`
   - Canonical strand-like visualization for flow targets.
 
@@ -83,10 +88,43 @@ must not be used as a formal target-generation path.
 These files can be useful for analysis but must not silently replace the formal
 target:
 
-- `tools/fuse_gpt_flow_multiview.py`
 - `tools/postprocess_directional_white_tiger.py`
 - `tools/directional_field/`
 - older `_downloads/tiger_hair_flow_36/shell_fused_*` targets
+
+## Source Recovery And Cross-Sample Validation
+
+The four target-generation entry points were absent from the later packaged
+working tree even though this document still named them as formal code. The
+loss was packaging contamination, not an intentional module deletion:
+
+- the accepted V4 tools existed as untracked files beside source commit
+  `09de8c4`;
+- a later dirty trainer refactor deleted `load_image` and `load_mask` without
+  committing that deletion;
+- the handoff copied the dirty trainer together with the untracked V4 tools,
+  so the package contained incompatible source generations;
+- the old manifest checked file hashes but did not import the complete V4
+  entry point, allowing the mismatch through.
+
+The formal tools are now restored byte-for-byte from the accepted V4 source.
+Their SHA-256 values are:
+
+- `build_white_tiger_smal_head_guides.py`:
+  `623a49a56da23ffced89a254f8d2179c48925d192be8ea90820daf017c6f1986`
+- `fuse_gpt_flow_multiview.py`:
+  `046a964a1ffb62cfd62e96aee62b68ed32744f20cd2588a411b591af33bcfc3e`
+- `fuse_gpt_flow_shell_multiview.py`:
+  `7d3e111311c6c850fb40faed47121d9deebc333b91f4a1a7cc0767c0fd0c3965`
+- `visualize_flow_targets_as_strands.py`:
+  `a5906af7963e7fa8681d442d306a00bb14afdc5b21a48b1415b94a343ddfff13`
+
+The exact white-tiger V4 contract was also run on the Panda sample with only
+dataset paths and identity mesh alignment changed. It produced 4500 roots,
+used the same 33 views with exclusions `4,24,25`, observed 4194 roots
+(`93.2%`), retained 504 direction anchors, and passed finite-array and
+single-component mesh-geodesic graph checks. The frozen local bundle is under
+`D:\RTS\datasets\panda_v4_flow_protocol_20260826\run_output`.
 
 ## Acceptance Evidence
 
