@@ -319,6 +319,9 @@ See `docs/r068_no_crossing_zero_curl.md` and
 - Gaussian export: `tools/export_white_tiger_checkpoint_gaussians_ply.py`
 - checkpoint rendering: `tools/render_white_tiger_stage1_checkpoint_views.py`
 - groom diagnostics: `tools/visualize_white_tiger_groom_attributes.py`
+- optional sparse flow annotation: `tools/groom_flow_annotator.py` and
+  `anigroom/flow_annotations.py` (input acquisition only; not yet an active
+  R068 training dependency)
 - fixed-protocol strand audit: `tools/audit_strand_structure.py`
 - mesh SDF construction: `anigroom/collision/mesh_sdf.py`
 - differentiable SDF query/loss: `anigroom/collision/sdf.py`

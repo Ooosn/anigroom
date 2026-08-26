@@ -14,6 +14,14 @@ K32 render support. Guide support remains K8.
 - Code: `anigroom/flow`, `anigroom/projection`, and the flow-building tools.
 - Accepted target: `v4_surface_direction` documented in
   `docs/modules/01_flow_initialization.md`.
+- Optional artist-guided acquisition is isolated in
+  `tools/groom_flow_annotator.py` with the strict reader
+  `anigroom/flow_annotations.py`. It stores sparse root-to-tip image anchors;
+  arrow length is diagnostic, not a physical fur-length control.
+- Automatic and manual evidence are intended to meet at the same
+  confidence-weighted 3D guide-anchor interface. The annotator itself does not
+  change R068 training behavior; 2D-to-3D fusion remains a separately gated
+  flow-module integration.
 
 ## Strand-To-Gaussian Representation
 
