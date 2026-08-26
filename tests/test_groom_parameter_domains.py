@@ -1,9 +1,12 @@
 import torch
 
 from anigroom.grooming import (
+    BRUSH_STIFFNESS_RANGE,
     GroomParameterField,
+    decode_brush_stiffness,
     decode_positive_asinh,
     decode_positive_asinh_ratio,
+    encode_brush_stiffness,
     encode_positive_asinh,
     encode_positive_asinh_ratio,
     strand_segment_budgets,
@@ -43,17 +46,34 @@ def test_opacity_uses_full_semantic_unit_interval_without_padding() -> None:
     assert 1.0 - 1.0e-6 < float(tip_ratio[1]) < 1.0
 
 
-def test_brush_stiffness_uses_the_semantic_unit_interval() -> None:
-    field = GroomParameterField(3, init_length=0.02)
-    with torch.no_grad():
-        field.brush_stiffness_raw.copy_(
-            torch.tensor([[-14.0], [0.0], [14.0]])
-        )
+def test_brush_stiffness_uses_the_affine_sigmoid_physical_domain() -> None:
+    raw = torch.tensor([[-14.0], [0.0], [14.0]])
+    strength = decode_brush_stiffness(raw)
+    lo, hi = BRUSH_STIFFNESS_RANGE
 
-    strength = field.decode().brush_stiffness
-    assert 0.0 < float(strength[0]) < 1.0e-6
-    torch.testing.assert_close(strength[1], torch.tensor([0.5]))
-    assert 1.0 - 1.0e-6 < float(strength[2]) < 1.0
+    assert abs(float(strength[0]) - lo) < 1.0e-6
+    torch.testing.assert_close(strength[1], torch.tensor([0.6]))
+    assert abs(float(strength[2]) - hi) < 1.0e-6
+
+    physical = torch.tensor([[0.2001], [0.5], [0.6], [0.9999]])
+    torch.testing.assert_close(
+        decode_brush_stiffness(encode_brush_stiffness(physical)),
+        physical,
+        atol=1.0e-6,
+        rtol=1.0e-6,
+    )
+
+
+def test_brush_stiffness_default_remains_physical_half() -> None:
+    field = GroomParameterField(3, init_length=0.02)
+    torch.testing.assert_close(
+        field.decode().brush_stiffness,
+        torch.full((3, 1), 0.5),
+    )
+    torch.testing.assert_close(
+        field.brush_stiffness_raw,
+        encode_brush_stiffness(torch.full((3, 1), 0.5)),
+    )
 
 
 def test_width_profile_uses_semantic_tip_ratio_and_unbounded_positive_taper() -> None:

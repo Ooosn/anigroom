@@ -85,10 +85,12 @@ from anigroom.grooming import (  # noqa: E402
     apply_direction_residual,
     apply_log_ratio_residual,
     build_strands,
+    decode_brush_stiffness,
     decode_positive_asinh,
     decode_positive_asinh_ratio,
     decode_positive_softplus,
     direction_to_local_components,
+    encode_brush_stiffness,
     encode_positive_asinh,
     encode_positive_asinh_ratio,
     encode_positive_softplus,
@@ -1248,7 +1250,7 @@ def guide_root_graph_smoothness(
     )
     guide_tip_ratio_coordinate = torch.asinh(model.guide_tip_width_ratio_raw)
     guide_taper_coordinate = torch.asinh(model.guide_width_taper_raw)
-    guide_brush_stiffness = torch.sigmoid(
+    guide_brush_stiffness = decode_brush_stiffness(
         model.guide_brush_stiffness_raw
     )
     guide_child_radius = decode_positive_asinh_ratio(
@@ -2109,7 +2111,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.guide_root_width_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_tip_width_ratio_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_width_taper_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
-            self.guide_brush_stiffness_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
+            self.guide_brush_stiffness_raw = torch.nn.Parameter(
+                encode_brush_stiffness(
+                    torch.full((guide_count, 1), 0.5, device=device)
+                )
+            )
             self.guide_curl_radius_ratio_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_curl_turns_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
             self.guide_child_radius_raw = torch.nn.Parameter(torch.zeros((guide_count, 1), device=device))
@@ -2231,7 +2237,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.groom.root_width_raw.zero_()
             set_unit_interval(self.groom.tip_width_ratio_raw, 0.070)
             set_positive_asinh(self.groom.width_taper_raw, 1.80)
-            self.groom.brush_stiffness_raw.zero_()
+            self.groom.brush_stiffness_raw.copy_(
+                encode_brush_stiffness(
+                    torch.full_like(self.groom.brush_stiffness_raw, 0.5)
+                )
+            )
             self.groom.direction_local_raw.copy_(
                 self.groom.direction_local_raw.new_tensor([0.92 * 0.86, -0.12 * 0.86, 0.018])
             )
@@ -2259,7 +2269,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 self.guide_tip_width_ratio_raw.zero_()
                 self.guide_width_taper_reference.fill_(1.80)
                 self.guide_width_taper_raw.zero_()
-                self.guide_brush_stiffness_raw.zero_()
+                self.guide_brush_stiffness_raw.copy_(
+                    encode_brush_stiffness(
+                        torch.full_like(self.guide_brush_stiffness_raw, 0.5)
+                    )
+                )
                 self.guide_curl_turns_raw.zero_()
                 self.guide_child_radius_reference.fill_(0.0028)
                 self.initialize_guide_shape_ratios_from_current_scale()
@@ -2753,7 +2767,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 self.guide_width_taper_raw.detach(),
                 old_width_taper_reference,
             ),
-            "guide_brush_stiffness_raw": torch.sigmoid(
+            "guide_brush_stiffness_raw": decode_brush_stiffness(
                 self.guide_brush_stiffness_raw.detach()
             ),
             "guide_curl_radius_ratio_raw": decode_positive_softplus(
@@ -2788,7 +2802,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 else source.new_empty((0, *source.shape[1:]))
             )
             if name == "guide_brush_stiffness_raw":
-                child_raw = inv_sigmoid(child_physical)
+                child_raw = encode_brush_stiffness(child_physical)
             elif name == "guide_length_raw":
                 child_raw = encode_positive_asinh_ratio(
                     child_physical,
@@ -3016,7 +3030,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 self.guide_width_taper_raw,
                 self.guide_width_taper_reference,
             ),
-            "brush_stiffness": torch.sigmoid(
+            "brush_stiffness": decode_brush_stiffness(
                 self.guide_brush_stiffness_raw
             ),
             "curl_radius_ratio": decode_positive_softplus(
@@ -3773,7 +3787,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         for name, source in physical_sources.items():
             child_value = interpolate_source(source)
             if name == "brush_stiffness_raw":
-                child_raw[name] = inv_sigmoid(child_value)
+                child_raw[name] = encode_brush_stiffness(child_value)
             elif name == "length_raw":
                 child_raw[name] = encode_positive_asinh_ratio(
                     child_value,

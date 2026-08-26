@@ -19,6 +19,7 @@ from .geometry_residuals import (
 from .gaussian_rgb_residual import GaussianRGBResidualField
 
 from .strand_gaussians import (
+    BRUSH_STIFFNESS_RANGE,
     build_brush_centerline,
     DecodedGroom,
     GroomParameterField,
@@ -27,9 +28,11 @@ from .strand_gaussians import (
     StrandGaussianOutput,
     adaptive_resample_strands,
     build_strands,
+    decode_brush_stiffness,
     decode_positive_asinh,
     decode_positive_asinh_ratio,
     decode_positive_softplus,
+    encode_brush_stiffness,
     encode_positive_asinh,
     encode_positive_asinh_ratio,
     encode_positive_softplus,
@@ -41,6 +44,7 @@ from .strand_gaussians import (
 )
 
 __all__ = [
+    "BRUSH_STIFFNESS_RANGE",
     "build_brush_centerline",
     "DecodedGeometryResiduals",
     "DecodedGroom",
@@ -56,10 +60,12 @@ __all__ = [
     "apply_direction_residual",
     "apply_log_ratio_residual",
     "build_strands",
+    "decode_brush_stiffness",
     "decode_positive_asinh",
     "decode_positive_asinh_ratio",
     "decode_positive_softplus",
     "direction_to_local_components",
+    "encode_brush_stiffness",
     "expand_child_strands",
     "encode_positive_asinh",
     "encode_positive_asinh_ratio",

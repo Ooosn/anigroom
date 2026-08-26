@@ -17,6 +17,7 @@ from .strand_deformations import deform_backbone
 
 
 EPS = 1e-8
+BRUSH_STIFFNESS_RANGE = (0.2, 1.0)
 
 
 def _normalize(x: torch.Tensor, eps: float = EPS) -> torch.Tensor:
@@ -26,6 +27,24 @@ def _normalize(x: torch.Tensor, eps: float = EPS) -> torch.Tensor:
 def _inverse_sigmoid(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     x = x.clamp(eps, 1.0 - eps)
     return torch.log(x / (1.0 - x))
+
+
+def decode_brush_stiffness(raw: torch.Tensor) -> torch.Tensor:
+    """Decode raw stiffness into its continuous physical range."""
+
+    lo, hi = BRUSH_STIFFNESS_RANGE
+    return lo + (hi - lo) * torch.sigmoid(raw)
+
+
+def encode_brush_stiffness(
+    value: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Numerically safe inverse of :func:`decode_brush_stiffness`."""
+
+    lo, hi = BRUSH_STIFFNESS_RANGE
+    relative = (value - lo) / (hi - lo)
+    return _inverse_sigmoid(relative, eps=eps)
 
 
 def decode_positive_asinh_ratio(
@@ -216,7 +235,11 @@ class GroomParameterField(nn.Module):
         self.direction_local_raw = nn.Parameter(
             torch.tensor([[0.55, 0.04, 0.22]], dtype=torch.float32, device=dev).repeat(self.root_count, 1)
         )
-        self.brush_stiffness_raw = repeated(0.0)
+        self.brush_stiffness_raw = repeated(
+            encode_brush_stiffness(
+                torch.tensor(0.5, dtype=torch.float32, device=dev)
+            )
+        )
         neutral_shape_ratio = torch.as_tensor(
             torch.finfo(torch.float32).eps,
             dtype=torch.float32,
@@ -264,7 +287,7 @@ class GroomParameterField(nn.Module):
             tip_width=root_width * tip_ratio,
             width_taper=decode_positive_asinh(self.width_taper_raw),
             direction_local=_normalize(self.direction_local_raw),
-            brush_stiffness=torch.sigmoid(self.brush_stiffness_raw),
+            brush_stiffness=decode_brush_stiffness(self.brush_stiffness_raw),
             curl_radius_ratio=decode_positive_softplus(
                 self.curl_radius_ratio_raw,
             ),
