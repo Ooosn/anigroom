@@ -8924,9 +8924,20 @@ def main() -> None:
         "mesh_path": parser.get_default("mesh_path"),
         "output_dir": parser.get_default("output_dir"),
     }
+    explicit_alignment = {
+        "init_mesh_scale": args.init_mesh_scale,
+        "init_mesh_translation": tuple(args.init_mesh_translation),
+    }
+    default_alignment = {
+        "init_mesh_scale": parser.get_default("init_mesh_scale"),
+        "init_mesh_translation": tuple(parser.get_default("init_mesh_translation")),
+    }
     apply_alignment_to_namespace(args, load_alignment_config(args.alignment_config), include_uv=False)
     for name, value in explicit_paths.items():
         if value != default_paths[name]:
+            setattr(args, name, value)
+    for name, value in explicit_alignment.items():
+        if value != default_alignment[name]:
             setattr(args, name, value)
     train_white_tiger_stage1(config_from_args(args))
 
