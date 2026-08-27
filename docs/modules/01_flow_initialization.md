@@ -162,6 +162,28 @@ is `0.99` degrees. The Panda V5 target is:
 SHA-256:
 `0c4705fbab50e4d9ed86aae2376ac71977f4bafff46f68ed643de25eaa333455`
 
+### Trusted view-cluster experiment
+
+Panda view 27 later exposed two residual multiview-fusion defects in the black
+shoulder band and upper-back boundary. Exact stage tracing places both in the
+initial raw tangent axis, before sign cleaning, continuous lift, consensus,
+training, or curl. The source 2D orientation is smooth; several accepted views
+rotate the 3D fusion despite high directional observability.
+
+The opt-in `trusted-view-cluster` axis mode records per-view additive
+contributions, forms a robust axial view cluster, keeps only q95 cluster-margin
+switches, and accepts residual surface propagation only with a two-thirds
+direct-evidence supermajority. It is semantic-free and has Panda/white-tiger,
+sign, view-order, zero-evidence, and integration tests.
+
+The tangent-axis diagnostic fixes the Panda shoulder and reduces the upper-back
+axis jump while preserving the matched white-tiger axis regression. Complete
+formal replays show that the legacy continuous-ratio/final-consensus stages can
+subsequently overwrite the trusted tangent axis and regress white-tiger direct
+evidence. Therefore `trusted-view-cluster` remains experimental,
+`anchor-propagated` remains the default, and V5 remains the accepted target.
+See `docs/panda_v5_multiview_discontinuity_20260827.md`.
+
 ## Acceptance Evidence
 
 Before using a new target in training, produce:

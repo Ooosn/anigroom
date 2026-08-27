@@ -60,6 +60,15 @@ evidence through parameter-free directional observability. The exact V4 parent
 remains tracked under `baseline_inputs/v4_surface_direction/` as the immutable
 rollback input.
 
+A 2026-08-27 Panda view-27 investigation attributes two remaining local
+discontinuities to multiview raw-axis fusion, not curl or training. The
+experimental `trusted-view-cluster` mode repairs the tangent-axis shoulder
+conflict and passes a matched white-tiger axis regression, but complete formal
+replays show the downstream continuous-ratio/final-consensus stages can
+overwrite that axis and regress white-tiger direct evidence. It is therefore
+opt-in only; `anchor-propagated` and the accepted V5 target remain unchanged.
+See `docs/panda_v5_multiview_discontinuity_20260827.md`.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049

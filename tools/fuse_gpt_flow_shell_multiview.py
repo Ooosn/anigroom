@@ -22,6 +22,7 @@ from anigroom.flow.surface_graph import (  # noqa: E402
     SurfaceRootGraph,
     build_surface_root_graph,
 )
+from anigroom.flow.view_cluster_refinement import refine_trusted_multiview_axis_field  # noqa: E402
 from anigroom.mesh_roots import SurfaceRoots, TriangleMesh, initialize_surface_roots_fps, read_obj_mesh  # noqa: E402
 from anigroom.mesh_roots import (  # noqa: E402
     initialize_surface_roots_from_candidates,
@@ -300,8 +301,11 @@ def accumulate_axis_evidence(
     n_roots: int,
     n_shells: int,
     min_confidence: float,
-) -> tuple[int, float]:
+    capture_contribution: bool = False,
+) -> tuple[int, float, torch.Tensor | None, torch.Tensor | None]:
     good = weight_flat >= float(min_confidence)
+    aligned_contribution = torch.zeros_like(flow3d_sum) if bool(capture_contribution) else None
+    effective_weight = torch.zeros_like(weight_sum) if bool(capture_contribution) else None
     if bool(good.any()):
         coeff_direction, observability = _recover_tangent_axis(sampled_ori, screen_t, screen_b)
         flow3d_flat = F.normalize(
@@ -316,10 +320,56 @@ def accumulate_axis_evidence(
         flip = has_prev & ((flow3d * prev).sum(dim=-1) < 0.0)
         flow3d = torch.where(flip[..., None], -flow3d, flow3d)
         good2 = good.reshape(n_roots, n_shells)
+        if aligned_contribution is not None and effective_weight is not None:
+            aligned_contribution[good2] = flow3d[good2] * weight[good2].unsqueeze(-1)
+            effective_weight[good2] = weight[good2]
         flow3d_sum[good2] += flow3d[good2] * weight[good2].unsqueeze(-1)
         weight_sum[good2] += weight[good2]
         view_count[good2] += 1.0
-    return int(good.sum().detach().cpu()), float(weight_flat.sum().detach().cpu())
+    return (
+        int(good.sum().detach().cpu()),
+        float(weight_flat.sum().detach().cpu()),
+        aligned_contribution,
+        effective_weight,
+    )
+
+
+def collapse_per_view_shell_evidence(
+    *,
+    per_view_contribution: torch.Tensor,
+    per_view_weight: torch.Tensor,
+    per_view_direct_weight: torch.Tensor,
+    global_weight_sum: torch.Tensor,
+    shell_probability: torch.Tensor,
+    shell_sign: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Collapse shell evidence into the exact pre-clean per-view root decomposition."""
+
+    if per_view_contribution.ndim != 4 or per_view_contribution.shape[-1] != 3:
+        raise ValueError("per_view_contribution must have shape [V, N, S, 3]")
+    expected_weight_shape = per_view_contribution.shape[:-1]
+    if per_view_weight.shape != expected_weight_shape:
+        raise ValueError("per_view_weight must have shape [V, N, S]")
+    if per_view_direct_weight.shape != expected_weight_shape:
+        raise ValueError("per_view_direct_weight must have shape [V, N, S]")
+    root_shell_shape = per_view_contribution.shape[1:3]
+    if global_weight_sum.shape != root_shell_shape:
+        raise ValueError("global_weight_sum must have shape [N, S]")
+    if shell_probability.shape != root_shell_shape:
+        raise ValueError("shell_probability must have shape [N, S]")
+    if shell_sign.shape not in {root_shell_shape, (*root_shell_shape, 1)}:
+        raise ValueError("shell_sign must have shape [N, S] or [N, S, 1]")
+
+    sign = shell_sign[..., None] if shell_sign.ndim == 2 else shell_sign
+    per_view_vectors = (
+        per_view_contribution
+        / global_weight_sum.clamp_min(EPS)[None, ..., None]
+        * shell_probability[None, ..., None]
+        * sign[None]
+    ).sum(dim=2)
+    per_view_weights = (per_view_weight * shell_probability[None]).sum(dim=2)
+    per_view_direct_weights = (per_view_direct_weight * shell_probability[None]).sum(dim=2)
+    return per_view_vectors, per_view_weights, per_view_direct_weights
 
 
 def root_graph_edges(
@@ -1282,7 +1332,7 @@ def main() -> None:
     parser.add_argument("--direction-consensus-iters", type=int, default=0)
     parser.add_argument("--direction-consensus-blend", type=float, default=0.45)
     parser.add_argument("--direction-consensus-anchor-threshold", type=float, default=0.75)
-    parser.add_argument("--axis-field-mode", choices=["raw", "anchor-propagated"], default="anchor-propagated")
+    parser.add_argument("--axis-field-mode", choices=["raw", "anchor-propagated", "trusted-view-cluster"], default="anchor-propagated")
     parser.add_argument("--axis-field-iters", type=int, default=10)
     parser.add_argument("--axis-field-smooth-strength", type=float, default=0.65)
     parser.add_argument("--shell-count", type=int, default=9)
@@ -1488,6 +1538,10 @@ def main() -> None:
     weight_sum = torch.zeros((n_roots, n_shells), device=device)
     view_count = torch.zeros((n_roots, n_shells), device=device)
     per_view = []
+    retain_view_cluster_evidence = args.axis_field_mode == "trusted-view-cluster"
+    per_view_contribution_cpu: list[torch.Tensor] = []
+    per_view_weight_cpu: list[torch.Tensor] = []
+    per_view_direct_weight_cpu: list[torch.Tensor] = []
 
     for view_idx in views:
         flow_path = args.flow_dir / f"img_{view_idx:04d}.png"
@@ -1524,7 +1578,7 @@ def main() -> None:
         sampled_ori = F.normalize(bilinear_sample(ori, shell_vis["xy"]), dim=-1, eps=1.0e-8)
         sampled_conf = bilinear_sample(target_conf, shell_vis["xy"])[:, 0]
         weight_flat = (sampled_conf * angle_weight * shell_vis["visible"].float()).clamp(0.0, 1.0)
-        direct_good, direct_weight_sum = accumulate_axis_evidence(
+        direct_good, direct_weight_sum, direct_contribution, direct_effective_weight = accumulate_axis_evidence(
             flow3d_sum=flow3d_sum,
             weight_sum=weight_sum,
             view_count=view_count,
@@ -1537,7 +1591,14 @@ def main() -> None:
             n_roots=n_roots,
             n_shells=n_shells,
             min_confidence=float(args.min_confidence),
+            capture_contribution=retain_view_cluster_evidence,
         )
+        if retain_view_cluster_evidence:
+            assert direct_contribution is not None
+            assert direct_effective_weight is not None
+            view_contribution = direct_contribution.clone()
+            view_weight = direct_effective_weight.clone()
+            view_direct_weight = direct_effective_weight.clone()
         band_good_total = 0
         band_weight_total = 0.0
         for offset in signed_silhouette_offsets:
@@ -1552,7 +1613,7 @@ def main() -> None:
                 * in_frame_mask(band_xy, width, height).float()
                 * float(args.silhouette_band_weight)
             ).clamp(0.0, 1.0)
-            band_good, band_weight = accumulate_axis_evidence(
+            band_good, band_weight_total_raw, band_contribution, band_effective_weight = accumulate_axis_evidence(
                 flow3d_sum=flow3d_sum,
                 weight_sum=weight_sum,
                 view_count=view_count,
@@ -1565,9 +1626,19 @@ def main() -> None:
                 n_roots=n_roots,
                 n_shells=n_shells,
                 min_confidence=float(args.min_confidence),
+                capture_contribution=retain_view_cluster_evidence,
             )
             band_good_total += band_good
-            band_weight_total += band_weight
+            band_weight_total += band_weight_total_raw
+            if retain_view_cluster_evidence:
+                assert band_contribution is not None
+                assert band_effective_weight is not None
+                view_contribution += band_contribution
+                view_weight += band_effective_weight
+        if retain_view_cluster_evidence:
+            per_view_contribution_cpu.append(view_contribution.detach().cpu())
+            per_view_weight_cpu.append(view_weight.detach().cpu())
+            per_view_direct_weight_cpu.append(view_direct_weight.detach().cpu())
         per_view.append(
             {
                 "view": int(view_idx),
@@ -1713,6 +1784,30 @@ def main() -> None:
     aligned_shell_axis = flow3d_shell * axis_sign
     selected_axis = F.normalize((shell_prob[..., None] * aligned_shell_axis).sum(dim=1), dim=-1, eps=1.0e-8)
     raw_selected_axis = selected_axis
+    axis_view_cluster_npz: dict[str, np.ndarray] = {}
+    per_view_vectors: torch.Tensor | None = None
+    per_view_weights: torch.Tensor | None = None
+    per_view_direct_weights: torch.Tensor | None = None
+    if retain_view_cluster_evidence:
+        if len(per_view_contribution_cpu) != len(views):
+            raise RuntimeError("trusted-view-cluster evidence count does not match used views")
+        shell_probability_cpu = shell_prob.detach().cpu()
+        shell_sign_cpu = axis_sign.detach().cpu()
+        global_weight_sum_cpu = weight_sum.detach().cpu()
+        contribution_cpu = torch.stack(per_view_contribution_cpu, dim=0)
+        combined_weight_cpu = torch.stack(per_view_weight_cpu, dim=0)
+        direct_weight_cpu = torch.stack(per_view_direct_weight_cpu, dim=0)
+        per_view_vectors_cpu, per_view_weights_cpu, per_view_direct_weights_cpu = collapse_per_view_shell_evidence(
+            per_view_contribution=contribution_cpu,
+            per_view_weight=combined_weight_cpu,
+            per_view_direct_weight=direct_weight_cpu,
+            global_weight_sum=global_weight_sum_cpu,
+            shell_probability=shell_probability_cpu,
+            shell_sign=shell_sign_cpu,
+        )
+        per_view_vectors = per_view_vectors_cpu.to(device=device, dtype=flow3d_sum.dtype)
+        per_view_weights = per_view_weights_cpu.to(device=device, dtype=flow3d_sum.dtype)
+        per_view_direct_weights = per_view_direct_weights_cpu.to(device=device, dtype=flow3d_sum.dtype)
     selected_axis_consistency = (shell_prob * axis_consistency_shell).sum(dim=1)
     selected_h = (shell_prob * shell_h).sum(dim=1)
     selected_weight = (shell_prob * direction_weight).sum(dim=1)
@@ -1739,8 +1834,94 @@ def main() -> None:
     }
     selected_h = shell_height_refine["height"]  # type: ignore[assignment]
     selected_shell_points = root_points + selected_h[:, None] * root_normals
-    axis_field_report: dict[str, float | int | str] = {"mode": str(args.axis_field_mode)}
-    if args.axis_field_mode == "anchor-propagated":
+    axis_field_report: dict[str, object] = {"mode": str(args.axis_field_mode)}
+    if args.axis_field_mode == "trusted-view-cluster":
+        assert per_view_vectors is not None
+        assert per_view_weights is not None
+        assert per_view_direct_weights is not None
+        trusted_knn, trusted_edge_weight = root_graph_edges(
+            root_points,
+            root_normals,
+            knn_k=int(args.clean_knn_k),
+            knn_k_per_root=clean_knn_k_per_root,
+            surface_graph=surface_graph,
+        )
+        trusted_result = refine_trusted_multiview_axis_field(
+            initial_axis=raw_selected_axis,
+            normals=root_normals,
+            observed=observed,
+            per_view_vectors=per_view_vectors,
+            per_view_weights=per_view_weights,
+            per_view_direct_weights=per_view_direct_weights,
+            knn=trusted_knn,
+            edge_weight=trusted_edge_weight,
+        )
+        selected_axis = trusted_result["axis"]
+        axis_field = {
+            "axis": selected_axis,
+            "raw_axis": raw_selected_axis,
+            "anchor_conf": trusted_result["confidence"],
+            "local_agreement": trusted_result["local_agreement"],
+            "axis_consistency": trusted_result["trust"],
+            "evidence_conf": trusted_result["evidence_conf"],
+            "view_conf": trusted_result["view_conf"],
+        }
+
+        def trusted_npz_array(key: str, *, dtype: np.dtype) -> np.ndarray:
+            value = trusted_result[key]
+            return value.detach().cpu().numpy().astype(dtype)
+
+        axis_view_cluster_npz.update(
+            {
+                "axis_view_cluster_per_view_vectors": per_view_vectors_cpu.numpy().astype(np.float32),
+                "axis_view_cluster_per_view_weight": per_view_weights_cpu.numpy().astype(np.float32),
+                "axis_view_cluster_per_view_direct_weight": per_view_direct_weights_cpu.numpy().astype(np.float32),
+                "axis_view_cluster_trust": trusted_npz_array("trust", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_spectral_gap": trusted_npz_array("spectral_gap", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_n_eff": trusted_npz_array("n_eff", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_hard_margin": trusted_npz_array("hard_margin", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_q95_mask": trusted_npz_array("q95_mask", dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_residual_degrees": trusted_npz_array("residual_degrees", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_residual_mask": trusted_npz_array("residual_mask", dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_direct_support": trusted_npz_array("direct_support", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_supermajority_mask": trusted_npz_array("supermajority_mask", dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_final_confidence": trusted_npz_array("final_confidence", dtype=np.dtype(np.float32)),
+            }
+        )
+        trusted_confidence = trusted_result["confidence"]
+        raw_axis_unit = F.normalize(raw_selected_axis, dim=-1, eps=EPS)
+        selected_axis_unit = F.normalize(selected_axis, dim=-1, eps=EPS)
+        axis_change = torch.acos(
+            (raw_axis_unit * selected_axis_unit).sum(dim=-1).abs().clamp(0.0, 1.0)
+        ) * (180.0 / math.pi)
+        axis_change_valid = observed & torch.isfinite(axis_change)
+        trusted_report = trusted_result.get("report", {})
+        if not isinstance(trusted_report, dict):
+            trusted_report = {}
+        trusted_constants = trusted_report.get("constants", trusted_result.get("constants", {}))
+        trusted_cutoffs = trusted_report.get("cutoffs", trusted_result.get("cutoffs", {}))
+        trusted_counts = dict(trusted_report.get("counts", trusted_result.get("counts", {})))
+        trusted_counts.setdefault("observed_roots", int(observed.sum().detach().cpu()))
+        trusted_counts.setdefault("q95_roots", int(trusted_result["q95_mask"].sum().detach().cpu()))
+        trusted_counts.setdefault("residual_roots", int(trusted_result["residual_mask"].sum().detach().cpu()))
+        trusted_counts.setdefault(
+            "direct_supermajority_roots",
+            int((trusted_result["direct_support"] >= (2.0 / 3.0)).sum().detach().cpu()),
+        )
+        trusted_counts.setdefault("supermajority_roots", int(trusted_result["supermajority_mask"].sum().detach().cpu()))
+        axis_field_report.update(
+            {
+                "constants": trusted_constants,
+                "cutoffs": trusted_cutoffs,
+                "counts": trusted_counts,
+                "trusted_view_cluster": trusted_report,
+                "change_from_raw_median_degrees": float(torch.median(axis_change[axis_change_valid]).detach().cpu()) if bool(axis_change_valid.any()) else 0.0,
+                "change_from_raw_p90_degrees": float(torch.quantile(axis_change[axis_change_valid], 0.90).detach().cpu()) if bool(axis_change_valid.any()) else 0.0,
+                "final_confidence_mean": float(trusted_confidence[observed].mean().detach().cpu()) if bool(observed.any()) else 0.0,
+                "final_confidence_p90": float(torch.quantile(trusted_confidence[observed], 0.90).detach().cpu()) if bool(observed.any()) else 0.0,
+            }
+        )
+    elif args.axis_field_mode == "anchor-propagated":
         axis_field = regularize_axial_flow_on_graph(
             root_points,
             root_normals,
@@ -1988,6 +2169,7 @@ def main() -> None:
         weight=selected_weight.detach().cpu().numpy().astype(np.float32),
         observed=observed.detach().cpu().numpy().astype(np.bool_),
         view_count=selected_view_count.detach().cpu().numpy().astype(np.float32),
+        **axis_view_cluster_npz,
         **root_sampling_payload,
     )
     summary = {
