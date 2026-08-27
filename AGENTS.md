@@ -36,11 +36,12 @@ fields is a failed route.
 2. Before changing training logic, first produce visual evidence that the
    input signal is valid. For orientation/flow, this means readable direction
    line visualizations, not just point overlays or confidence heatmaps.
-3. The accepted clean-flow `v5_surface_direction` target and its
-   normal-compatible parallel-transport runtime interpolation are one atomic
-   part of the current formal Stage 1 route. Keep `v3_height_smooth` only as a
-   controlled rollback/ablation target; do not mix a v4 target with the old
-   Euclidean runtime sampler.
+3. The accepted clean-flow `v7_surface_direction` target, its canonical global
+   direction lifting, and normal-compatible parallel-transport runtime
+   interpolation are one atomic part of the current formal Stage 1 route.
+   Keep V6 as the fixed-axis parent, V5 as the completed trained rollback, and
+   `v3_height_smooth` only as a controlled ablation target; do not mix a modern
+   target with the old Euclidean runtime sampler.
 4. Treat black-white tiger stripes as a known source of false orientation.
    Confidence alone is not a valid anchor criterion. Anchor selection must
    consider stripe rejection, local direction coherence, visibility, and
@@ -139,10 +140,12 @@ design or tune it as an isolated standalone module.
 
 The current route uses the accepted clean-flow target:
 
-`baseline_inputs/v5_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
+`baseline_inputs/v7_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
-`v4_surface_direction`, `v3_height_smooth`, and `v2_consensus` are retained
-only as controlled rollback/ablation lines. Do not treat them as the default.
+`v6_surface_direction` is the immutable fixed-axis parent;
+`v5_surface_direction` is the completed trained rollback. V4,
+`v3_height_smooth`, and `v2_consensus` are retained only as controlled
+rollback/ablation lines. Do not treat them as the default.
 
 Do not replace it with older `v11`, `8192`, or ad hoc flow outputs unless the
 replacement is explicitly accepted and documented in

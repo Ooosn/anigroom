@@ -1,8 +1,10 @@
 # Panda V5 Multiview Discontinuity Investigation
 
-Status: resolved by the V6 trusted-tangent and guarded multiview-ratio target.
-The completed R068+V5 training checkpoint remains the trained rollback; V6 is
-the accepted initialization input for the next Panda cross-sample run.
+Status: the unsigned tangent-axis defect was resolved by V6. A later directed
+audit reopened arrow-head continuity and is resolved by the V7 canonical
+global-direction target. The completed R068+V5 checkpoint remains the trained
+rollback; V6 is the fixed-axis parent and V7 is the accepted initialization
+input for the next Panda cross-sample run.
 
 ## Reported Defect
 
@@ -135,11 +137,17 @@ visible discontinuity. All numeric arrays are finite.
 
 ## Decision
 
-- Accept V6 as the initialization target for the next Panda cross-sample run.
-- Keep V5 and its completed R068 checkpoint as the exact trained rollback.
-- Make `trusted-view-cluster` the formal target-generation default; it includes
-  fixed tangent ownership and guarded multiview ratio fitting.
+- Accept V7 as the initialization target for the next Panda cross-sample run.
+- Keep V6 as the exact fixed-axis parent and V5 plus its completed R068
+  checkpoint as the exact trained rollback.
+- Keep `trusted-view-cluster` as the formal tangent-axis owner, then apply the
+  canonical global sign solver and fixed-sign directed ratio refit.
 - Do not claim a training improvement until a new from-zero run completes.
+
+V6's prior acceptance is superseded because axial `abs(dot)` metrics hid
+directed reversals. V7 formal Panda/white targets introduce zero severe edges,
+pass fixed views `00/09/18/27`, and pass the matched 64-step graph-streamline
+audit. See `docs/v7_global_directed_flow.md`.
 
 ## Evidence
 
@@ -159,6 +167,16 @@ visible discontinuity. All numeric arrays are finite.
   `b3f49317dbf9d09a2d3981dc02b48cf4dff5e67b19f900efbf0268ac270d8e29`
 - Matched white-tiger target SHA-256:
   `29d07139d6214cf9540e814a8f872128ad29999890221e8afe0b2c5599586dd1`
+- Accepted V7 Panda target SHA-256:
+  `6a220f52b15ca996c88e71802d3309f9499ade442f79dc72300f1af12b5fa56f`
+- Accepted V7 white-tiger target SHA-256:
+  `f009af820560adf19b6eedbb8bf2c5d29df00cca576be13161b4ee2ebaed6510`
+- V7 formal runtime:
+  `/home/wangyy/anigroom-global-directed-v7-20260828`
+- V7 local acceptance:
+  `D:/RTS/_tmp/anigroom_v7_formal_results_20260828`
+- V7 streamline audit:
+  `D:/RTS/_tmp/anigroom_v7_streamline_audit_20260828`
 - Accepted formal analysis:
   `D:/RTS/_tmp/formal_trusted_flow_fixed_ratio_results_20260827`
 - Rejected formal contribution-cluster target SHA-256:

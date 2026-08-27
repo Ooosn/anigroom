@@ -10,7 +10,7 @@ quality, not the training schedule.
 
 Current accepted line:
 
-`baseline_inputs/v6_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
+`baseline_inputs/v7_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
 Current generation settings:
 
@@ -20,8 +20,9 @@ Current generation settings:
 - Guide roots: `500` head roots, `4000` body roots
 - Clean K: `24` for head, `12` for body
 - Observed roots: `4407 / 4500`
-- Trusted tangent q95 roots / guarded ratio updates: `221 / 513`
-- V6 inherits the V5/V4 direction changes from `v3_height_smooth`:
+- Trusted tangent q95 roots / global sign changes / postratio updates:
+  `221 / 62 / 490`
+- V7 inherits the V6/V5/V4 direction changes from `v3_height_smooth`:
   - guide-root direction cleaning uses a mesh-geodesic neighborhood;
   - neighboring 3D directions are parallel-transported before comparison or
     averaging;
@@ -45,8 +46,17 @@ Current generation settings:
     ratio;
   - an LS ratio update must improve both direct residual and local graph jump;
   - old whole-vector final consensus is superseded in this mode.
+- V7 correction:
+  - exact final-ratio multiview evidence scores both tangent signs;
+  - canonical trusted connected blocks solve the binary surface orientation;
+  - root and view ordering cannot change the solution;
+  - the final ratio is refit only after signs are fixed;
+  - every ratio update uses signed parallel-transport angles and both passes
+    fail hard if a new severe reverse edge appears.
 
 Retained baselines:
+
+`baseline_inputs/v6_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
 `baseline_inputs/v5_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
@@ -56,15 +66,21 @@ Retained baselines:
 
 `D:\petsgaussianhair\_downloads\tiger_hair_flow_36\shell_fused_smal_head500_body4000_candidate65536_headk24_bodyk12_v2_consensus`
 
-Keep V5 as the completed trained rollback and keep V4, `v3_height_smooth`, and
-`v2_consensus` for controlled experiments and ablations. V6 is not yet tied to
-a completed training checkpoint.
+Keep V6 as the immutable fixed-axis parent, V5 as the completed trained
+rollback, and V4, `v3_height_smooth`, and `v2_consensus` for controlled
+experiments and ablations. V7 is not yet tied to a completed training
+checkpoint.
 
 Rejected diagnostic: sign-aware direction consensus improved unsigned local
 axis smoothness but introduced directed sign flips in the tail/body field, so it
 must not be used as a formal target-generation path.
 
 ## Formal Code
+
+- `anigroom/flow/global_sign_orientation.py`
+  - Computes exact final-ratio multiview sign evidence.
+  - Solves canonical trusted connected blocks over the transported graph.
+  - Guarantees that no provisional non-severe edge becomes severe.
 
 - `anigroom/flow/clean_flow.py`
   - Loads clean-flow targets.
@@ -191,12 +207,47 @@ normal/tangent ratio. A ratio update is retained only if it improves both direct
 multiview residual and local maximum graph jump. This supersedes old
 whole-vector final consensus, which could overwrite a correct tangent axis.
 
-The formal Panda and white-tiger reruns preserve observed populations, improve
-direct multiview evidence, and pass canonical views `00`, `09`, `18`, and `27`.
-V6 is accepted for the next Panda cross-sample run; V5 remains the trained
-rollback target. The V6 SHA-256 is
+The formal Panda and white-tiger reruns preserve observed populations and
+improve direct multiview evidence. V6 is retained as the fixed-axis parent, but
+its acceptance was reopened when directed metrics exposed arrow-head reversals
+hidden by axial `abs(dot)` checks. V5 remains the trained rollback target. The
+V6 Panda SHA-256 is
 `b3f49317dbf9d09a2d3981dc02b48cf4dff5e67b19f900efbf0268ac270d8e29`.
 See `docs/panda_v5_multiview_discontinuity_20260827.md`.
+
+### V7 canonical global direction
+
+V7 preserves the V6 unsigned tangent axis. At the provisional final ratio it
+projects both tangent signs into every contributing view and forms one exact
+cosine-squared sign unary. Intrinsic graph edges use parallel-transported
+signed couplings. Edges that would become severely reversed under a
+single-endpoint flip union their endpoints into a trusted block; best-gain
+block updates then solve the global field. Exact float32 surface identity and
+canonical float64 accumulation make the result invariant to root and view
+ordering.
+
+With signs fixed, direct multiview evidence recomputes an uncapped nonnegative
+ratio. Updates are accepted in canonical evidence order only when direct
+residual improves, no provisional non-severe edge becomes severe, and maximum
+incident directed angle does not increase. Both global orientation and ratio
+refit fail target generation if their zero-new-severe invariant fails.
+
+Formal source commit
+`0712587e2c32c621f5566b7a8706c9dc061fc85b` produces:
+
+- Panda: `4194` observed roots, `112` global sign changes, `322` resolved
+  severe edges, `527` postratio updates, zero new severe edges;
+- white tiger: `4407` observed roots, `62` global sign changes, `174` resolved
+  severe edges, `490` postratio updates, zero new severe edges.
+
+The accepted white/Panda target SHA-256 values are respectively
+`f009af820560adf19b6eedbb8bf2c5d29df00cca576be13161b4ee2ebaed6510`
+and
+`6a220f52b15ca996c88e71802d3309f9499ade442f79dc72300f1af12b5fa56f`.
+Both pass fixed views `00/09/18/27`. The matched graph-streamline audit reduces
+Panda/white selected severe transitions `113 -> 75` and `144 -> 113`; the
+Panda view-27 crop becomes `13 -> 0` with two-cycles `2 -> 0`.
+See `docs/v7_global_directed_flow.md`.
 
 ## Acceptance Evidence
 

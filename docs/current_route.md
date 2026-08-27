@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-08-27.
+Status date: 2026-08-28.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -54,11 +54,10 @@ capacity cost, density-matched surface smoothing, and coherent fixed-protocol
 assets, not reported as a PSNR gain over R036. Relative to R042, final/best
 test composite changes by only `-0.00384/-0.00496 dB`, while the 100k-strand
 audit removes every length above `0.15` and reduces maximum local turn from
-`14.89` to `2.73` degrees. The exact V5 target is tracked under
-`baseline_inputs/v5_surface_direction/`. It changes only initial tangent-axis
-evidence through parameter-free directional observability. The exact V4 parent
-remains tracked under `baseline_inputs/v4_surface_direction/` as the immutable
-rollback input.
+`14.89` to `2.73` degrees. The exact current target is tracked under
+`baseline_inputs/v7_surface_direction/`. V6 is its immutable fixed-axis parent,
+V5 is the completed trained rollback, and V4 remains the older clean-axis
+ablation.
 
 A 2026-08-27 Panda view-27 investigation attributes two remaining local
 discontinuities to multiview raw-axis fusion, not curl or training. The
@@ -66,15 +65,39 @@ V6 `trusted-view-cluster` mode gives tangent ownership to robust multiview
 clusters, then fits only a guarded nonnegative normal/tangent ratio from direct
 selected-shell evidence. It supersedes old whole-vector final consensus. Panda
 shoulder/upper-back local jumps become `24.77/29.22 deg`; matched white-tiger
-view-27 and direct all-view evidence both improve, and both samples pass views
-`00/09/18/27`. V6 is the accepted initialization target for the next Panda
-cross-sample run; V5 remains the completed trained rollback.
+view-27 and direct all-view evidence both improve. V6 was then reopened when a
+directed audit found that `abs(dot)` metrics hid local arrow-head reversals:
+Panda final directed-negative observed edges were `1754 / 54244`, with a
+`179.93 deg` maximum.
+
+V7 keeps the V6 tangent axis, computes exact multiview `+/-` sign evidence,
+solves canonical trusted connected blocks over the parallel-transport graph,
+then refits only the nonnegative normal/tangent ratio with a directed
+sequential guard. The method has no species, region, root, view-index, or image
+coordinate rule. Formal Panda/white target generation at source commit
+`0712587e2c32c621f5566b7a8706c9dc061fc85b` preserves `4194/4407` observed
+roots, changes `112/62` global signs, accepts `527/490` post-sign ratio updates,
+resolves `322/174` severe directed edges, and introduces zero.
+
+Both samples pass fixed original-resolution views `00/09/18/27`. A matched
+64-step graph-streamline audit reduces Panda/white severe selected transitions
+`113 -> 75` and `144 -> 113`; Panda view-27 crop transitions become `13 -> 0`
+and two-cycles `2 -> 0`, without reducing median path length or increasing
+P99 convergence. V7 is the accepted initialization target for the next
+cross-sample run; V6 remains the fixed-axis parent and V5 remains the completed
+trained rollback.
+
 The white-tiger V6 baseline is tracked under
 `baseline_inputs/v6_surface_direction/` with SHA-256
 `29d07139d6214cf9540e814a8f872128ad29999890221e8afe0b2c5599586dd1`;
 the matched Panda target SHA-256 is
 `b3f49317dbf9d09a2d3981dc02b48cf4dff5e67b19f900efbf0268ac270d8e29`.
-See `docs/panda_v5_multiview_discontinuity_20260827.md`.
+The accepted V7 white/Panda hashes are respectively
+`f009af820560adf19b6eedbb8bf2c5d29df00cca576be13161b4ee2ebaed6510`
+and
+`6a220f52b15ca996c88e71802d3309f9499ade442f79dc72300f1af12b5fa56f`.
+See `docs/v7_global_directed_flow.md` and
+`docs/panda_v5_multiview_discontinuity_20260827.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual

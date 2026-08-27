@@ -12,7 +12,7 @@ K32 render support. Guide support remains K8.
 ## Flow Initialization
 
 - Code: `anigroom/flow`, `anigroom/projection`, and the flow-building tools.
-- Accepted target: `v5_surface_direction` documented in
+- Accepted target: `v7_surface_direction` documented in
   `docs/modules/01_flow_initialization.md`.
 - Optional artist-guided acquisition is isolated in
   `tools/groom_flow_annotator.py` and `anigroom/seed_flow_annotations.py`.
