@@ -1,9 +1,8 @@
 # Panda V5 Multiview Discontinuity Investigation
 
-Status: causal attribution and a bounded experimental implementation are
-complete. The accepted V5 target is unchanged. The experimental
-`trusted-view-cluster` axis mode is opt-in; `anchor-propagated` remains the
-formal default.
+Status: resolved by the V6 trusted-tangent and guarded multiview-ratio target.
+The completed R068+V5 training checkpoint remains the trained rollback; V6 is
+the accepted initialization input for the next Panda cross-sample run.
 
 ## Reported Defect
 
@@ -73,12 +72,11 @@ within `30 deg`. It produces:
 | Upper-back view-27 mismatch | 53.27 deg | 47.91 deg |
 | Upper-back local jump | 37.52 deg | 22.28 deg |
 | Global view-27 mismatch | 23.95 deg | 23.40 deg |
-| All-view direct mismatch | 15.11 deg | 15.16 deg |
+| All-view direct mismatch | 16.26 deg | 15.78 deg |
 
-The matched white-tiger diagnostic changes global view-27 mismatch by
-`+0.139 deg`, all-view direct mean by `+0.146 deg`, and highest-trust-quintile
-median direction by `0.371 deg`. The final residual stage accepts only two
-white-tiger roots.
+This tangent-axis result is necessary but not sufficient: the first formal
+replay showed that legacy downstream whole-vector consensus could overwrite
+it.
 
 ## Formal End-to-End Finding
 
@@ -106,15 +104,42 @@ max-edge propagation were also tested. None repaired the complete Panda
 upper-back field while preserving white-tiger multiview evidence. These arms
 are rejected rather than hidden behind Panda-specific thresholds.
 
+## Fixed-axis multiview-ratio resolution
+
+The final method separates ownership. The trusted view cluster owns the
+unsigned tangent axis. The continuous direction stage supplies only an initial
+tangent sign and outward normal/tangent ratio. At the final shell point, each
+direct view supplies a one-dimensional linear constraint on that ratio:
+
+`cross(o, p_axis + rho * p_normal) = A * rho + b = 0`.
+
+Weighted least squares solves nonnegative `rho` with no upper cap. A root keeps
+the LS update only when it improves both its direct multiview residual and its
+maximum transported graph-edge jump; otherwise it retains the pre-consensus
+ratio. The old whole-vector consensus is superseded in this mode and cannot
+rotate the trusted tangent axis.
+
+The formal Panda result keeps all `4194` observed roots, accepts `434` guarded
+ratio updates, and produces:
+
+- shoulder final mismatch/local jump: `26.12 / 24.77 deg`;
+- upper-back final mismatch/local jump: `49.18 / 29.22 deg`;
+- global view-27 mismatch: `23.80 -> 20.55 deg`;
+- corrected direct all-view mean: `16.11 -> 12.78 deg`.
+
+The matched white-tiger run keeps all `4407` observed roots, accepts `513`
+ratio updates, improves view-27 mismatch `24.01 -> 22.97 deg`, and improves
+corrected direct all-view mean `14.32 -> 13.55 deg`. Panda and white-tiger
+canonical views `00`, `09`, `18`, and `27` pass visual inspection without a new
+visible discontinuity. All numeric arrays are finite.
+
 ## Decision
 
-- Keep the accepted V5 target and `anchor-propagated` default unchanged.
-- Keep `trusted-view-cluster` as an explicit experimental mode with synthetic,
-  permutation, sign-invariance, zero-evidence, and integration tests.
-- Do not train from any target produced in this investigation.
-- The next method question is downstream ownership: continuous lift and final
-  direction consensus must be made conditional on trusted tangent evidence
-  without globally flattening white-tiger boundaries.
+- Accept V6 as the initialization target for the next Panda cross-sample run.
+- Keep V5 and its completed R068 checkpoint as the exact trained rollback.
+- Make `trusted-view-cluster` the formal target-generation default; it includes
+  fixed tangent ownership and guarded multiview ratio fitting.
+- Do not claim a training improvement until a new from-zero run completes.
 
 ## Evidence
 
@@ -130,10 +155,16 @@ are rejected rather than hidden behind Panda-specific thresholds.
   `D:/RTS/_tmp/formal_trusted_flow_selected_point_results_20260827`
 - Formal HGC runtime:
   `/home/wangyy/anigroom-flow-trusted-20260827`
+- Accepted V6 Panda target SHA-256:
+  `b3f49317dbf9d09a2d3981dc02b48cf4dff5e67b19f900efbf0268ac270d8e29`
+- Matched white-tiger target SHA-256:
+  `29d07139d6214cf9540e814a8f872128ad29999890221e8afe0b2c5599586dd1`
+- Accepted formal analysis:
+  `D:/RTS/_tmp/formal_trusted_flow_fixed_ratio_results_20260827`
 - Rejected formal contribution-cluster target SHA-256:
   `25f6c23b081c631354890c06c4e7e801fae3702ee456e9788d04a9849f507945`
 - Rejected matched white target SHA-256:
   `b0a05fe66b31322fc8db6ebb262b1935c0de58e281f1e5e94ea9541160550b63`
 
 Both held HGC qlogin allocations were preserved. No training process was
-started and no accepted target or checkpoint was overwritten.
+started and no prior target or checkpoint was overwritten.

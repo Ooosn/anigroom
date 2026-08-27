@@ -207,9 +207,13 @@ def test_collapse_per_view_shell_evidence_matches_additive_decomposition() -> No
 
 def test_fusion_module_imports_trusted_refinement_and_parser_keeps_modes() -> None:
     module = _module()
-    from anigroom.flow.view_cluster_refinement import refine_trusted_multiview_axis_field
+    from anigroom.flow.view_cluster_refinement import (
+        refine_fixed_axis_multiview_ratio,
+        refine_trusted_multiview_axis_field,
+    )
 
     assert module.refine_trusted_multiview_axis_field is refine_trusted_multiview_axis_field
+    assert module.refine_fixed_axis_multiview_ratio is refine_fixed_axis_multiview_ratio
 
     class _ParserCaptured(Exception):
         pass
@@ -236,7 +240,7 @@ def test_fusion_module_imports_trusted_refinement_and_parser_keeps_modes() -> No
         argparse.ArgumentParser.parse_args = original_parse_args  # type: ignore[method-assign]
 
     assert captured["choices"] == ("raw", "anchor-propagated", "trusted-view-cluster")
-    assert captured["default"] == "anchor-propagated"
+    assert captured["default"] == "trusted-view-cluster"
 
 
 def test_fusion_helpers_have_no_species_region_or_view_index_parameters() -> None:
@@ -251,3 +255,29 @@ def test_fusion_helpers_have_no_species_region_or_view_index_parameters() -> Non
     for helper_name in helper_names:
         parameters = inspect.signature(getattr(module, helper_name)).parameters
         assert not forbidden.intersection(parameters)
+
+
+def test_selected_point_collector_and_ratio_solver_are_wired_only_to_trusted_mode() -> None:
+    module = _module()
+    collector = inspect.signature(module.collect_selected_tangent_axis_evidence)
+    assert tuple(collector.parameters) == (
+        "args",
+        "views",
+        "selected_shell_points",
+        "root_normals",
+        "root_tangents",
+        "root_bitangents",
+        "viewmats",
+        "ks",
+        "mesh",
+        "width",
+        "height",
+        "observed",
+        "device",
+    )
+    source = inspect.getsource(module.main)
+    assert 'if args.axis_field_mode == "trusted-view-cluster"' in source
+    assert "refine_fixed_axis_multiview_ratio(" in source
+    assert '"superseded-by-fixed-axis-multiview-ratio"' in source
+    assert 'args.axis_field_mode != "trusted-view-cluster"' in source
+    assert 'default="trusted-view-cluster"' in source

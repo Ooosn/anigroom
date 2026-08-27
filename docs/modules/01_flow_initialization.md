@@ -10,7 +10,7 @@ quality, not the training schedule.
 
 Current accepted line:
 
-`baseline_inputs/v5_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
+`baseline_inputs/v6_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
 Current generation settings:
 
@@ -20,8 +20,8 @@ Current generation settings:
 - Guide roots: `500` head roots, `4000` body roots
 - Clean K: `24` for head, `12` for body
 - Observed roots: `4407 / 4500`
-- Direction consensus anchors: `563`
-- V5 inherits the V4 direction changes from `v3_height_smooth`:
+- Trusted tangent q95 roots / guarded ratio updates: `221 / 513`
+- V6 inherits the V5/V4 direction changes from `v3_height_smooth`:
   - guide-root direction cleaning uses a mesh-geodesic neighborhood;
   - neighboring 3D directions are parallel-transported before comparison or
     averaging;
@@ -39,8 +39,16 @@ Current generation settings:
   - initial tangent-axis fusion uses parameter-free directional observability;
   - unsupported edge-on projections no longer contribute false tangent axes;
   - later normal/lift fitting, sign, consensus, and shell behavior are unchanged.
+- V6 correction:
+  - robust per-view contribution clusters own the tangent axis;
+  - direct selected-shell evidence solves only the nonnegative normal/tangent
+    ratio;
+  - an LS ratio update must improve both direct residual and local graph jump;
+  - old whole-vector final consensus is superseded in this mode.
 
 Retained baselines:
+
+`baseline_inputs/v5_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
 `baseline_inputs/v4_surface_direction/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
@@ -48,8 +56,9 @@ Retained baselines:
 
 `D:\petsgaussianhair\_downloads\tiger_hair_flow_36\shell_fused_smal_head500_body4000_candidate65536_headk24_bodyk12_v2_consensus`
 
-Keep V4, `v3_height_smooth`, and `v2_consensus` for controlled experiments and
-ablations. None is the current training target.
+Keep V5 as the completed trained rollback and keep V4, `v3_height_smooth`, and
+`v2_consensus` for controlled experiments and ablations. V6 is not yet tied to
+a completed training checkpoint.
 
 Rejected diagnostic: sign-aware direction consensus improved unsigned local
 axis smoothness but introduced directed sign flips in the tail/body field, so it
@@ -162,7 +171,7 @@ is `0.99` degrees. The Panda V5 target is:
 SHA-256:
 `0c4705fbab50e4d9ed86aae2376ac71977f4bafff46f68ed643de25eaa333455`
 
-### Trusted view-cluster experiment
+### V6 trusted tangent and guarded ratio
 
 Panda view 27 later exposed two residual multiview-fusion defects in the black
 shoulder band and upper-back boundary. Exact stage tracing places both in the
@@ -170,18 +179,23 @@ initial raw tangent axis, before sign cleaning, continuous lift, consensus,
 training, or curl. The source 2D orientation is smooth; several accepted views
 rotate the 3D fusion despite high directional observability.
 
-The opt-in `trusted-view-cluster` axis mode records per-view additive
+The `trusted-view-cluster` axis mode records per-view additive
 contributions, forms a robust axial view cluster, keeps only q95 cluster-margin
 switches, and accepts residual surface propagation only with a two-thirds
 direct-evidence supermajority. It is semantic-free and has Panda/white-tiger,
 sign, view-order, zero-evidence, and integration tests.
 
-The tangent-axis diagnostic fixes the Panda shoulder and reduces the upper-back
-axis jump while preserving the matched white-tiger axis regression. Complete
-formal replays show that the legacy continuous-ratio/final-consensus stages can
-subsequently overwrite the trusted tangent axis and regress white-tiger direct
-evidence. Therefore `trusted-view-cluster` remains experimental,
-`anchor-propagated` remains the default, and V5 remains the accepted target.
+The tangent axis is then frozen. Direct evidence at the final selected shell
+point gives a weighted one-dimensional least-squares solve for the nonnegative
+normal/tangent ratio. A ratio update is retained only if it improves both direct
+multiview residual and local maximum graph jump. This supersedes old
+whole-vector final consensus, which could overwrite a correct tangent axis.
+
+The formal Panda and white-tiger reruns preserve observed populations, improve
+direct multiview evidence, and pass canonical views `00`, `09`, `18`, and `27`.
+V6 is accepted for the next Panda cross-sample run; V5 remains the trained
+rollback target. The V6 SHA-256 is
+`b3f49317dbf9d09a2d3981dc02b48cf4dff5e67b19f900efbf0268ac270d8e29`.
 See `docs/panda_v5_multiview_discontinuity_20260827.md`.
 
 ## Acceptance Evidence

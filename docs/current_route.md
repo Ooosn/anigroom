@@ -62,11 +62,18 @@ rollback input.
 
 A 2026-08-27 Panda view-27 investigation attributes two remaining local
 discontinuities to multiview raw-axis fusion, not curl or training. The
-experimental `trusted-view-cluster` mode repairs the tangent-axis shoulder
-conflict and passes a matched white-tiger axis regression, but complete formal
-replays show the downstream continuous-ratio/final-consensus stages can
-overwrite that axis and regress white-tiger direct evidence. It is therefore
-opt-in only; `anchor-propagated` and the accepted V5 target remain unchanged.
+V6 `trusted-view-cluster` mode gives tangent ownership to robust multiview
+clusters, then fits only a guarded nonnegative normal/tangent ratio from direct
+selected-shell evidence. It supersedes old whole-vector final consensus. Panda
+shoulder/upper-back local jumps become `24.77/29.22 deg`; matched white-tiger
+view-27 and direct all-view evidence both improve, and both samples pass views
+`00/09/18/27`. V6 is the accepted initialization target for the next Panda
+cross-sample run; V5 remains the completed trained rollback.
+The white-tiger V6 baseline is tracked under
+`baseline_inputs/v6_surface_direction/` with SHA-256
+`29d07139d6214cf9540e814a8f872128ad29999890221e8afe0b2c5599586dd1`;
+the matched Panda target SHA-256 is
+`b3f49317dbf9d09a2d3981dc02b48cf4dff5e67b19f900efbf0268ac270d8e29`.
 See `docs/panda_v5_multiview_discontinuity_20260827.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary

@@ -22,7 +22,10 @@ from anigroom.flow.surface_graph import (  # noqa: E402
     SurfaceRootGraph,
     build_surface_root_graph,
 )
-from anigroom.flow.view_cluster_refinement import refine_trusted_multiview_axis_field  # noqa: E402
+from anigroom.flow.view_cluster_refinement import (  # noqa: E402
+    refine_fixed_axis_multiview_ratio,
+    refine_trusted_multiview_axis_field,
+)
 from anigroom.mesh_roots import SurfaceRoots, TriangleMesh, initialize_surface_roots_fps, read_obj_mesh  # noqa: E402
 from anigroom.mesh_roots import (  # noqa: E402
     initialize_surface_roots_from_candidates,
@@ -891,6 +894,85 @@ def direction_normal_ratio(direction: torch.Tensor, normals: torch.Tensor) -> to
     return normal_component / tangent_component.clamp_min(EPS)
 
 
+def collect_selected_tangent_axis_evidence(
+    *,
+    args: argparse.Namespace,
+    views: list[int],
+    selected_shell_points: torch.Tensor,
+    root_normals: torch.Tensor,
+    root_tangents: torch.Tensor,
+    root_bitangents: torch.Tensor,
+    viewmats: torch.Tensor,
+    ks: torch.Tensor,
+    mesh: TriangleMesh,
+    width: int,
+    height: int,
+    observed: torch.Tensor,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, object]]:
+    """Lift direct 2D axes exactly at the final selected shell points."""
+
+    axis_rows: list[torch.Tensor] = []
+    weight_rows: list[torch.Tensor] = []
+    per_view_report: list[dict[str, int | float]] = []
+    for view_idx in views:
+        flow_path = args.flow_dir / f"img_{view_idx:04d}.png"
+        mask_path = args.data_root / "silhouette" / f"img_{view_idx:04d}.png"
+        strength, _, _ = aligned_flow_strength(flow_path, mask_path, width, height)
+        ori_np, conf_np = orientation_from_line_strength(strength)
+        ori = torch.from_numpy(ori_np).to(device=device)
+        conf = torch.from_numpy(conf_np).to(device=device)
+        mask = load_mask(mask_path, device)
+        target_conf = conf * mask
+        mesh_depth = render_mesh_depth(mesh, viewmats[view_idx], ks[view_idx], width, height, device=device)
+        visibility = sample_shell_visibility(
+            selected_shell_points,
+            root_normals,
+            viewmats[view_idx],
+            ks[view_idx],
+            mesh_depth.depth,
+            depth_abs_tolerance=float(args.depth_abs_tolerance),
+            depth_rel_tolerance=float(args.depth_rel_tolerance),
+            local_depth_kernel=int(args.local_depth_kernel),
+            front_normal_z=float(args.front_normal_z),
+        )
+        sampled_ori = F.normalize(bilinear_sample(ori, visibility["xy"]), dim=-1, eps=EPS)
+        sampled_conf = bilinear_sample(target_conf, visibility["xy"])[:, 0]
+        raw_weight = (
+            sampled_conf
+            * view_angle_weight(root_normals, viewmats[view_idx], float(args.view_angle_power))
+            * visibility["visible"].float()
+            * observed.float()
+        ).clamp(0.0, 1.0)
+        screen_t = project_directions(selected_shell_points, root_tangents, viewmats[view_idx], ks[view_idx])
+        screen_b = project_directions(selected_shell_points, root_bitangents, viewmats[view_idx], ks[view_idx])
+        coeff_direction, observability = _recover_tangent_axis(sampled_ori, screen_t, screen_b)
+        axis = F.normalize(
+            coeff_direction[:, 0:1] * root_tangents + coeff_direction[:, 1:2] * root_bitangents,
+            dim=-1,
+            eps=EPS,
+        )
+        good = raw_weight >= float(args.min_confidence)
+        effective_weight = torch.where(good, raw_weight * observability, torch.zeros_like(raw_weight))
+        axis_rows.append(axis.detach())
+        weight_rows.append(effective_weight.detach())
+        per_view_report.append(
+            {
+                "view": int(view_idx),
+                "direct_root_count": int((effective_weight > 0.0).sum().detach().cpu()),
+                "effective_weight_sum": float(effective_weight.sum().detach().cpu()),
+            }
+        )
+    axes = torch.stack(axis_rows, dim=0)
+    weights = torch.stack(weight_rows, dim=0)
+    return axes, weights, {
+        "view_count": int(len(axis_rows)),
+        "direct_root_view_count": int((weights > 0.0).sum().detach().cpu()),
+        "covered_root_count": int((weights > 0.0).any(dim=0).sum().detach().cpu()),
+        "per_view": per_view_report,
+    }
+
+
 def collect_selected_direction_evidence(
     *,
     args,
@@ -1332,7 +1414,7 @@ def main() -> None:
     parser.add_argument("--direction-consensus-iters", type=int, default=0)
     parser.add_argument("--direction-consensus-blend", type=float, default=0.45)
     parser.add_argument("--direction-consensus-anchor-threshold", type=float, default=0.75)
-    parser.add_argument("--axis-field-mode", choices=["raw", "anchor-propagated", "trusted-view-cluster"], default="anchor-propagated")
+    parser.add_argument("--axis-field-mode", choices=["raw", "anchor-propagated", "trusted-view-cluster"], default="trusted-view-cluster")
     parser.add_argument("--axis-field-iters", type=int, default=10)
     parser.add_argument("--axis-field-smooth-strength", type=float, default=0.65)
     parser.add_argument("--shell-count", type=int, default=9)
@@ -1835,6 +1917,11 @@ def main() -> None:
     selected_h = shell_height_refine["height"]  # type: ignore[assignment]
     selected_shell_points = root_points + selected_h[:, None] * root_normals
     axis_field_report: dict[str, object] = {"mode": str(args.axis_field_mode)}
+    trusted_knn: torch.Tensor | None = None
+    trusted_edge_weight: torch.Tensor | None = None
+    selected_direct_axes: torch.Tensor | None = None
+    selected_direct_weights: torch.Tensor | None = None
+    selected_direct_report: dict[str, object] | None = None
     if args.axis_field_mode == "trusted-view-cluster":
         assert per_view_vectors is not None
         assert per_view_weights is not None
@@ -1845,6 +1932,21 @@ def main() -> None:
             knn_k=int(args.clean_knn_k),
             knn_k_per_root=clean_knn_k_per_root,
             surface_graph=surface_graph,
+        )
+        selected_direct_axes, selected_direct_weights, selected_direct_report = collect_selected_tangent_axis_evidence(
+            args=args,
+            views=views,
+            selected_shell_points=selected_shell_points,
+            root_normals=root_normals,
+            root_tangents=root_tangents,
+            root_bitangents=root_bitangents,
+            viewmats=viewmats,
+            ks=ks,
+            mesh=mesh,
+            width=width,
+            height=height,
+            observed=observed,
+            device=device,
         )
         trusted_result = refine_trusted_multiview_axis_field(
             initial_axis=raw_selected_axis,
@@ -1876,6 +1978,8 @@ def main() -> None:
                 "axis_view_cluster_per_view_vectors": per_view_vectors_cpu.numpy().astype(np.float32),
                 "axis_view_cluster_per_view_weight": per_view_weights_cpu.numpy().astype(np.float32),
                 "axis_view_cluster_per_view_direct_weight": per_view_direct_weights_cpu.numpy().astype(np.float32),
+                "axis_view_cluster_selected_direct_vectors": selected_direct_axes.detach().cpu().numpy().astype(np.float32),
+                "axis_view_cluster_selected_direct_weight": selected_direct_weights.detach().cpu().numpy().astype(np.float32),
                 "axis_view_cluster_trust": trusted_npz_array("trust", dtype=np.dtype(np.float32)),
                 "axis_view_cluster_spectral_gap": trusted_npz_array("spectral_gap", dtype=np.dtype(np.float32)),
                 "axis_view_cluster_n_eff": trusted_npz_array("n_eff", dtype=np.dtype(np.float32)),
@@ -1915,6 +2019,7 @@ def main() -> None:
                 "cutoffs": trusted_cutoffs,
                 "counts": trusted_counts,
                 "trusted_view_cluster": trusted_report,
+                "selected_direct_evidence": selected_direct_report,
                 "change_from_raw_median_degrees": float(torch.median(axis_change[axis_change_valid]).detach().cpu()) if bool(axis_change_valid.any()) else 0.0,
                 "change_from_raw_p90_degrees": float(torch.quantile(axis_change[axis_change_valid], 0.90).detach().cpu()) if bool(axis_change_valid.any()) else 0.0,
                 "final_confidence_mean": float(trusted_confidence[observed].mean().detach().cpu()) if bool(observed.any()) else 0.0,
@@ -2074,8 +2179,59 @@ def main() -> None:
 
     pre_consensus_directed_flow3d = cleaned_directed_flow3d
     pre_consensus_anchor_confidence = cleaned["anchor_conf"]
-    consensus_report: dict[str, float | int] = {"enabled": int(int(args.direction_consensus_iters) > 0)}
-    if int(args.direction_consensus_iters) > 0:
+    ratio_refinement_report: dict[str, object] = {"enabled": 0}
+    consensus_report: dict[str, object]
+    if args.axis_field_mode == "trusted-view-cluster":
+        assert trusted_knn is not None
+        assert trusted_edge_weight is not None
+        assert selected_direct_axes is not None
+        assert selected_direct_weights is not None
+        view_ids = torch.tensor(views, device=device, dtype=torch.long)
+        ratio_result = refine_fixed_axis_multiview_ratio(
+            initial_direction=pre_consensus_directed_flow3d,
+            tangent_axis=selected_axis,
+            normals=root_normals,
+            points=selected_shell_points,
+            per_view_axes=selected_direct_axes,
+            per_view_weights=selected_direct_weights,
+            viewmats=viewmats[view_ids],
+            intrinsics=ks[view_ids],
+            knn=trusted_knn,
+            edge_weight=trusted_edge_weight,
+            observed=observed,
+        )
+        cleaned_directed_flow3d = ratio_result["direction"]
+        cleaned["lambda"] = ratio_result["ratio"]
+        ratio_refinement_report = dict(ratio_result["report"])
+        ratio_refinement_report["enabled"] = 1
+
+        def ratio_npz_array(key: str, *, dtype: np.dtype) -> np.ndarray:
+            value = ratio_result[key]
+            return value.detach().cpu().numpy().astype(dtype)
+
+        axis_view_cluster_npz.update(
+            {
+                "axis_view_cluster_ratio_baseline": ratio_npz_array("baseline_ratio", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_ratio_ls": ratio_npz_array("ls_ratio", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_ratio_final": ratio_npz_array("ratio", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_ratio_denominator": ratio_npz_array("denominator", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_ratio_fallback": ratio_npz_array("fallback", dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_ratio_accept": ratio_npz_array("accept_mask", dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_ratio_residual_before": ratio_npz_array("residual_before", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_ratio_residual_after": ratio_npz_array("residual_after", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_ratio_local_jump_before": ratio_npz_array("baseline_local_jump_deg", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_ratio_local_jump_ls": ratio_npz_array("ls_local_jump_deg", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_ratio_tangent_sign": ratio_npz_array("tangent_sign", dtype=np.dtype(np.float32)),
+            }
+        )
+        consensus_report = {
+            "enabled": 0,
+            "mode": "superseded-by-fixed-axis-multiview-ratio",
+            "requested_iters": int(args.direction_consensus_iters),
+        }
+    else:
+        consensus_report = {"enabled": int(int(args.direction_consensus_iters) > 0)}
+    if args.axis_field_mode != "trusted-view-cluster" and int(args.direction_consensus_iters) > 0:
         consensus = refine_direction_with_anchor_consensus(
             points=root_points,
             normals=root_normals,
@@ -2183,6 +2339,7 @@ def main() -> None:
         "axis_field": axis_field_report,
         "direction_field_mode": str(args.direction_field_mode),
         "continuous_direction": continuous_report,
+        "fixed_axis_multiview_ratio": ratio_refinement_report,
         "direction_consensus": consensus_report,
         "shell_height_refine": shell_height_refine_report,
         "observed_roots": int(observed.sum().detach().cpu()),

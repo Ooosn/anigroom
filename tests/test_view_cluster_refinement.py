@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+import pytest
 import torch
 
 from anigroom.flow.view_cluster_refinement import (
@@ -12,6 +13,7 @@ from anigroom.flow.view_cluster_refinement import (
     HARD_MARGIN_QUANTILE,
     RESIDUAL_QUANTILE,
     VIEW_CLUSTER_ITERATIONS,
+    refine_fixed_axis_multiview_ratio,
     refine_trusted_multiview_axis_field,
 )
 
@@ -233,3 +235,109 @@ def test_constants_and_signature_are_semantic_and_view_independent() -> None:
     reordered = refine_trusted_multiview_axis_field(**permuted)
     for key in ("axis", "anchor", "trust", "spectral_gap", "n_eff", "hard_axis", "hard_margin", "residual_deg", "confidence"):
         torch.testing.assert_close(reordered[key], base[key][root_perm], atol=1.0e-5, rtol=1.0e-5)
+
+
+def _ratio_inputs(
+    target_ratio: torch.Tensor,
+    initial_ratio: torch.Tensor,
+    *,
+    view_count: int = 1,
+) -> dict[str, torch.Tensor]:
+    n = int(target_ratio.numel())
+    normals = torch.tensor([[0.0, 0.0, 1.0]]).repeat(n, 1)
+    tangent = torch.tensor([[0.0, 1.0, 0.0]]).repeat(n, 1)
+    points = torch.tensor([[1.0, 0.0, 2.0]]).repeat(n, 1)
+    initial = torch.nn.functional.normalize(
+        tangent + initial_ratio[:, None] * normals, dim=-1
+    )
+    evidence = torch.stack(
+        [-0.5 * target_ratio, torch.ones_like(target_ratio), torch.zeros_like(target_ratio)],
+        dim=-1,
+    )
+    evidence = torch.nn.functional.normalize(evidence, dim=-1)
+    per_view_axes = evidence[None].repeat(view_count, 1, 1)
+    per_view_weights = torch.ones((view_count, n))
+    viewmats = torch.eye(4)[None].repeat(view_count, 1, 1)
+    intrinsics = torch.eye(3)[None].repeat(view_count, 1, 1)
+    if n == 3:
+        knn = torch.tensor([[1, 2], [0, 2], [1, 0]], dtype=torch.long)
+    else:
+        ids = torch.arange(n, dtype=torch.long)
+        knn = torch.stack([(ids + 1) % n, (ids - 1) % n], dim=-1)
+    return {
+        "initial_direction": initial,
+        "tangent_axis": tangent,
+        "normals": normals,
+        "points": points,
+        "per_view_axes": per_view_axes,
+        "per_view_weights": per_view_weights,
+        "viewmats": viewmats,
+        "intrinsics": intrinsics,
+        "knn": knn,
+        "edge_weight": torch.ones_like(knn, dtype=torch.float32),
+        "observed": torch.ones(n, dtype=torch.bool),
+    }
+
+
+def test_fixed_axis_ratio_recovers_analytic_unbounded_ratio() -> None:
+    target = torch.tensor([2.5, 2.5, 2.5])
+    result = refine_fixed_axis_multiview_ratio(
+        **_ratio_inputs(target, torch.tensor([0.2, 0.2, 0.2]))
+    )
+    torch.testing.assert_close(result["ls_ratio"], target, atol=1.0e-5, rtol=1.0e-5)
+    torch.testing.assert_close(result["ratio"], target, atol=1.0e-5, rtol=1.0e-5)
+    assert bool(result["accept_mask"].all())
+    assert float(result["ratio"].max()) > 1.0
+
+
+def test_fixed_axis_ratio_zero_denominator_falls_back_exactly() -> None:
+    data = _ratio_inputs(torch.tensor([0.8, 0.8, 0.8]), torch.tensor([0.4, 0.4, 0.4]))
+    data["points"][:, 0] = 0.0
+    result = refine_fixed_axis_multiview_ratio(**data)
+    assert bool(result["fallback"].all())
+    torch.testing.assert_close(result["ratio"], torch.full((3,), 0.4), atol=1.0e-5, rtol=1.0e-5)
+    assert not bool(result["accept_mask"].any())
+
+
+def test_fixed_axis_ratio_guard_rejects_data_fit_that_worsens_local_jump() -> None:
+    result = refine_fixed_axis_multiview_ratio(
+        **_ratio_inputs(
+            torch.tensor([0.2, 5.0, 0.2]),
+            torch.tensor([0.2, 0.2, 0.2]),
+        )
+    )
+    assert not bool(result["accept_mask"][1])
+    assert float(result["ls_local_jump_deg"][1]) > float(result["baseline_local_jump_deg"][1])
+    assert float(result["ratio"][1]) == pytest.approx(0.2, abs=1.0e-5)
+
+
+def test_fixed_axis_ratio_guard_accepts_data_fit_that_improves_local_jump() -> None:
+    result = refine_fixed_axis_multiview_ratio(
+        **_ratio_inputs(
+            torch.tensor([0.2, 0.2, 0.2]),
+            torch.tensor([0.2, 5.0, 0.2]),
+        )
+    )
+    assert bool(result["accept_mask"][1])
+    assert float(result["ls_local_jump_deg"][1]) < float(result["baseline_local_jump_deg"][1])
+    assert float(result["ratio"][1]) == pytest.approx(0.2, abs=1.0e-5)
+
+
+def test_fixed_axis_ratio_is_view_order_and_axis_sign_invariant() -> None:
+    data = _ratio_inputs(
+        torch.tensor([0.3, 0.6, 0.9]),
+        torch.tensor([0.4, 0.4, 0.4]),
+        view_count=2,
+    )
+    base = refine_fixed_axis_multiview_ratio(**data)
+    changed = dict(data)
+    changed["per_view_axes"] = torch.stack(
+        [-data["per_view_axes"][1], data["per_view_axes"][0]], dim=0
+    )
+    changed["per_view_weights"] = data["per_view_weights"][[1, 0]]
+    changed["viewmats"] = data["viewmats"][[1, 0]]
+    changed["intrinsics"] = data["intrinsics"][[1, 0]]
+    result = refine_fixed_axis_multiview_ratio(**changed)
+    for key in ("direction", "ratio", "ls_ratio", "denominator", "residual_before", "residual_after"):
+        torch.testing.assert_close(result[key], base[key], atol=1.0e-5, rtol=1.0e-5)
+    torch.testing.assert_close(result["accept_mask"], base["accept_mask"])

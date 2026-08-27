@@ -44,6 +44,7 @@ __all__ = [
     "DIRECT_SUPERMAJORITY",
     "CONFIDENCE_DECAY",
     "refine_trusted_multiview_axis_field",
+    "refine_fixed_axis_multiview_ratio",
 ]
 
 
@@ -76,8 +77,10 @@ def _vector_valid(value: torch.Tensor) -> torch.Tensor:
 def _safe_length(value: torch.Tensor) -> torch.Tensor:
     value = _finite(value)
     scale = value.abs().amax(dim=-1)
-    scaled = value / scale[..., None].clamp_min(1.0)
-    length = torch.linalg.vector_norm(scaled, dim=-1) * scale
+    safe_scale = scale.clamp_min(EPS)
+    scaled = value / safe_scale[..., None]
+    length = torch.linalg.vector_norm(scaled, dim=-1) * safe_scale
+    length = torch.where(scale > EPS, length, torch.zeros_like(length))
     return torch.nan_to_num(length, nan=0.0, posinf=torch.finfo(value.dtype).max, neginf=0.0)
 
 
@@ -674,3 +677,330 @@ def refine_trusted_multiview_axis_field(
         "counts": counts,
     }
     return result
+
+
+def _project_fixed_axis_screen(
+    points: torch.Tensor,
+    directions: torch.Tensor,
+    viewmats: torch.Tensor,
+    intrinsics: torch.Tensor,
+) -> torch.Tensor:
+    """Project a per-view 3-D direction field with the standalone formula."""
+
+    points = _finite(points)
+    directions = _finite(directions)
+    viewmats = _finite(viewmats)
+    intrinsics = _finite(intrinsics)
+    rotation = viewmats[:, :3, :3]
+    translation = viewmats[:, :3, 3]
+    camera_points = torch.einsum("ni,vji->vnj", points, rotation) + translation[:, None, :]
+    camera_directions = torch.einsum("vni,vji->vnj", directions, rotation)
+    camera_points = _finite(camera_points)
+    camera_directions = _finite(camera_directions)
+    depth = camera_points[..., 2].clamp_min(EPS)
+    denominator = depth.square().clamp_min(EPS)
+    focal_x = intrinsics[:, 0, 0, None]
+    focal_y = intrinsics[:, 1, 1, None]
+    screen_x = focal_x * (
+        camera_directions[..., 0] * depth - camera_points[..., 0] * camera_directions[..., 2]
+    ) / denominator
+    screen_y = focal_y * (
+        camera_directions[..., 1] * depth - camera_points[..., 1] * camera_directions[..., 2]
+    ) / denominator
+    return _finite(torch.stack((screen_x, screen_y), dim=-1))
+
+
+def _fixed_axis_screen_valid(value: torch.Tensor) -> torch.Tensor:
+    """Match the standalone 1e-6 projected-vector validity check safely."""
+
+    value = _finite(value)
+    return _finite(_safe_length(value)) > 1.0e-6
+
+
+def _fixed_axis_local_max_jump(
+    direction: torch.Tensor,
+    normals: torch.Tensor,
+    knn: torch.Tensor,
+    edge_weight: torch.Tensor,
+    observed: torch.Tensor,
+) -> torch.Tensor:
+    """Return the maximum valid transported axial edge jump per root."""
+
+    n = int(direction.shape[0])
+    k = int(knn.shape[1])
+    if k == 0:
+        return direction.new_zeros((n,))
+    transported = _transport_neighbors(direction, normals, knn)
+    angle = _axial_angle_degrees(direction[:, None, :], transported)
+    pair_valid = (edge_weight > 0.0) & observed[:, None] & observed[knn]
+    return _finite(torch.where(pair_valid, angle, torch.zeros_like(angle)).amax(dim=1))
+
+
+def _fixed_axis_qstats(value: torch.Tensor, mask: torch.Tensor) -> dict[str, float | int]:
+    """Compute finite scalar statistics without moving solver tensors to CPU."""
+
+    selected = value[mask & torch.isfinite(value)]
+    if selected.numel() == 0:
+        return {"count": 0, "mean": 0.0, "p50": 0.0, "p90": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0}
+    quantiles = torch.quantile(selected, selected.new_tensor((0.50, 0.90, 0.95, 0.99)))
+    selected = selected.detach()
+    quantiles = quantiles.detach()
+    return {
+        "count": int(selected.numel()),
+        "mean": float(selected.mean().cpu().item()),
+        "p50": float(quantiles[0].cpu().item()),
+        "p90": float(quantiles[1].cpu().item()),
+        "p95": float(quantiles[2].cpu().item()),
+        "p99": float(quantiles[3].cpu().item()),
+        "max": float(selected.max().cpu().item()),
+    }
+
+
+def refine_fixed_axis_multiview_ratio(
+    *,
+    initial_direction: torch.Tensor,
+    tangent_axis: torch.Tensor,
+    normals: torch.Tensor,
+    points: torch.Tensor,
+    per_view_axes: torch.Tensor,
+    per_view_weights: torch.Tensor,
+    viewmats: torch.Tensor,
+    intrinsics: torch.Tensor,
+    knn: torch.Tensor,
+    edge_weight: torch.Tensor,
+    observed: torch.Tensor,
+) -> dict[str, object]:
+    """Solve a nonnegative normal/tangent ratio around a fixed tangent axis.
+
+    The implementation is the reusable Torch port of the accepted standalone
+    solver.  It has no semantic, root-ID, or view-ID inputs: view evidence is
+    combined only through the supplied projected directions and weights.
+    """
+
+    tensors = {
+        "initial_direction": initial_direction,
+        "tangent_axis": tangent_axis,
+        "normals": normals,
+        "points": points,
+        "per_view_axes": per_view_axes,
+        "per_view_weights": per_view_weights,
+        "viewmats": viewmats,
+        "intrinsics": intrinsics,
+        "knn": knn,
+        "edge_weight": edge_weight,
+        "observed": observed,
+    }
+    if not all(isinstance(value, torch.Tensor) for value in tensors.values()):
+        raise TypeError("all fixed-axis ratio inputs must be torch.Tensor values")
+
+    if initial_direction.ndim != 2 or initial_direction.shape[-1] != 3:
+        raise ValueError("initial_direction must have shape [N, 3]")
+    n = int(initial_direction.shape[0])
+    for name, value in (("tangent_axis", tangent_axis), ("normals", normals), ("points", points)):
+        if value.shape != (n, 3):
+            raise ValueError(f"{name} must have shape [N, 3]")
+    if per_view_axes.ndim != 3 or per_view_axes.shape[-1] != 3:
+        raise ValueError("per_view_axes must have shape [V, N, 3]")
+    v = int(per_view_axes.shape[0])
+    if int(per_view_axes.shape[1]) != n:
+        raise ValueError("per_view_axes must have the same N as initial_direction")
+    if per_view_weights.shape != (v, n):
+        raise ValueError("per_view_weights must have shape [V, N]")
+    if viewmats.shape != (v, 4, 4):
+        raise ValueError("viewmats must have shape [V, 4, 4]")
+    if intrinsics.shape != (v, 3, 3):
+        raise ValueError("intrinsics must have shape [V, 3, 3]")
+    if knn.ndim != 2 or int(knn.shape[0]) != n:
+        raise ValueError("knn must have shape [N, K]")
+    if edge_weight.shape != knn.shape:
+        raise ValueError("edge_weight must have shape [N, K]")
+    if observed.ndim != 1 or int(observed.shape[0]) != n:
+        raise ValueError("observed must have shape [N]")
+
+    device = initial_direction.device
+    if any(value.device != device for value in tensors.values()):
+        raise ValueError("all fixed-axis ratio inputs must be on the same device")
+    if any(value.is_complex() for value in tensors.values()):
+        raise TypeError("fixed-axis ratio inputs must be real tensors")
+    if knn.is_floating_point() or knn.dtype == torch.bool:
+        raise TypeError("knn must be an integer tensor")
+    if knn.numel() > 0 and bool(((knn < 0) | (knn >= n)).any()):
+        raise ValueError("knn contains an out-of-range root index")
+
+    floating_values = [value for value in tensors.values() if value.is_floating_point()]
+    dtype = torch.float64 if any(value.dtype == torch.float64 for value in floating_values) else torch.float32
+    initial = _finite(initial_direction.to(dtype=dtype))
+    tangent = _safe_normalize(tangent_axis.to(dtype=dtype))
+    normal = _safe_normalize(normals.to(dtype=dtype))
+    point = _finite(points.to(dtype=dtype))
+    view_axis = _safe_normalize(per_view_axes.to(dtype=dtype))
+    raw_weight = _finite(per_view_weights.to(dtype=dtype)).clamp_min(0.0)
+    view = _finite(viewmats.to(dtype=dtype))
+    intrinsic = _finite(intrinsics.to(dtype=dtype))
+    edge = _finite(edge_weight.to(dtype=dtype)).clamp_min(0.0)
+    observed_mask = observed.to(device=device, dtype=torch.bool)
+
+    initial = _safe_normalize(initial)
+    pre_normal = (initial * normal).sum(dim=-1)
+    pre_tangent = initial - pre_normal[:, None] * normal
+    pre_tangent_norm = _safe_length(pre_tangent)
+    tangent_dot = (pre_tangent * tangent).sum(dim=-1)
+    tangent_sign = torch.where(tangent_dot >= 0.0, torch.ones_like(tangent_dot), -torch.ones_like(tangent_dot))
+    signed_axis = tangent_sign[:, None] * tangent
+    rho0 = pre_normal / pre_tangent_norm.clamp_min(EPS)
+    rho0 = _finite(rho0).clamp_min(0.0)
+
+    tangent_for_views = signed_axis[None, :, :].expand(v, -1, -1)
+    normal_for_views = normal[None, :, :].expand(v, -1, -1)
+    projected_evidence = _project_fixed_axis_screen(point, view_axis, view, intrinsic)
+    projected_tangent = _project_fixed_axis_screen(point, tangent_for_views, view, intrinsic)
+    projected_normal = _project_fixed_axis_screen(point, normal_for_views, view, intrinsic)
+    screen_evidence = _safe_normalize(projected_evidence)
+    screen_valid = (
+        _fixed_axis_screen_valid(projected_evidence)
+        & _fixed_axis_screen_valid(projected_tangent)
+        & _fixed_axis_screen_valid(projected_normal)
+    )
+    valid_weight = torch.where((raw_weight > 0.0) & screen_valid, raw_weight, torch.zeros_like(raw_weight))
+    residual_weight = torch.where(raw_weight > 0.0, raw_weight, torch.zeros_like(raw_weight))
+
+    screen_a = _finite(
+        screen_evidence[..., 0] * projected_normal[..., 1]
+        - screen_evidence[..., 1] * projected_normal[..., 0]
+    )
+    screen_b = _finite(
+        screen_evidence[..., 0] * projected_tangent[..., 1]
+        - screen_evidence[..., 1] * projected_tangent[..., 0]
+    )
+
+    accumulate_dtype = torch.float64
+    valid_weight_acc = valid_weight.to(dtype=accumulate_dtype)
+    residual_weight_acc = residual_weight.to(dtype=accumulate_dtype)
+    a_acc = screen_a.to(dtype=accumulate_dtype)
+    b_acc = screen_b.to(dtype=accumulate_dtype)
+    rho0_acc = rho0.to(dtype=accumulate_dtype)
+    numerator = _finite(torch.sum(_finite(valid_weight_acc * a_acc * b_acc), dim=0))
+    denominator = _finite(torch.sum(_finite(valid_weight_acc * a_acc.square()), dim=0))
+    fallback = denominator <= EPS
+    rho_ls_acc = torch.where(fallback, rho0_acc, -numerator / denominator.clamp_min(EPS))
+    rho_ls_acc = _finite(rho_ls_acc).clamp_min(0.0)
+    rho_ls = rho_ls_acc.to(dtype=dtype)
+    rho_ls = _finite(rho_ls).clamp_min(0.0)
+
+    baseline_direction = _safe_normalize(rho0[:, None] * normal + signed_axis)
+    ls_direction = _safe_normalize(rho_ls[:, None] * normal + signed_axis)
+
+    residual0_num = _finite(
+        torch.sum(
+            _finite(residual_weight_acc * (a_acc * rho0_acc[None, :] + b_acc).square()),
+            dim=0,
+        )
+    )
+    rho_ls_acc_for_residual = rho_ls.to(dtype=accumulate_dtype)[None, :]
+    residual1_num = _finite(
+        torch.sum(
+            _finite(residual_weight_acc * (a_acc * rho_ls_acc_for_residual + b_acc).square()),
+            dim=0,
+        )
+    )
+    weight_sum = _finite(valid_weight_acc.sum(dim=0))
+    residual_before = _finite(residual0_num / weight_sum.clamp_min(EPS)).to(dtype=dtype)
+    residual_after = _finite(residual1_num / weight_sum.clamp_min(EPS)).to(dtype=dtype)
+
+    baseline_local_jump = _fixed_axis_local_max_jump(baseline_direction, normal, knn, edge, observed_mask)
+    ls_local_jump = _fixed_axis_local_max_jump(ls_direction, normal, knn, edge, observed_mask)
+    accept_mask = (
+        observed_mask
+        & ~fallback
+        & (residual_after <= residual_before)
+        & (ls_local_jump <= baseline_local_jump)
+    )
+    rho_ls_guarded = torch.where(accept_mask, rho_ls, rho0)
+    rho_ls_guarded = _finite(rho_ls_guarded).clamp_min(0.0)
+    guarded_direction = _safe_normalize(rho_ls_guarded[:, None] * normal + signed_axis)
+
+    denominator_out = _finite(denominator).to(dtype=dtype)
+    baseline_local_jump = _finite(baseline_local_jump).to(dtype=dtype)
+    ls_local_jump = _finite(ls_local_jump).to(dtype=dtype)
+    residual_before = _finite(residual_before)
+    residual_after = _finite(residual_after)
+
+    stats = {
+        "rho0": _fixed_axis_qstats(rho0, observed_mask),
+        "rho_ls": _fixed_axis_qstats(rho_ls, observed_mask),
+        "rho_ls_guarded": _fixed_axis_qstats(rho_ls_guarded, observed_mask),
+        "denominator": _fixed_axis_qstats(denominator_out, observed_mask),
+        "screen_cross_residual_before": _fixed_axis_qstats(residual_before, observed_mask),
+        "screen_cross_residual_after": _fixed_axis_qstats(residual_after, observed_mask),
+        "baseline_local_jump_deg": _fixed_axis_qstats(baseline_local_jump, observed_mask),
+        "ls_local_jump_deg": _fixed_axis_qstats(ls_local_jump, observed_mask),
+    }
+    counts = {
+        "root_count": n,
+        "view_count": v,
+        "neighbor_count": int(knn.shape[1]),
+        "observed_count": int(observed_mask.sum().detach().cpu().item()),
+        "valid_evidence_pairs": int((valid_weight > 0.0).sum().detach().cpu().item()),
+        "evidence_root_count": int((weight_sum > EPS).sum().detach().cpu().item()),
+        "fallback_count": int(fallback.sum().detach().cpu().item()),
+        "nonfallback_count": int((~fallback).sum().detach().cpu().item()),
+        "ls_guarded_accept_count": int(accept_mask.sum().detach().cpu().item()),
+        "ls_guarded_reject_count": int((~accept_mask).sum().detach().cpu().item()),
+    }
+    report = {
+        "counts": counts,
+        "statistics": stats,
+        "rho0": stats["rho0"],
+        "rho_ls": stats["rho_ls"],
+        "rho_ls_guarded": stats["rho_ls_guarded"],
+        "denominator": stats["denominator"],
+        "screen_cross_residual_before": stats["screen_cross_residual_before"],
+        "screen_cross_residual_after": stats["screen_cross_residual_after"],
+        "baseline_local_jump_deg": stats["baseline_local_jump_deg"],
+        "ls_local_jump_deg": stats["ls_local_jump_deg"],
+    }
+
+    return {
+        "direction": _finite(guarded_direction),
+        "guarded_direction": _finite(guarded_direction),
+        "fixed_axis_rho0": _finite(baseline_direction),
+        "fixed_axis_ls_ratio": _finite(ls_direction),
+        "fixed_axis_ls_ratio_guarded": _finite(guarded_direction),
+        "baseline_direction": _finite(baseline_direction),
+        "ls_direction": _finite(ls_direction),
+        "rho0": _finite(rho0),
+        "rho_ls": _finite(rho_ls),
+        "rho_ls_guarded": _finite(rho_ls_guarded),
+        "guarded_ratio": _finite(rho_ls_guarded),
+        "baseline_ratio": _finite(rho0),
+        "ls_ratio": _finite(rho_ls),
+        "ratio": _finite(rho_ls_guarded),
+        "denominator": denominator_out,
+        "fallback": fallback,
+        "accept_mask": accept_mask,
+        "ls_accept_mask": accept_mask,
+        "residual_before": residual_before,
+        "residual_after": residual_after,
+        "residual0": residual_before,
+        "residual1": residual_after,
+        "baseline_local_jump": baseline_local_jump,
+        "ls_local_jump": ls_local_jump,
+        "baseline_local_jump_deg": baseline_local_jump,
+        "ls_local_jump_deg": ls_local_jump,
+        "tangent_sign": _finite(tangent_sign),
+        "weight_sum": weight_sum.to(dtype=dtype),
+        "screen_evidence": _finite(screen_evidence),
+        "screen_signed_tangent": _finite(projected_tangent),
+        "screen_normal": _finite(projected_normal),
+        "screen_A": _finite(screen_a).to(dtype=dtype),
+        "screen_b": _finite(screen_b).to(dtype=dtype),
+        "root_count": n,
+        "view_count": v,
+        "neighbor_count": int(knn.shape[1]),
+        "observed_count": counts["observed_count"],
+        "fallback_count": counts["fallback_count"],
+        "ls_guarded_accept_count": counts["ls_guarded_accept_count"],
+        "report": report,
+        "stats": stats,
+        "counts": counts,
+    }
