@@ -285,6 +285,20 @@ Local acceptance root:
 See `docs/r068_no_crossing_zero_curl.md` and
 `docs/paper_readiness_20260826.md`.
 
+The first formal cross-sample run applies the exact R068 behavior to Panda with
+the accepted V5 flow target and identity mesh alignment. It completes from zero
+through 30k and confirms that V5 initialization, lifecycle, Gaussian RGB
+residual, and no-penetration transfer without an execution fallback. The fixed
+eight-view mean composite PSNR is `29.42054`; Gaussian RGB residual contributes
+`+1.25195 dB` on average. The backbone has zero backward strands and no length
+above `0.12`.
+
+This run also exposes the current generalization blocker: primary-guide curl is
+about five times stronger than the Tiger control and creates visible shoulder
+and leg waves while adding `+1.36 dB`. The checkpoint is accepted as
+cross-sample evidence, not as a generalized structure baseline. See
+`docs/panda_r068_v5_cross_sample.md`.
+
 ## Active Entry Points
 
 - training: `tools/train_white_tiger_stage1.py`
