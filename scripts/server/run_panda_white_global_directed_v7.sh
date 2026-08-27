@@ -47,7 +47,10 @@ echo "PANDA_OUTPUT=$PANDA_OUTPUT WHITE_OUTPUT=$WHITE_OUTPUT"
 nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader
 
 echo "TESTS_START $(date -Is)"
-"$PYTHON_PATH" -B -m pytest -q "$SOURCE_ROOT"
+(
+  cd "$SOURCE_ROOT"
+  "$PYTHON_PATH" -B -m pytest -q
+)
 echo "TESTS_DONE $(date -Is)"
 
 run_fusion() {
