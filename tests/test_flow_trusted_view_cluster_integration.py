@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib
 import inspect
+import textwrap
 
 import pytest
 import torch
@@ -207,13 +209,17 @@ def test_collapse_per_view_shell_evidence_matches_additive_decomposition() -> No
 
 def test_fusion_module_imports_trusted_refinement_and_parser_keeps_modes() -> None:
     module = _module()
+    from anigroom.flow.global_sign_orientation import refine_global_tangent_sign_field
     from anigroom.flow.view_cluster_refinement import (
         refine_fixed_axis_multiview_ratio,
+        refine_fixed_sign_directed_multiview_ratio,
         refine_trusted_multiview_axis_field,
     )
 
+    assert module.refine_global_tangent_sign_field is refine_global_tangent_sign_field
     assert module.refine_trusted_multiview_axis_field is refine_trusted_multiview_axis_field
     assert module.refine_fixed_axis_multiview_ratio is refine_fixed_axis_multiview_ratio
+    assert module.refine_fixed_sign_directed_multiview_ratio is refine_fixed_sign_directed_multiview_ratio
 
     class _ParserCaptured(Exception):
         pass
@@ -278,6 +284,189 @@ def test_selected_point_collector_and_ratio_solver_are_wired_only_to_trusted_mod
     source = inspect.getsource(module.main)
     assert 'if args.axis_field_mode == "trusted-view-cluster"' in source
     assert "refine_fixed_axis_multiview_ratio(" in source
-    assert '"superseded-by-fixed-axis-multiview-ratio"' in source
+    assert '"superseded-by-global-sign-and-fixed-sign-directed-multiview-ratio"' in source
     assert 'args.axis_field_mode != "trusted-view-cluster"' in source
     assert 'default="trusted-view-cluster"' in source
+
+
+def _main_ast(module: object) -> ast.FunctionDef:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(module.main)))
+    function = tree.body[0]
+    assert isinstance(function, ast.FunctionDef)
+    return function
+
+
+def _main_call(function: ast.FunctionDef, name: str) -> ast.Call:
+    calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == name
+    ]
+    assert len(calls) == 1, f"expected one {name} call, got {len(calls)}"
+    return calls[0]
+
+
+def _call_keywords(call: ast.Call) -> dict[str, str]:
+    return {
+        keyword.arg: ast.unparse(keyword.value)
+        for keyword in call.keywords
+        if keyword.arg is not None
+    }
+
+
+def test_trusted_pipeline_orders_provisional_global_sign_and_postratio_calls() -> None:
+    module = _module()
+    function = _main_ast(module)
+    provisional = _main_call(function, "refine_fixed_axis_multiview_ratio")
+    global_sign = _main_call(function, "refine_global_tangent_sign_field")
+    postratio = _main_call(function, "refine_fixed_sign_directed_multiview_ratio")
+
+    assert provisional.lineno < global_sign.lineno < postratio.lineno
+    provisional_kw = _call_keywords(provisional)
+    global_kw = _call_keywords(global_sign)
+    postratio_kw = _call_keywords(postratio)
+
+    assert provisional_kw["points"] == "selected_shell_points"
+    assert provisional_kw["per_view_axes"] == "selected_direct_axes"
+    assert provisional_kw["per_view_weights"] == "selected_direct_weights"
+    assert global_kw["points"] == "root_points"
+    assert global_kw["projection_points"] == "selected_shell_points"
+    assert global_kw["face_ids"] == "root_face_ids"
+    assert global_kw["barycentric"] == "root_barycentric"
+    assert global_kw["tangent_axis"] == "selected_axis"
+    assert global_kw["normal_tangent_ratio"] == "provisional_ratio"
+    assert global_kw["initial_sign"] == "provisional_sign"
+    assert global_kw["per_view_axes"] == "selected_direct_axes"
+    assert global_kw["per_view_weights"] == "selected_direct_weights"
+    assert global_kw["viewmats"] == "viewmats[view_ids]"
+    assert global_kw["intrinsics"] == "ks[view_ids]"
+    assert global_kw["knn"] == "trusted_knn"
+    assert global_kw["edge_weight"] == "trusted_edge_weight"
+    assert global_kw["observed"] == "observed"
+    assert postratio_kw["tangent_axis"] == "selected_axis"
+    assert postratio_kw["tangent_sign"] == "global_sign"
+    assert postratio_kw["baseline_ratio"] == "global_baseline_ratio"
+    assert postratio_kw["points"] == "selected_shell_points"
+    assert postratio_kw["per_view_axes"] == "selected_direct_axes"
+    assert postratio_kw["per_view_weights"] == "selected_direct_weights"
+    assert postratio_kw["viewmats"] == "viewmats[view_ids]"
+    assert postratio_kw["intrinsics"] == "ks[view_ids]"
+    assert postratio_kw["knn"] == "trusted_knn"
+    assert postratio_kw["edge_weight"] == "trusted_edge_weight"
+    assert postratio_kw["observed"] == "observed"
+    assert postratio_kw["canonical_rank"] == "global_result['canonical_rank']"
+
+
+def test_global_sign_and_postratio_are_trusted_only_and_own_final_field() -> None:
+    module = _module()
+    source = inspect.getsource(module.main)
+    stage_start = source.index("pre_consensus_directed_flow3d =")
+    trusted_start = source.index('if args.axis_field_mode == "trusted-view-cluster":', stage_start)
+    global_start = source.index("refine_global_tangent_sign_field(", trusted_start)
+    postratio_start = source.index("refine_fixed_sign_directed_multiview_ratio(", global_start)
+    nontrusted_consensus = source.index('if args.axis_field_mode != "trusted-view-cluster" and', postratio_start)
+
+    assert trusted_start < global_start < postratio_start < nontrusted_consensus
+    assert 'cleaned_directed_flow3d = postratio_result["direction"]' in source
+    assert 'cleaned["lambda"] = postratio_result["ratio"]' in source
+    assert 'cleaned["sign"] = global_sign' in source
+    assert 'cleaned["flipped"] = global_result["flip_mask"]' in source
+    assert '"mode": "superseded-by-global-sign-and-fixed-sign-directed-multiview-ratio"' in source
+
+
+def test_trusted_npz_and_summary_expose_global_and_postratio_diagnostics() -> None:
+    module = _module()
+    source = inspect.getsource(module.main)
+    required_npz_keys = (
+        "axis_view_cluster_provisional_sign",
+        "axis_view_cluster_provisional_ratio",
+        "axis_view_cluster_global_final_sign",
+        "axis_view_cluster_global_flip",
+        "axis_view_cluster_global_canonical_rank",
+        "axis_view_cluster_global_supernode_id",
+        "axis_view_cluster_global_unary_normalized_margin",
+        "axis_view_cluster_global_unary_vote_coherence",
+        "axis_view_cluster_global_pre_postratio_direction",
+        "axis_view_cluster_global_edge_u",
+        "axis_view_cluster_global_edge_v",
+        "axis_view_cluster_global_edge_baseline_dot",
+        "axis_view_cluster_global_edge_final_dot",
+        "axis_view_cluster_global_edge_equality_mask",
+        "axis_view_cluster_global_edge_new_severe_mask",
+        "axis_view_cluster_postratio_ls_ratio",
+        "axis_view_cluster_postratio_final_ratio",
+        "axis_view_cluster_postratio_eligible_mask",
+        "axis_view_cluster_postratio_accept_mask",
+        "axis_view_cluster_postratio_rejected_mask",
+        "axis_view_cluster_postratio_rejection_denominator",
+        "axis_view_cluster_postratio_rejection_residual",
+        "axis_view_cluster_postratio_rejection_nonsevere_edge",
+        "axis_view_cluster_postratio_rejection_directed_angle",
+        "axis_view_cluster_postratio_rejection_nonfinite",
+        "axis_view_cluster_postratio_residual_before",
+        "axis_view_cluster_postratio_residual_after",
+        "axis_view_cluster_postratio_baseline_edge_dot",
+        "axis_view_cluster_postratio_final_edge_dot",
+    )
+    for key in required_npz_keys:
+        assert f'"{key}"' in source
+    assert '"global_sign_orientation": global_orientation_report' in source
+    assert '"fixed_sign_directed_multiview_ratio": fixed_sign_directed_ratio_report' in source
+    assert '"zero_new_severe_verification"' in source
+
+
+def test_formal_global_and_directed_ratio_helpers_are_keyword_only_and_semantic_free() -> None:
+    module = _module()
+    from anigroom.flow.global_sign_orientation import refine_global_tangent_sign_field
+    from anigroom.flow.view_cluster_refinement import refine_fixed_sign_directed_multiview_ratio
+
+    expected = {
+        "refine_global_tangent_sign_field": {
+            "points",
+            "projection_points",
+            "face_ids",
+            "barycentric",
+            "normals",
+            "tangent_axis",
+            "normal_tangent_ratio",
+            "initial_sign",
+            "per_view_axes",
+            "per_view_weights",
+            "viewmats",
+            "intrinsics",
+            "knn",
+            "edge_weight",
+            "observed",
+        },
+        "refine_fixed_sign_directed_multiview_ratio": {
+            "tangent_axis",
+            "tangent_sign",
+            "baseline_ratio",
+            "normals",
+            "points",
+            "per_view_axes",
+            "per_view_weights",
+            "viewmats",
+            "intrinsics",
+            "knn",
+            "edge_weight",
+            "observed",
+            "canonical_rank",
+        },
+    }
+    helpers = {
+        "refine_global_tangent_sign_field": refine_global_tangent_sign_field,
+        "refine_fixed_sign_directed_multiview_ratio": refine_fixed_sign_directed_multiview_ratio,
+    }
+    forbidden = {"species", "region", "view_index", "view_idx", "view_id", "root_ids"}
+    for name, helper in helpers.items():
+        signature = inspect.signature(helper)
+        assert set(signature.parameters) == expected[name]
+        assert all(
+            parameter.kind is inspect.Parameter.KEYWORD_ONLY
+            for parameter in signature.parameters.values()
+        )
+        assert not forbidden.intersection(signature.parameters)
+        assert getattr(module, name) is helper

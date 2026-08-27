@@ -18,12 +18,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from anigroom.grooming import make_tangent_frames  # noqa: E402
 from anigroom.flow.direction_geometry import parallel_transport_vectors  # noqa: E402
+from anigroom.flow.global_sign_orientation import refine_global_tangent_sign_field  # noqa: E402
 from anigroom.flow.surface_graph import (  # noqa: E402
     SurfaceRootGraph,
     build_surface_root_graph,
 )
 from anigroom.flow.view_cluster_refinement import (  # noqa: E402
     refine_fixed_axis_multiview_ratio,
+    refine_fixed_sign_directed_multiview_ratio,
     refine_trusted_multiview_axis_field,
 )
 from anigroom.mesh_roots import SurfaceRoots, TriangleMesh, initialize_surface_roots_fps, read_obj_mesh  # noqa: E402
@@ -1569,6 +1571,8 @@ def main() -> None:
 
     root_points = torch.from_numpy(root_points_np).to(device=device)
     root_normals = F.normalize(torch.from_numpy(root_normals_np).to(device=device), dim=-1, eps=1.0e-8)
+    root_face_ids = torch.from_numpy(roots.face_ids.astype(np.int64)).to(device=device)
+    root_barycentric = torch.from_numpy(roots.barycentric.astype(np.float32)).to(device=device)
     clean_knn_k_per_root = build_region_knn_k_per_root(
         root_sampling_payload,
         key=str(args.clean_region_id_key),
@@ -2180,6 +2184,8 @@ def main() -> None:
     pre_consensus_directed_flow3d = cleaned_directed_flow3d
     pre_consensus_anchor_confidence = cleaned["anchor_conf"]
     ratio_refinement_report: dict[str, object] = {"enabled": 0}
+    global_orientation_report: dict[str, object] = {"enabled": 0}
+    fixed_sign_directed_ratio_report: dict[str, object] = {"enabled": 0}
     consensus_report: dict[str, object]
     if args.axis_field_mode == "trusted-view-cluster":
         assert trusted_knn is not None
@@ -2187,7 +2193,7 @@ def main() -> None:
         assert selected_direct_axes is not None
         assert selected_direct_weights is not None
         view_ids = torch.tensor(views, device=device, dtype=torch.long)
-        ratio_result = refine_fixed_axis_multiview_ratio(
+        provisional_result = refine_fixed_axis_multiview_ratio(
             initial_direction=pre_consensus_directed_flow3d,
             tangent_axis=selected_axis,
             normals=root_normals,
@@ -2200,13 +2206,15 @@ def main() -> None:
             edge_weight=trusted_edge_weight,
             observed=observed,
         )
-        cleaned_directed_flow3d = ratio_result["direction"]
-        cleaned["lambda"] = ratio_result["ratio"]
-        ratio_refinement_report = dict(ratio_result["report"])
+        provisional_ratio = provisional_result["ratio"]
+        provisional_sign = provisional_result["tangent_sign"]
+        cleaned_directed_flow3d = provisional_result["direction"]
+        cleaned["lambda"] = provisional_ratio
+        ratio_refinement_report = dict(provisional_result["report"])
         ratio_refinement_report["enabled"] = 1
 
         def ratio_npz_array(key: str, *, dtype: np.dtype) -> np.ndarray:
-            value = ratio_result[key]
+            value = provisional_result[key]
             return value.detach().cpu().numpy().astype(dtype)
 
         axis_view_cluster_npz.update(
@@ -2222,11 +2230,143 @@ def main() -> None:
                 "axis_view_cluster_ratio_local_jump_before": ratio_npz_array("baseline_local_jump_deg", dtype=np.dtype(np.float32)),
                 "axis_view_cluster_ratio_local_jump_ls": ratio_npz_array("ls_local_jump_deg", dtype=np.dtype(np.float32)),
                 "axis_view_cluster_ratio_tangent_sign": ratio_npz_array("tangent_sign", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_provisional_ratio": ratio_npz_array("ratio", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_provisional_sign": ratio_npz_array("tangent_sign", dtype=np.dtype(np.float32)),
+            }
+        )
+
+        global_result = refine_global_tangent_sign_field(
+            points=root_points,
+            projection_points=selected_shell_points,
+            face_ids=root_face_ids,
+            barycentric=root_barycentric,
+            normals=root_normals,
+            tangent_axis=selected_axis,
+            normal_tangent_ratio=provisional_ratio,
+            initial_sign=provisional_sign,
+            per_view_axes=selected_direct_axes,
+            per_view_weights=selected_direct_weights,
+            viewmats=viewmats[view_ids],
+            intrinsics=ks[view_ids],
+            knn=trusted_knn,
+            edge_weight=trusted_edge_weight,
+            observed=observed,
+        )
+        global_sign = global_result["candidate_sign"]
+        global_baseline_ratio = global_result["normal_tangent_ratio"]
+        global_unary = global_result["unary"]
+        global_edge = global_result["edge"]
+        if not isinstance(global_unary, dict) or not isinstance(global_edge, dict):
+            raise TypeError("global sign diagnostics must contain unary and edge mappings")
+
+        def global_npz_array(value: object, *, dtype: np.dtype) -> np.ndarray:
+            if not isinstance(value, torch.Tensor):
+                raise TypeError("global sign diagnostics must be tensors")
+            return value.detach().cpu().numpy().astype(dtype)
+
+        axis_view_cluster_npz.update(
+            {
+                "axis_view_cluster_global_final_sign": global_npz_array(global_sign, dtype=np.dtype(np.int8)),
+                "axis_view_cluster_global_flip": global_npz_array(global_result["flip_mask"], dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_global_canonical_rank": global_npz_array(global_result["canonical_rank"], dtype=np.dtype(np.int64)),
+                "axis_view_cluster_global_supernode_id": global_npz_array(global_result["supernode_id"], dtype=np.dtype(np.int64)),
+                "axis_view_cluster_global_unary_normalized_margin": global_npz_array(global_unary["normalized_margin"], dtype=np.dtype(np.float32)),
+                "axis_view_cluster_global_unary_vote_coherence": global_npz_array(global_unary["vote_coherence"], dtype=np.dtype(np.float32)),
+                "axis_view_cluster_global_pre_postratio_direction": global_npz_array(global_result["candidate_direction"], dtype=np.dtype(np.float32)),
+                "axis_view_cluster_global_edge_u": global_npz_array(global_edge["u"], dtype=np.dtype(np.int64)),
+                "axis_view_cluster_global_edge_v": global_npz_array(global_edge["v"], dtype=np.dtype(np.int64)),
+                "axis_view_cluster_global_edge_baseline_dot": global_npz_array(global_edge["baseline_dot"], dtype=np.dtype(np.float32)),
+                "axis_view_cluster_global_edge_final_dot": global_npz_array(global_edge["candidate_dot"], dtype=np.dtype(np.float32)),
+                "axis_view_cluster_global_edge_equality_mask": global_npz_array(global_edge["equality_mask"], dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_global_edge_new_severe_mask": global_npz_array(global_edge["new_severe_mask"], dtype=np.dtype(np.bool_)),
+            }
+        )
+        global_orientation_report = dict(global_result["report"])
+        global_orientation_report["enabled"] = 1
+        global_final_report = global_orientation_report.get("final", {})
+        if not isinstance(global_final_report, dict):
+            raise TypeError("global sign report final section must be serializable")
+        global_zero_new_severe = bool(
+            global_final_report.get("mathematical_zero_new_severe_guard_verified", False)
+        )
+        if not global_zero_new_severe:
+            raise RuntimeError(
+                "global sign orientation failed the zero-new-severe-edge invariant"
+            )
+        global_orientation_report["zero_new_severe_verification"] = {
+            "mathematical_guard_verified": global_zero_new_severe,
+            "passed": global_zero_new_severe,
+        }
+
+        postratio_result = refine_fixed_sign_directed_multiview_ratio(
+            tangent_axis=selected_axis,
+            tangent_sign=global_sign,
+            baseline_ratio=global_baseline_ratio,
+            normals=root_normals,
+            points=selected_shell_points,
+            per_view_axes=selected_direct_axes,
+            per_view_weights=selected_direct_weights,
+            viewmats=viewmats[view_ids],
+            intrinsics=ks[view_ids],
+            knn=trusted_knn,
+            edge_weight=trusted_edge_weight,
+            observed=observed,
+            canonical_rank=global_result["canonical_rank"],
+        )
+        cleaned_directed_flow3d = postratio_result["direction"]
+        cleaned["flow"] = cleaned_directed_flow3d
+        cleaned["lambda"] = postratio_result["ratio"]
+        cleaned["sign"] = global_sign
+        cleaned["flipped"] = global_result["flip_mask"]
+        fixed_sign_directed_ratio_report = dict(postratio_result["report"])
+        fixed_sign_directed_ratio_report["enabled"] = 1
+        postratio_new_severe = postratio_result["new_severe_edge_mask"]
+        if not isinstance(postratio_new_severe, torch.Tensor):
+            raise TypeError("postratio new severe diagnostic must be a tensor")
+        postratio_zero_new_severe = not bool(postratio_new_severe.any())
+        if not postratio_zero_new_severe:
+            raise RuntimeError(
+                "fixed-sign directed ratio refit introduced a new severe edge"
+            )
+        fixed_sign_directed_ratio_report["zero_new_severe_verification"] = {
+            "global_sign_guard_verified": global_zero_new_severe,
+            "postratio_new_severe_edge_count": int(postratio_new_severe.sum().detach().cpu()),
+            "passed": bool(global_zero_new_severe and postratio_zero_new_severe),
+        }
+
+        def postratio_npz_array(key: str, *, dtype: np.dtype) -> np.ndarray:
+            value = postratio_result[key]
+            if not isinstance(value, torch.Tensor):
+                raise TypeError("postratio diagnostics must be tensors")
+            return value.detach().cpu().numpy().astype(dtype)
+
+        eligibility_rejection_masks = postratio_result["eligibility_rejection_masks"]
+        guard_rejection_masks = postratio_result["guard_rejection_masks"]
+        if not isinstance(eligibility_rejection_masks, dict) or not isinstance(guard_rejection_masks, dict):
+            raise TypeError("postratio rejection diagnostics must be mappings")
+        axis_view_cluster_npz.update(
+            {
+                "axis_view_cluster_postratio_ls_ratio": postratio_npz_array("raw_ls_ratio", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_postratio_final_ratio": postratio_npz_array("final_ratio", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_postratio_eligible_mask": postratio_npz_array("eligible_mask", dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_postratio_accept_mask": postratio_npz_array("accepted_mask", dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_postratio_rejected_mask": postratio_npz_array("rejected_mask", dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_postratio_rejection_denominator": global_npz_array(eligibility_rejection_masks["denominator_not_finite_or_nonpositive"], dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_postratio_rejection_residual": global_npz_array(eligibility_rejection_masks["no_strict_direct_residual_improvement"], dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_postratio_rejection_nonsevere_edge": global_npz_array(guard_rejection_masks["nonsevere_edge_would_become_severe"], dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_postratio_rejection_directed_angle": global_npz_array(guard_rejection_masks["directed_incident_angle_increase"], dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_postratio_rejection_nonfinite": global_npz_array(guard_rejection_masks["nonfinite_or_negative_ratio_or_direction"], dtype=np.dtype(np.bool_)),
+                "axis_view_cluster_postratio_denominator": postratio_npz_array("denominator", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_postratio_residual_before": postratio_npz_array("residual_before", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_postratio_residual_after": postratio_npz_array("residual_after", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_postratio_normalized_residual_improvement": postratio_npz_array("normalized_residual_improvement", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_postratio_baseline_edge_dot": postratio_npz_array("baseline_edge_dots", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_postratio_final_edge_dot": postratio_npz_array("final_edge_dots", dtype=np.dtype(np.float32)),
             }
         )
         consensus_report = {
             "enabled": 0,
-            "mode": "superseded-by-fixed-axis-multiview-ratio",
+            "mode": "superseded-by-global-sign-and-fixed-sign-directed-multiview-ratio",
             "requested_iters": int(args.direction_consensus_iters),
         }
     else:
@@ -2340,6 +2480,8 @@ def main() -> None:
         "direction_field_mode": str(args.direction_field_mode),
         "continuous_direction": continuous_report,
         "fixed_axis_multiview_ratio": ratio_refinement_report,
+        "global_sign_orientation": global_orientation_report,
+        "fixed_sign_directed_multiview_ratio": fixed_sign_directed_ratio_report,
         "direction_consensus": consensus_report,
         "shell_height_refine": shell_height_refine_report,
         "observed_roots": int(observed.sum().detach().cpu()),

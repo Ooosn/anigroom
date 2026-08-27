@@ -45,6 +45,7 @@ __all__ = [
     "CONFIDENCE_DECAY",
     "refine_trusted_multiview_axis_field",
     "refine_fixed_axis_multiview_ratio",
+    "refine_fixed_sign_directed_multiview_ratio",
 ]
 
 
@@ -1002,5 +1003,699 @@ def refine_fixed_axis_multiview_ratio(
         "ls_guarded_accept_count": counts["ls_guarded_accept_count"],
         "report": report,
         "stats": stats,
+        "counts": counts,
+    }
+
+
+def _fixed_sign_unique_edge_pairs(
+    knn: torch.Tensor,
+    edge_weight: torch.Tensor,
+    *,
+    n: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return deterministic unique undirected graph edges with positive weight."""
+
+    if knn.numel() == 0:
+        empty = torch.empty((0,), dtype=torch.long, device=device)
+        return empty, empty.clone()
+
+    knn_rows = knn.detach().cpu().tolist()
+    weight_rows = edge_weight.detach().cpu().tolist()
+    pairs: set[tuple[int, int]] = set()
+    for root_id, (neighbors, weights) in enumerate(zip(knn_rows, weight_rows)):
+        for neighbor, weight in zip(neighbors, weights):
+            neighbor_id = int(neighbor)
+            if neighbor_id == root_id or float(weight) <= 0.0:
+                continue
+            first, second = sorted((int(root_id), neighbor_id))
+            pairs.add((first, second))
+
+    ordered_pairs = sorted(pairs)
+    if not ordered_pairs:
+        empty = torch.empty((0,), dtype=torch.long, device=device)
+        return empty, empty.clone()
+    edge_u = torch.tensor(
+        [pair[0] for pair in ordered_pairs], dtype=torch.long, device=device
+    )
+    edge_v = torch.tensor(
+        [pair[1] for pair in ordered_pairs], dtype=torch.long, device=device
+    )
+    return edge_u, edge_v
+
+
+def _fixed_sign_edge_dots(
+    direction: torch.Tensor,
+    normals: torch.Tensor,
+    edge_u: torch.Tensor,
+    edge_v: torch.Tensor,
+) -> torch.Tensor:
+    """Compute one signed transported dot for each unique undirected edge."""
+
+    if edge_u.numel() == 0:
+        return direction.new_empty((0,))
+    transported = parallel_transport_vectors(
+        direction[edge_v], normals[edge_v], normals[edge_u]
+    )
+    dots = (direction[edge_u] * transported).sum(dim=-1)
+    return _finite(dots).clamp(-1.0, 1.0)
+
+
+def _fixed_sign_knn_edge_dots(
+    direction: torch.Tensor,
+    normals: torch.Tensor,
+    knn: torch.Tensor,
+    edge_weight: torch.Tensor,
+) -> torch.Tensor:
+    """Compute signed transported dots in the supplied [N, K] adjacency layout."""
+
+    if int(knn.shape[1]) == 0:
+        return direction.new_empty(knn.shape)
+    transported = _transport_neighbors(direction, normals, knn)
+    dots = (direction[:, None, :] * transported).sum(dim=-1)
+    return torch.where(
+        edge_weight > 0.0,
+        _finite(dots).clamp(-1.0, 1.0),
+        torch.zeros_like(dots),
+    )
+
+
+def refine_fixed_sign_directed_multiview_ratio(
+    *,
+    tangent_axis: torch.Tensor,
+    tangent_sign: torch.Tensor,
+    baseline_ratio: torch.Tensor,
+    normals: torch.Tensor,
+    points: torch.Tensor,
+    per_view_axes: torch.Tensor,
+    per_view_weights: torch.Tensor,
+    viewmats: torch.Tensor,
+    intrinsics: torch.Tensor,
+    knn: torch.Tensor,
+    edge_weight: torch.Tensor,
+    observed: torch.Tensor,
+    canonical_rank: torch.Tensor,
+) -> dict[str, object]:
+    """Refit ratios after a global sign solve with directed graph guards.
+
+    ``tangent_axis`` and ``tangent_sign`` are immutable inputs to this pass.
+    The analytic screen-space least-squares ratio is computed for every root,
+    then eligible roots are proposed in descending normalized residual
+    improvement and ascending ``canonical_rank`` order.  Each proposal is
+    accepted only when it preserves the post-sign non-severe-edge invariant
+    and does not increase that root's maximum signed incident angle.
+    """
+
+    tensors = {
+        "tangent_axis": tangent_axis,
+        "tangent_sign": tangent_sign,
+        "baseline_ratio": baseline_ratio,
+        "normals": normals,
+        "points": points,
+        "per_view_axes": per_view_axes,
+        "per_view_weights": per_view_weights,
+        "viewmats": viewmats,
+        "intrinsics": intrinsics,
+        "knn": knn,
+        "edge_weight": edge_weight,
+        "observed": observed,
+        "canonical_rank": canonical_rank,
+    }
+    if not all(isinstance(value, torch.Tensor) for value in tensors.values()):
+        raise TypeError("all fixed-sign directed ratio inputs must be torch.Tensor values")
+
+    if tangent_axis.ndim != 2 or tangent_axis.shape[-1] != 3:
+        raise ValueError("tangent_axis must have shape [N, 3]")
+    n = int(tangent_axis.shape[0])
+    for name, value in (("normals", normals), ("points", points)):
+        if value.shape != (n, 3):
+            raise ValueError(f"{name} must have shape [N, 3]")
+    for name, value in (("tangent_sign", tangent_sign), ("baseline_ratio", baseline_ratio)):
+        if value.ndim != 1 or int(value.shape[0]) != n:
+            raise ValueError(f"{name} must have shape [N]")
+    if per_view_axes.ndim != 3 or per_view_axes.shape[-1] != 3:
+        raise ValueError("per_view_axes must have shape [V, N, 3]")
+    v = int(per_view_axes.shape[0])
+    if int(per_view_axes.shape[1]) != n:
+        raise ValueError("per_view_axes must have the same N as tangent_axis")
+    if per_view_weights.shape != (v, n):
+        raise ValueError("per_view_weights must have shape [V, N]")
+    if viewmats.shape != (v, 4, 4):
+        raise ValueError("viewmats must have shape [V, 4, 4]")
+    if intrinsics.shape != (v, 3, 3):
+        raise ValueError("intrinsics must have shape [V, 3, 3]")
+    if knn.ndim != 2 or int(knn.shape[0]) != n:
+        raise ValueError("knn must have shape [N, K]")
+    if edge_weight.shape != knn.shape:
+        raise ValueError("edge_weight must have shape [N, K]")
+    if observed.ndim != 1 or int(observed.shape[0]) != n:
+        raise ValueError("observed must have shape [N]")
+    if canonical_rank.ndim != 1 or int(canonical_rank.shape[0]) != n:
+        raise ValueError("canonical_rank must have shape [N]")
+
+    device = tangent_axis.device
+    if any(value.device != device for value in tensors.values()):
+        raise ValueError("all fixed-sign directed ratio inputs must be on the same device")
+    if any(value.is_complex() for value in tensors.values()):
+        raise TypeError("fixed-sign directed ratio inputs must be real tensors")
+    for name, value in tensors.items():
+        if value.is_floating_point() and not bool(torch.isfinite(value).all()):
+            raise ValueError(f"{name} must contain only finite values")
+    if knn.is_floating_point() or knn.dtype == torch.bool:
+        raise TypeError("knn must be an integer tensor")
+    if canonical_rank.is_floating_point() or canonical_rank.dtype == torch.bool:
+        raise TypeError("canonical_rank must be an integer tensor")
+    if knn.numel() > 0 and bool(((knn < 0) | (knn >= n)).any()):
+        raise ValueError("knn contains an out-of-range root index")
+    if canonical_rank.numel() > 0 and int(torch.unique(canonical_rank).numel()) != n:
+        raise ValueError("canonical_rank must contain unique values")
+
+    floating_values = [
+        value for value in tensors.values() if value.is_floating_point()
+    ]
+    dtype = (
+        torch.float64
+        if any(value.dtype == torch.float64 for value in floating_values)
+        else torch.float32
+    )
+    sign = tangent_sign.to(dtype=dtype)
+    if sign.numel() > 0 and not bool(((sign == 1.0) | (sign == -1.0)).all()):
+        raise ValueError("tangent_sign must contain only +1 or -1")
+    baseline_ratio_value = baseline_ratio.to(dtype=dtype)
+    if baseline_ratio_value.numel() > 0 and bool((baseline_ratio_value < 0.0).any()):
+        raise ValueError("baseline_ratio must be nonnegative")
+    tangent = _safe_normalize(tangent_axis.to(dtype=dtype))
+    normal = _safe_normalize(normals.to(dtype=dtype))
+    if tangent.numel() > 0 and not bool(_vector_valid(tangent).all()):
+        raise ValueError("tangent_axis must contain nonzero finite vectors")
+    if normal.numel() > 0 and not bool(_vector_valid(normal).all()):
+        raise ValueError("normals must contain nonzero finite vectors")
+
+    point = points.to(dtype=dtype)
+    view_axis = _safe_normalize(per_view_axes.to(dtype=dtype))
+    raw_weight = _finite(per_view_weights.to(dtype=dtype)).clamp_min(0.0)
+    view = viewmats.to(dtype=dtype)
+    intrinsic = intrinsics.to(dtype=dtype)
+    edge = _finite(edge_weight.to(dtype=dtype)).clamp_min(0.0)
+    observed_mask = observed.to(device=device, dtype=torch.bool)
+
+    signed_axis = tangent * sign[:, None]
+    projected_evidence = _project_fixed_axis_screen(point, view_axis, view, intrinsic)
+    tangent_for_views = signed_axis[None, :, :].expand(v, -1, -1)
+    normal_for_views = normal[None, :, :].expand(v, -1, -1)
+    projected_tangent = _project_fixed_axis_screen(
+        point, tangent_for_views, view, intrinsic
+    )
+    projected_normal = _project_fixed_axis_screen(
+        point, normal_for_views, view, intrinsic
+    )
+    screen_evidence = _safe_normalize(projected_evidence)
+    screen_valid = (
+        _fixed_axis_screen_valid(projected_evidence)
+        & _fixed_axis_screen_valid(projected_tangent)
+        & _fixed_axis_screen_valid(projected_normal)
+    )
+    valid_weight = torch.where(
+        (raw_weight > 0.0) & screen_valid,
+        raw_weight,
+        torch.zeros_like(raw_weight),
+    )
+    residual_weight = raw_weight
+
+    screen_a = _finite(
+        screen_evidence[..., 0] * projected_normal[..., 1]
+        - screen_evidence[..., 1] * projected_normal[..., 0]
+    )
+    screen_b = _finite(
+        screen_evidence[..., 0] * projected_tangent[..., 1]
+        - screen_evidence[..., 1] * projected_tangent[..., 0]
+    )
+
+    accumulate_dtype = torch.float64
+    valid_weight_acc = valid_weight.to(dtype=accumulate_dtype)
+    residual_weight_acc = residual_weight.to(dtype=accumulate_dtype)
+    a_acc = screen_a.to(dtype=accumulate_dtype)
+    b_acc = screen_b.to(dtype=accumulate_dtype)
+    baseline_acc = baseline_ratio_value.to(dtype=accumulate_dtype)
+    numerator = _finite(
+        torch.sum(_finite(valid_weight_acc * a_acc * b_acc), dim=0)
+    )
+    denominator = _finite(
+        torch.sum(_finite(valid_weight_acc * a_acc.square()), dim=0)
+    )
+    fallback = denominator <= EPS
+    raw_ls_acc = torch.where(
+        fallback,
+        baseline_acc,
+        (-numerator / denominator.clamp_min(EPS)).clamp_min(0.0),
+    )
+    raw_ls_acc = _finite(raw_ls_acc).clamp_min(0.0)
+    raw_ls_ratio = raw_ls_acc.to(dtype=dtype)
+    raw_ls_ratio = _finite(raw_ls_ratio).clamp_min(0.0)
+
+    baseline_direction = _safe_normalize(
+        baseline_ratio_value[:, None] * normal + signed_axis
+    )
+    ls_direction = _safe_normalize(raw_ls_ratio[:, None] * normal + signed_axis)
+
+    residual_before = _finite(
+        torch.sum(
+            _finite(
+                residual_weight_acc
+                * (a_acc * baseline_acc[None, :] + b_acc).square()
+            ),
+            dim=0,
+        )
+        / valid_weight_acc.sum(dim=0).clamp_min(EPS)
+    ).to(dtype=dtype)
+    residual_after = _finite(
+        torch.sum(
+            _finite(
+                residual_weight_acc
+                * (a_acc * raw_ls_acc[None, :] + b_acc).square()
+            ),
+            dim=0,
+        )
+        / valid_weight_acc.sum(dim=0).clamp_min(EPS)
+    ).to(dtype=dtype)
+    normalized_improvement = torch.where(
+        torch.isfinite(residual_before) & (residual_before > 0.0),
+        (residual_before - residual_after)
+        / residual_before.clamp_min(EPS),
+        torch.zeros_like(residual_before),
+    )
+    normalized_improvement = _finite(normalized_improvement)
+    finite_denominator = torch.isfinite(denominator) & (denominator > EPS)
+    strict_residual_improvement = (
+        finite_denominator
+        & torch.isfinite(raw_ls_ratio)
+        & (raw_ls_ratio >= 0.0)
+        & torch.isfinite(residual_before)
+        & torch.isfinite(residual_after)
+        & (residual_after < residual_before)
+    )
+    eligible = strict_residual_improvement
+
+    edge_u, edge_v = _fixed_sign_unique_edge_pairs(
+        knn, edge, n=n, device=device
+    )
+    baseline_edge_dots = _fixed_sign_edge_dots(
+        baseline_direction, normal, edge_u, edge_v
+    )
+    baseline_clean_edge = baseline_edge_dots > -math.cos(math.radians(45.0))
+
+    eligible_ids = torch.nonzero(eligible, as_tuple=False).flatten()
+    eligible_ids_cpu = eligible_ids.detach().cpu().tolist()
+    improvement_cpu = normalized_improvement.detach().cpu().tolist()
+    rank_cpu = canonical_rank.detach().cpu().tolist()
+    ordered_ids = sorted(
+        (int(root_id) for root_id in eligible_ids_cpu),
+        key=lambda root_id: (-float(improvement_cpu[root_id]), int(rank_cpu[root_id])),
+    )
+    canonical_order = torch.tensor(
+        ordered_ids, dtype=torch.long, device=device
+    )
+    canonical_rank_order = canonical_rank[canonical_order]
+
+    edge_u_cpu = edge_u.detach().cpu().tolist()
+    edge_v_cpu = edge_v.detach().cpu().tolist()
+    incident_u: list[list[int]] = [[] for _ in range(n)]
+    incident_v: list[list[int]] = [[] for _ in range(n)]
+    for edge_id, (first, second) in enumerate(zip(edge_u_cpu, edge_v_cpu)):
+        incident_u[int(first)].append(edge_id)
+        incident_v[int(second)].append(edge_id)
+
+    current_ratio = baseline_ratio_value.clone()
+    current_direction = baseline_direction.clone()
+    accepted_mask = torch.zeros((n,), dtype=torch.bool, device=device)
+    rejected_mask = torch.zeros((n,), dtype=torch.bool, device=device)
+    rejection_masks: dict[str, torch.Tensor] = {
+        "nonsevere_edge_would_become_severe": torch.zeros(
+            (n,), dtype=torch.bool, device=device
+        ),
+        "directed_incident_angle_increase": torch.zeros(
+            (n,), dtype=torch.bool, device=device
+        ),
+        "nonfinite_or_negative_ratio_or_direction": torch.zeros(
+            (n,), dtype=torch.bool, device=device
+        ),
+    }
+    current_max_angle = torch.zeros((n,), dtype=dtype, device=device)
+    proposed_max_angle = torch.zeros((n,), dtype=dtype, device=device)
+    accepted_root_ids: list[int] = []
+    rejected_root_ids: list[int] = []
+    rejected_root_ids_by_reason: dict[str, list[int]] = {}
+    accepted_records: list[dict[str, float | int]] = []
+    rejected_records: list[dict[str, object]] = []
+    severe_cosine = math.cos(math.radians(45.0))
+
+    def _index_tensor(values: list[int]) -> torch.Tensor:
+        return torch.tensor(values, dtype=torch.long, device=device)
+
+    def _max_directed_angle(dots: torch.Tensor) -> torch.Tensor:
+        if dots.numel() == 0:
+            return current_direction.new_zeros(())
+        return torch.rad2deg(torch.acos(dots.clamp(-1.0, 1.0))).max()
+
+    for root_id in ordered_ids:
+        u_indices = _index_tensor(incident_u[root_id])
+        v_indices = _index_tensor(incident_v[root_id])
+        incident_edges = torch.cat((u_indices, v_indices))
+        proposed_ratio = raw_ls_ratio[root_id]
+        proposed_direction = ls_direction[root_id]
+        finite_guard = bool(
+            bool(torch.isfinite(proposed_ratio))
+            and bool(torch.isfinite(proposed_direction).all())
+            and bool(torch.linalg.vector_norm(proposed_direction) > EPS)
+            and bool(torch.isfinite(current_ratio).all())
+            and bool(torch.isfinite(current_direction).all())
+        )
+        reasons: list[str] = []
+        severe_violation_edges: list[int] = []
+        if not finite_guard:
+            rejection_masks["nonfinite_or_negative_ratio_or_direction"][root_id] = True
+            reasons.append("nonfinite_or_negative_ratio_or_direction")
+            current_angle = current_direction.new_zeros(())
+            proposed_angle = current_direction.new_zeros(())
+            proposed_dots = current_direction.new_empty((0,))
+        else:
+            current_dots_u = current_direction.new_empty((u_indices.numel(),))
+            current_dots_v = current_direction.new_empty((v_indices.numel(),))
+            if u_indices.numel() > 0:
+                transported = parallel_transport_vectors(
+                    current_direction[edge_v[u_indices]],
+                    normal[edge_v[u_indices]],
+                    normal[edge_u[u_indices]],
+                )
+                current_dots_u = (
+                    current_direction[edge_u[u_indices]] * transported
+                ).sum(dim=-1)
+            if v_indices.numel() > 0:
+                transported = parallel_transport_vectors(
+                    current_direction[edge_u[v_indices]],
+                    normal[edge_u[v_indices]],
+                    normal[edge_v[v_indices]],
+                )
+                current_dots_v = (
+                    current_direction[edge_v[v_indices]] * transported
+                ).sum(dim=-1)
+            current_dots = _finite(torch.cat((current_dots_u, current_dots_v))).clamp(
+                -1.0, 1.0
+            )
+            current_angle = _max_directed_angle(current_dots)
+            proposed_dots_u = current_direction.new_empty((u_indices.numel(),))
+            proposed_dots_v = current_direction.new_empty((v_indices.numel(),))
+            if u_indices.numel() > 0:
+                transported = parallel_transport_vectors(
+                    current_direction[edge_v[u_indices]],
+                    normal[edge_v[u_indices]],
+                    normal[edge_u[u_indices]],
+                )
+                proposed_dots_u = (
+                    proposed_direction[None, :] * transported
+                ).sum(dim=-1)
+            if v_indices.numel() > 0:
+                transported = parallel_transport_vectors(
+                    current_direction[edge_u[v_indices]],
+                    normal[edge_u[v_indices]],
+                    normal[edge_v[v_indices]],
+                )
+                proposed_dots_v = (
+                    proposed_direction[None, :] * transported
+                ).sum(dim=-1)
+            proposed_dots = torch.cat((proposed_dots_u, proposed_dots_v))
+            proposed_dots = _finite(proposed_dots).clamp(-1.0, 1.0)
+            proposed_angle = _max_directed_angle(proposed_dots)
+            baseline_clean_incident = baseline_clean_edge[incident_edges]
+            severe_flags = baseline_clean_incident & (proposed_dots <= -severe_cosine)
+            if bool(severe_flags.any()):
+                rejection_masks["nonsevere_edge_would_become_severe"][root_id] = True
+                reasons.append("nonsevere_edge_would_become_severe")
+                severe_violation_edges = (
+                    incident_edges[severe_flags].detach().cpu().tolist()
+                )
+            if bool(
+                (~torch.isfinite(proposed_angle))
+                | (proposed_angle > current_angle)
+            ):
+                rejection_masks["directed_incident_angle_increase"][root_id] = True
+                reasons.append("directed_incident_angle_increase")
+
+        current_max_angle[root_id] = current_angle
+        proposed_max_angle[root_id] = proposed_angle
+        if reasons:
+            rejected_mask[root_id] = True
+            rejected_root_ids.append(root_id)
+            for reason in reasons:
+                rejected_root_ids_by_reason.setdefault(reason, []).append(root_id)
+            rejected_records.append(
+                {
+                    "root_id": root_id,
+                    "canonical_rank": int(rank_cpu[root_id]),
+                    "reasons": list(reasons),
+                    "ratio_before": float(current_ratio[root_id].detach().cpu().item()),
+                    "ratio_proposed": float(proposed_ratio.detach().cpu().item()),
+                    "normalized_residual_improvement": float(
+                        normalized_improvement[root_id].detach().cpu().item()
+                    ),
+                    "current_max_incident_directed_angle_deg": float(
+                        current_angle.detach().cpu().item()
+                    ),
+                    "proposed_max_incident_directed_angle_deg": float(
+                        proposed_angle.detach().cpu().item()
+                    ),
+                    "severe_violation_edge_ids": [
+                        int(edge_id) for edge_id in severe_violation_edges
+                    ],
+                }
+            )
+            continue
+
+        old_ratio = current_ratio[root_id]
+        old_direction = current_direction[root_id].clone()
+        current_ratio[root_id] = proposed_ratio
+        current_direction[root_id] = proposed_direction
+        accepted_mask[root_id] = True
+        accepted_root_ids.append(root_id)
+        accepted_records.append(
+            {
+                "root_id": root_id,
+                "canonical_rank": int(rank_cpu[root_id]),
+                "ratio_before": float(old_ratio.detach().cpu().item()),
+                "ratio_after": float(proposed_ratio.detach().cpu().item()),
+                "ratio_delta": float(
+                    (proposed_ratio - old_ratio).detach().cpu().item()
+                ),
+                "normalized_residual_improvement": float(
+                    normalized_improvement[root_id].detach().cpu().item()
+                ),
+                "current_max_incident_directed_angle_deg": float(
+                    current_angle.detach().cpu().item()
+                ),
+                "proposed_max_incident_directed_angle_deg": float(
+                    proposed_angle.detach().cpu().item()
+                ),
+            }
+        )
+
+    final_edge_dots = _fixed_sign_edge_dots(
+        current_direction, normal, edge_u, edge_v
+    )
+    final_direction = current_direction
+    final_ratio = current_ratio
+    final_severe_edge = final_edge_dots <= -severe_cosine
+    new_severe_edge = baseline_clean_edge & final_severe_edge
+    final_clean_edge = ~final_severe_edge
+    baseline_angle = torch.rad2deg(
+        torch.acos(baseline_edge_dots.clamp(-1.0, 1.0))
+    )
+    final_angle = torch.rad2deg(torch.acos(final_edge_dots.clamp(-1.0, 1.0)))
+    baseline_knn_edge_dots = _fixed_sign_knn_edge_dots(
+        baseline_direction, normal, knn, edge
+    )
+    final_knn_edge_dots = _fixed_sign_knn_edge_dots(
+        final_direction, normal, knn, edge
+    )
+
+    eligibility_rejection_masks = {
+        "denominator_not_finite_or_nonpositive": ~finite_denominator,
+        "no_strict_direct_residual_improvement": finite_denominator
+        & ~strict_residual_improvement,
+    }
+    all_rejection_masks: dict[str, torch.Tensor] = {
+        **eligibility_rejection_masks,
+        **rejection_masks,
+    }
+    rejection_reason_counts = {
+        reason: int(mask.sum().detach().cpu().item())
+        for reason, mask in rejection_masks.items()
+    }
+    eligibility_reason_counts = {
+        reason: int(mask.sum().detach().cpu().item())
+        for reason, mask in eligibility_rejection_masks.items()
+    }
+    counts = {
+        "root_count": n,
+        "view_count": v,
+        "neighbor_count": int(knn.shape[1]),
+        "observed_count": int(observed_mask.sum().detach().cpu().item()),
+        "unique_edge_count": int(edge_u.numel()),
+        "valid_evidence_pairs": int(
+            (valid_weight > 0.0).sum().detach().cpu().item()
+        ),
+        "evidence_root_count": int(
+            (valid_weight_acc.sum(dim=0) > EPS).sum().detach().cpu().item()
+        ),
+        "finite_denominator_count": int(
+            finite_denominator.sum().detach().cpu().item()
+        ),
+        "strict_residual_improvement_count": int(
+            strict_residual_improvement.sum().detach().cpu().item()
+        ),
+        "eligible_count": int(eligible.sum().detach().cpu().item()),
+        "ineligible_count": int((~eligible).sum().detach().cpu().item()),
+        "accepted_count": len(accepted_root_ids),
+        "rejected_count": len(rejected_root_ids),
+        "baseline_clean_edge_count": int(baseline_clean_edge.sum().detach().cpu().item()),
+        "baseline_severe_edge_count": int((~baseline_clean_edge).sum().detach().cpu().item()),
+        "final_clean_edge_count": int(final_clean_edge.sum().detach().cpu().item()),
+        "final_severe_edge_count": int(final_severe_edge.sum().detach().cpu().item()),
+        "new_severe_edge_count": int(new_severe_edge.sum().detach().cpu().item()),
+        "rejection_reason_counts": rejection_reason_counts,
+        "eligibility_reason_counts": eligibility_reason_counts,
+    }
+    order_report = [int(root_id) for root_id in ordered_ids]
+    rank_order_report = [int(rank_cpu[root_id]) for root_id in ordered_ids]
+    report = {
+        "algorithm": "formal_post_global_sign_directed_ratio_refit",
+        "constants": {
+            "eps": float(EPS),
+            "severe_angle_deg": 45.0,
+            "severe_dot_threshold": float(-severe_cosine),
+        },
+        "order": {
+            "canonical_order_root_ids": order_report,
+            "canonical_rank_order": rank_order_report,
+            "rule": "descending normalized residual improvement, then ascending canonical_rank",
+        },
+        "eligibility": {
+            "rule": "finite denominator > eps and strict direct residual_after < residual_before with finite nonnegative LS ratio",
+            "eligible_root_ids": [int(root_id) for root_id in eligible_ids_cpu],
+            "normalized_improvement": _fixed_axis_qstats(
+                normalized_improvement, eligible
+            ),
+        },
+        "guard": {
+            "nonsevere_edge": "every unique incident edge with post-sign baseline dot > -cos45 remains dot > -cos45",
+            "directed_angle": "maximum incident angle is degrees(arccos(signed dot)) against current neighbor directions; no abs(dot)",
+            "finite_nonnegative": "proposed ratio and normalized direction must be finite and ratio >= 0",
+        },
+        "accepted_root_ids": [int(root_id) for root_id in accepted_root_ids],
+        "rejected_root_ids": [int(root_id) for root_id in rejected_root_ids],
+        "rejected_root_ids_by_reason": {
+            reason: [int(root_id) for root_id in root_ids]
+            for reason, root_ids in rejected_root_ids_by_reason.items()
+        },
+        "accepted_records": accepted_records,
+        "rejected_records": rejected_records,
+        "counts": counts,
+        "statistics": {
+            "baseline_ratio": _fixed_axis_qstats(baseline_ratio_value, observed_mask),
+            "raw_ls_ratio": _fixed_axis_qstats(raw_ls_ratio, observed_mask),
+            "denominator": _fixed_axis_qstats(denominator.to(dtype=dtype), observed_mask),
+            "residual_before": _fixed_axis_qstats(residual_before, observed_mask),
+            "residual_after": _fixed_axis_qstats(residual_after, observed_mask),
+            "normalized_residual_improvement": _fixed_axis_qstats(
+                normalized_improvement, observed_mask
+            ),
+            "baseline_edge_dot": _fixed_axis_qstats(
+                baseline_edge_dots, torch.ones_like(baseline_edge_dots, dtype=torch.bool)
+            ),
+            "final_edge_dot": _fixed_axis_qstats(
+                final_edge_dots, torch.ones_like(final_edge_dots, dtype=torch.bool)
+            ),
+            "baseline_directed_angle_deg": _fixed_axis_qstats(
+                baseline_angle, torch.ones_like(baseline_angle, dtype=torch.bool)
+            ),
+            "final_directed_angle_deg": _fixed_axis_qstats(
+                final_angle, torch.ones_like(final_angle, dtype=torch.bool)
+            ),
+        },
+    }
+
+    return {
+        "direction": final_direction,
+        "final_direction": final_direction,
+        "baseline_direction": baseline_direction,
+        "ls_direction": ls_direction,
+        "ratio": final_ratio,
+        "final_ratio": final_ratio,
+        "baseline_ratio": baseline_ratio_value,
+        "raw_ls_ratio": raw_ls_ratio,
+        "ls_ratio": raw_ls_ratio,
+        "rho_ls": raw_ls_ratio,
+        "tangent_axis": tangent,
+        "fixed_tangent_axis": tangent,
+        "signed_tangent_axis": signed_axis,
+        "tangent_sign": sign,
+        "fixed_tangent_sign": sign,
+        "numerator": numerator.to(dtype=dtype),
+        "denominator": denominator.to(dtype=dtype),
+        "weight_sum": valid_weight_acc.sum(dim=0).to(dtype=dtype),
+        "fallback": fallback,
+        "finite_denominator_mask": finite_denominator,
+        "strict_residual_improvement": strict_residual_improvement,
+        "strict_residual_improvement_mask": strict_residual_improvement,
+        "normalized_residual_improvement": normalized_improvement,
+        "residual_before": residual_before,
+        "residual_after": residual_after,
+        "residual0": residual_before,
+        "residual1": residual_after,
+        "eligible": eligible,
+        "eligible_mask": eligible,
+        "ineligible_mask": ~eligible,
+        "accepted": accepted_mask,
+        "accepted_mask": accepted_mask,
+        "rejected": rejected_mask,
+        "rejected_mask": rejected_mask,
+        "rejection_masks": all_rejection_masks,
+        "rejection_masks_by_reason": all_rejection_masks,
+        "guard_rejection_masks": rejection_masks,
+        "eligibility_rejection_masks": eligibility_rejection_masks,
+        "current_max_incident_directed_angle_deg": current_max_angle,
+        "proposed_max_incident_directed_angle_deg": proposed_max_angle,
+        "baseline_edge_dots": baseline_edge_dots,
+        "final_edge_dots": final_edge_dots,
+        "baseline_edge_dot": baseline_edge_dots,
+        "final_edge_dot": final_edge_dots,
+        "edge_dot": final_edge_dots,
+        "baseline_knn_edge_dots": baseline_knn_edge_dots,
+        "final_knn_edge_dots": final_knn_edge_dots,
+        "edge_u": edge_u,
+        "edge_v": edge_v,
+        "baseline_clean_edge_mask": baseline_clean_edge,
+        "final_severe_edge_mask": final_severe_edge,
+        "new_severe_edge_mask": new_severe_edge,
+        "canonical_rank": canonical_rank,
+        "canonical_order": canonical_order,
+        "canonical_rank_order": canonical_rank_order,
+        "eligible_root_ids": [int(root_id) for root_id in eligible_ids_cpu],
+        "ordered_eligible_root_ids": order_report,
+        "ordered_eligible_indices": canonical_order,
+        "accepted_root_ids": [int(root_id) for root_id in accepted_root_ids],
+        "rejected_root_ids": [int(root_id) for root_id in rejected_root_ids],
+        "rejected_root_ids_by_reason": {
+            reason: [int(root_id) for root_id in root_ids]
+            for reason, root_ids in rejected_root_ids_by_reason.items()
+        },
+        "accepted_records": accepted_records,
+        "rejected_records": rejected_records,
+        "root_count": n,
+        "view_count": v,
+        "neighbor_count": int(knn.shape[1]),
+        "observed_count": counts["observed_count"],
+        "accepted_count": counts["accepted_count"],
+        "rejected_count": counts["rejected_count"],
+        "report": report,
         "counts": counts,
     }

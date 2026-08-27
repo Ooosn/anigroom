@@ -14,6 +14,7 @@ from anigroom.flow.view_cluster_refinement import (
     RESIDUAL_QUANTILE,
     VIEW_CLUSTER_ITERATIONS,
     refine_fixed_axis_multiview_ratio,
+    refine_fixed_sign_directed_multiview_ratio,
     refine_trusted_multiview_axis_field,
 )
 
@@ -341,3 +342,188 @@ def test_fixed_axis_ratio_is_view_order_and_axis_sign_invariant() -> None:
     for key in ("direction", "ratio", "ls_ratio", "denominator", "residual_before", "residual_after"):
         torch.testing.assert_close(result[key], base[key], atol=1.0e-5, rtol=1.0e-5)
     torch.testing.assert_close(result["accept_mask"], base["accept_mask"])
+
+
+def _fixed_sign_ratio_inputs(
+    target_ratio: torch.Tensor,
+    initial_ratio: torch.Tensor,
+    *,
+    tangent_sign: torch.Tensor | None = None,
+    view_count: int = 1,
+) -> dict[str, torch.Tensor]:
+    data = _ratio_inputs(target_ratio, initial_ratio, view_count=view_count)
+    n = int(target_ratio.numel())
+    if tangent_sign is None:
+        tangent_sign = torch.ones(n)
+    return {
+        "tangent_axis": data["tangent_axis"],
+        "tangent_sign": tangent_sign,
+        "baseline_ratio": initial_ratio.to(
+            dtype=data["initial_direction"].dtype
+        ).clone(),
+        "normals": data["normals"],
+        "points": data["points"],
+        "per_view_axes": data["per_view_axes"],
+        "per_view_weights": data["per_view_weights"],
+        "viewmats": data["viewmats"],
+        "intrinsics": data["intrinsics"],
+        "knn": data["knn"],
+        "edge_weight": data["edge_weight"],
+        "observed": data["observed"],
+        "canonical_rank": torch.arange(n, dtype=torch.long),
+    }
+
+
+def _run_fixed_sign(**kwargs: torch.Tensor) -> dict[str, object]:
+    return refine_fixed_sign_directed_multiview_ratio(
+        **_fixed_sign_ratio_inputs(**kwargs)
+    )
+
+
+def test_fixed_sign_ratio_recovers_analytic_unbounded_ratio() -> None:
+    data = _fixed_sign_ratio_inputs(
+        target_ratio=torch.tensor([2.5, 2.5]),
+        initial_ratio=torch.tensor([0.2, 0.2]),
+    )
+    data["edge_weight"] = torch.zeros_like(data["edge_weight"])
+    result = refine_fixed_sign_directed_multiview_ratio(**data)
+    torch.testing.assert_close(
+        result["raw_ls_ratio"], torch.tensor([2.5, 2.5]), atol=1.0e-5, rtol=1.0e-5
+    )
+    torch.testing.assert_close(result["final_ratio"], result["raw_ls_ratio"])
+    assert bool(result["accepted_mask"].all())
+    assert float(result["final_ratio"].max()) > 1.0
+
+
+def test_fixed_sign_ratio_requires_strict_direct_residual_improvement() -> None:
+    result = _run_fixed_sign(
+        target_ratio=torch.tensor([1.0, 1.0]),
+        initial_ratio=torch.tensor([1.0, 1.0]),
+    )
+    assert not bool(result["eligible_mask"].any())
+    assert not bool(result["accepted_mask"].any())
+    assert bool(result["eligibility_rejection_masks"]["no_strict_direct_residual_improvement"].all())
+
+
+def test_fixed_sign_ratio_rejects_new_severe_edge() -> None:
+    data = _fixed_sign_ratio_inputs(
+        torch.tensor([0.0, 0.2]),
+        torch.tensor([5.0, 1.0]),
+        tangent_sign=torch.tensor([1.0, -1.0]),
+    )
+    data["per_view_weights"][:, 1] = 0.0
+    result = refine_fixed_sign_directed_multiview_ratio(**data)
+    assert bool(result["eligible_mask"][0])
+    assert not bool(result["accepted_mask"][0])
+    assert bool(result["rejection_masks"]["nonsevere_edge_would_become_severe"][0])
+    assert bool(result["baseline_clean_edge_mask"].all())
+    assert not bool(result["new_severe_edge_mask"].any())
+
+
+def test_fixed_sign_ratio_rejects_directed_max_angle_increase() -> None:
+    data = _fixed_sign_ratio_inputs(
+        torch.tensor([1.0, 0.2]),
+        torch.tensor([0.0, 0.0]),
+    )
+    data["per_view_weights"][:, 1] = 0.0
+    result = refine_fixed_sign_directed_multiview_ratio(**data)
+    assert bool(result["eligible_mask"][0])
+    assert not bool(result["accepted_mask"][0])
+    assert bool(result["rejection_masks"]["directed_incident_angle_increase"][0])
+    assert float(result["proposed_max_incident_directed_angle_deg"][0]) > float(
+        result["current_max_incident_directed_angle_deg"][0]
+    )
+
+
+def test_fixed_sign_ratio_accepts_safe_sequential_update() -> None:
+    data = _fixed_sign_ratio_inputs(
+        torch.tensor([1.0, 0.2]),
+        torch.tensor([0.0, 1.0]),
+    )
+    data["per_view_weights"][:, 1] = 0.0
+    result = refine_fixed_sign_directed_multiview_ratio(**data)
+    assert bool(result["eligible_mask"][0])
+    assert bool(result["accepted_mask"][0])
+    torch.testing.assert_close(result["final_ratio"][0], torch.tensor(1.0))
+    assert float(result["proposed_max_incident_directed_angle_deg"][0]) < float(
+        result["current_max_incident_directed_angle_deg"][0]
+    )
+    assert not bool(result["new_severe_edge_mask"].any())
+
+
+def test_fixed_sign_ratio_preserves_zero_new_severe_invariant() -> None:
+    result = _run_fixed_sign(
+        target_ratio=torch.tensor([1.0, 0.0, 2.0, 0.5]),
+        initial_ratio=torch.tensor([0.0, 0.5, 1.0, 0.25]),
+    )
+    threshold = -torch.cos(torch.tensor(torch.pi / 4.0))
+    clean_baseline = result["baseline_edge_dots"] > threshold
+    assert not bool(result["new_severe_edge_mask"].any())
+    assert bool((result["final_edge_dots"][clean_baseline] > threshold).all())
+
+
+def test_fixed_sign_ratio_is_view_reversal_invariant() -> None:
+    data = _fixed_sign_ratio_inputs(
+        torch.tensor([0.3, 0.6, 0.9]),
+        torch.tensor([0.4, 0.4, 0.4]),
+        view_count=2,
+    )
+    base = refine_fixed_sign_directed_multiview_ratio(**data)
+    changed = dict(data)
+    changed["per_view_axes"] = torch.stack(
+        [-data["per_view_axes"][1], -data["per_view_axes"][0]], dim=0
+    )
+    changed["per_view_weights"] = data["per_view_weights"][[1, 0]]
+    changed["viewmats"] = data["viewmats"][[1, 0]]
+    changed["intrinsics"] = data["intrinsics"][[1, 0]]
+    result = refine_fixed_sign_directed_multiview_ratio(**changed)
+    for key in (
+        "final_direction",
+        "final_ratio",
+        "raw_ls_ratio",
+        "denominator",
+        "residual_before",
+        "residual_after",
+        "eligible_mask",
+        "accepted_mask",
+    ):
+        torch.testing.assert_close(result[key], base[key], atol=1.0e-5, rtol=1.0e-5)
+
+
+def test_fixed_sign_ratio_root_permutation_uses_remapped_canonical_rank() -> None:
+    data = _fixed_sign_ratio_inputs(
+        torch.tensor([0.3, 1.2, 0.7, 1.6]),
+        torch.tensor([1.0, 0.2, 1.4, 0.4]),
+    )
+    data["canonical_rank"] = torch.tensor([30, 10, 40, 20], dtype=torch.long)
+    base = refine_fixed_sign_directed_multiview_ratio(**data)
+    root_perm = torch.tensor([2, 0, 3, 1])
+    inverse = torch.empty_like(root_perm)
+    inverse[root_perm] = torch.arange(root_perm.numel())
+    permuted = dict(data)
+    for key in (
+        "tangent_axis",
+        "tangent_sign",
+        "baseline_ratio",
+        "normals",
+        "points",
+        "observed",
+        "canonical_rank",
+    ):
+        permuted[key] = data[key][root_perm]
+    permuted["per_view_axes"] = data["per_view_axes"][:, root_perm]
+    permuted["per_view_weights"] = data["per_view_weights"][:, root_perm]
+    permuted["knn"] = inverse[data["knn"]][root_perm]
+    permuted["edge_weight"] = data["edge_weight"][root_perm]
+    reordered = refine_fixed_sign_directed_multiview_ratio(**permuted)
+    for key in ("final_direction", "final_ratio", "raw_ls_ratio", "eligible_mask", "accepted_mask"):
+        torch.testing.assert_close(
+            reordered[key], base[key][root_perm], atol=1.0e-5, rtol=1.0e-5
+        )
+    for reason in base["guard_rejection_masks"]:
+        torch.testing.assert_close(
+            reordered["guard_rejection_masks"][reason],
+            base["guard_rejection_masks"][reason][root_perm],
+        )
+    expected_order = inverse[base["canonical_order"]]
+    torch.testing.assert_close(reordered["canonical_order"], expected_order)
