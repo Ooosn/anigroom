@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import tempfile
 
 import torch
 
@@ -198,3 +203,90 @@ def test_generic_launcher_defaults_and_passes_gauge_weight() -> None:
 
     assert 'GUIDE_SUPPORT_GAUGE_WEIGHT="${GUIDE_SUPPORT_GAUGE_WEIGHT:-0}"' in launcher
     assert '--guide-support-gauge-weight "$GUIDE_SUPPORT_GAUGE_WEIGHT"' in launcher
+
+
+def _bash() -> str | None:
+    return shutil.which("bash") or (
+        r"C:\Program Files\Git\bin\bash.exe" if os.name == "nt" else None
+    )
+
+
+def _shell_path(path: Path) -> str:
+    value = path.resolve().as_posix()
+    if os.name == "nt" and len(value) > 1 and value[1] == ":":
+        return f"/{value[0].lower()}{value[2:]}"
+    return value
+
+
+def _snapshot_config(config: Path, output: Path) -> None:
+    bash = _bash()
+    if bash is None:
+        raise RuntimeError("bash is required for config shell snapshots")
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            "env -i HOME=\"${HOME:-}\" PATH=\"$PATH\" "
+            "MESH_NO_PENETRATION_SDF=/tmp/white_tiger_sdf.npz "
+            f"bash -c 'set -a; source \"$1\"; env' _ {shlex.quote(_shell_path(config))} "
+            f"> {shlex.quote(_shell_path(output))}",
+        ]
+    )
+    result = subprocess.run(
+        [bash, "-c", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def _load_snapshot(path: Path) -> dict[str, str]:
+    ignored = {"PWD", "SHLVL", "_"}
+    result: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key not in ignored:
+            result[key] = value
+    return result
+
+
+def test_r069_12k_gate_changes_only_iterations_and_keeps_weight() -> None:
+    r069_path = ROOT / "configs" / "r069_guide_support_gauge_0_30k.env"
+    gate_path = ROOT / "configs" / "r069_guide_support_gauge_0_12k_gate.env"
+    gate_source = gate_path.read_text(encoding="utf-8")
+
+    assert 'source "${CONFIG_DIR}/r069_guide_support_gauge_0_30k.env"' in gate_source
+    assignments = [
+        line.strip()
+        for line in gate_source.splitlines()
+        if line.strip()
+        and not line.lstrip().startswith("#")
+        and not line.startswith("CONFIG_DIR=")
+        and not line.startswith("source ")
+        and not line.startswith("unset ")
+    ]
+    assert assignments == ["ITERATIONS=12000"]
+
+    bash = _bash()
+    if bash is None:
+        raise RuntimeError("bash is required for config shell snapshots")
+    with tempfile.TemporaryDirectory(prefix="r069-12k-config-") as directory:
+        root = Path(directory)
+        r069_snapshot_path = root / "r069.env"
+        gate_snapshot_path = root / "gate.env"
+        _snapshot_config(r069_path, r069_snapshot_path)
+        _snapshot_config(gate_path, gate_snapshot_path)
+        r069 = _load_snapshot(r069_snapshot_path)
+        gate = _load_snapshot(gate_snapshot_path)
+
+    delta = {
+        key: {"r069_30k": r069.get(key), "r069_12k_gate": gate.get(key)}
+        for key in sorted(set(r069) | set(gate))
+        if r069.get(key) != gate.get(key)
+    }
+    assert delta == {
+        "ITERATIONS": {"r069_30k": "30000", "r069_12k_gate": "12000"}
+    }
+    assert r069["GUIDE_SUPPORT_GAUGE_WEIGHT"] == gate["GUIDE_SUPPORT_GAUGE_WEIGHT"] == "0.001"

@@ -159,3 +159,6 @@ The first gate ends at 12k because the baseline failure is already measurable
 there: effective minimum length is `0.00270`, mean/P95 root width is
 `0.000367 / 0.000718`, and root/tip opacity P05 is `0.571 / 0.173`. Panda and
 white tiger must use the same from-zero source, weight, and audit protocol.
+The duration-only gate config is
+`configs/r069_guide_support_gauge_0_12k_gate.env`; its shell snapshot differs
+from the 30k candidate only by `ITERATIONS=30000 -> 12000`.
