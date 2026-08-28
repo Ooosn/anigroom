@@ -68,8 +68,11 @@ Retained baselines:
 
 Keep V6 as the immutable fixed-axis parent, V5 as the completed trained
 rollback, and V4, `v3_height_smooth`, and `v2_consensus` for controlled
-experiments and ablations. V7 is not yet tied to a completed training
-checkpoint.
+experiments and ablations. V7 is tied to the completed Panda R068 from-zero
+30k cross-sample checkpoint documented in
+`docs/panda_r068_v7_training_20260828.md`; that execution validates the V7
+initialization route but does not by itself make the unchanged R068 learned
+curl or localized coverage behavior a generalized cross-species baseline.
 
 Rejected diagnostic: sign-aware direction consensus improved unsigned local
 axis smoothness but introduced directed sign flips in the tail/body field, so it

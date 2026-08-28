@@ -28,12 +28,12 @@ def test_checkpoint_loader_retries_numpy2_pickle_on_numpy1(monkeypatch, tmp_path
             error.name = "numpy._core"
             raise error
         assert "numpy._core.multiarray" in __import__("sys").modules
-        return {"checkpoint_version": 9, "iteration": 1}
+        return {"checkpoint_version": 10, "iteration": 1}
 
     monkeypatch.setattr("tools.train_white_tiger_stage1.torch.load", fake_load)
     checkpoint = load_training_checkpoint(tmp_path / "checkpoint.pt")
 
-    assert checkpoint == {"checkpoint_version": 9, "iteration": 1}
+    assert checkpoint == {"checkpoint_version": 10, "iteration": 1}
     assert len(calls) == 2
 
 
@@ -46,7 +46,15 @@ def test_incomplete_checkpoint_config_is_rejected() -> None:
     data = checkpoint_config()
     del data["geometry_residual_smooth_scale"]
 
-    with pytest.raises(TypeError, match="incomplete R067"):
+    with pytest.raises(TypeError, match="incomplete current"):
+        stage1_config_from_checkpoint_mapping(data)
+
+
+def test_new_checkpoint_config_field_is_strictly_required() -> None:
+    data = checkpoint_config()
+    del data["guide_support_gauge_weight"]
+
+    with pytest.raises(TypeError, match="incomplete current"):
         stage1_config_from_checkpoint_mapping(data)
 
 

@@ -118,15 +118,22 @@ def test_standalone_deformation_signature_is_curl_only() -> None:
     )
 
 
-def test_schema8_checkpoint_is_rejected_before_model_load(tmp_path) -> None:
+def test_schema8_checkpoint_is_rejected_before_model_load_under_schema10(tmp_path) -> None:
     checkpoint = tmp_path / "r066_schema8.pt"
     torch.save({"checkpoint_version": 8, "model": {}, "config": {}, "optimizer": {}}, checkpoint)
-    with pytest.raises(RuntimeError, match="expected 9"):
+    with pytest.raises(RuntimeError, match="expected 10"):
         load_stage1_checkpoint_model(checkpoint, torch.device("cpu"))
 
 
-def test_schema9_checkpoint_version_is_current() -> None:
-    require_current_checkpoint_version({"checkpoint_version": 9})
+def test_historical_schema9_checkpoint_is_rejected_before_model_load(tmp_path) -> None:
+    checkpoint = tmp_path / "r067_schema9.pt"
+    torch.save({"checkpoint_version": 9, "model": {}, "config": {}, "optimizer": {}}, checkpoint)
+    with pytest.raises(RuntimeError, match="expected 10"):
+        load_stage1_checkpoint_model(checkpoint, torch.device("cpu"))
+
+
+def test_schema10_checkpoint_version_is_current() -> None:
+    require_current_checkpoint_version({"checkpoint_version": 10})
 
 
 def test_removed_frizz_config_mapping_is_rejected() -> None:

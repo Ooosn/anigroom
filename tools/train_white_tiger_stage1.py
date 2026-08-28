@@ -33,7 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 ACTIVATION_CHECKPOINT_MAX_DEVICE_MEMORY_BYTES = 48 * 1024**3
-CURRENT_CHECKPOINT_VERSION = 9
+CURRENT_CHECKPOINT_VERSION = 10
 
 
 def memory_constrained_activation_checkpointing(device: torch.device) -> bool:
@@ -97,6 +97,7 @@ from anigroom.grooming import (  # noqa: E402
     encode_asinh_logit_residual,
     expand_child_strands,
     fourth_moment_norm,
+    guide_support_gauge,
     length_residual_prior_coordinate,
     local_components_to_world,
     make_tangent_frames,
@@ -428,7 +429,7 @@ def require_current_checkpoint_version(checkpoint: dict[str, object]) -> None:
         raise RuntimeError(
             "checkpoint schema mismatch: "
             f"expected {CURRENT_CHECKPOINT_VERSION}, got {checkpoint_version}; "
-            "R067 reconstruction must start from zero"
+            "current strict-schema reconstruction must start from zero"
         )
 
 
@@ -1797,6 +1798,7 @@ class Stage1Config:
     guide_prior_width_weight: float = 0.0
     guide_prior_child_radius_weight: float = 0.0
     guide_prior_clump_weight: float = 0.0
+    guide_support_gauge_weight: float = 0.0
     render_length_prior_coordinate: str = "decoded"
     render_length_prior_reduction: str = "mean_l1"
     guide_smooth_weight: float = 0.0
@@ -1920,7 +1922,7 @@ def stage1_config_from_checkpoint_mapping(raw: dict) -> Stage1Config:
         raise TypeError(f"unsupported Stage1 checkpoint config fields: {unknown}")
     missing = sorted(known - set(data))
     if missing:
-        raise TypeError(f"incomplete R067 checkpoint config fields: {missing}")
+        raise TypeError(f"incomplete current checkpoint config fields: {missing}")
     return Stage1Config(**data)
 
 
@@ -7279,6 +7281,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         mode=config.smooth_graph_mode,
         k=config.guide_interpolation_k,
     )
+    guide_support_gauge_area_weights = None
+    if model.guide_enabled() and float(config.guide_support_gauge_weight) > 0.0:
+        guide_support_gauge_area_weights = model.guide_surface_smoothing_graph(
+            config.guide_interpolation_k
+        ).source_area_weights
     setup_progress("guide_graph_done", **guide_graph_report)
     if model.secondary_guides_enabled():
         setup_progress(
@@ -7766,6 +7773,26 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 smooth_field_metric=config.smooth_field_metric,
             )
             guide_prior_loss = guide_interpolation_regularization_losses(model, config)
+            guide_support_gauge_loss = zero_loss
+            guide_support_gauge_length_collapse = zero_loss
+            guide_support_gauge_slenderness_expansion = zero_loss
+            if (
+                model.guide_enabled()
+                and float(config.guide_support_gauge_weight) > 0.0
+            ):
+                guide_support_gauge_terms = guide_support_gauge(
+                    model.guide_length_raw,
+                    model.guide_root_width_raw,
+                    model.guide_clean_flow_length_confidence,
+                    source_area_weights=guide_support_gauge_area_weights,
+                )
+                guide_support_gauge_loss = guide_support_gauge_terms.total
+                guide_support_gauge_length_collapse = (
+                    guide_support_gauge_terms.length_collapse
+                )
+                guide_support_gauge_slenderness_expansion = (
+                    guide_support_gauge_terms.slenderness_expansion
+                )
             clean_pred_direction = groom_direction_3d(
                 geometry_effective_groom,
                 geometry_normals,
@@ -7804,6 +7831,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.guide_smooth_weight * guide_smooth_loss
                 + config.effective_smooth_weight * effective_smooth_loss
                 + config.guide_prior_weight * guide_prior_loss
+                + config.guide_support_gauge_weight * guide_support_gauge_loss
                 + config.clean_flow_guide_anchor_weight * guide_clean_flow_loss
                 + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
                 + config.root_move_reg_weight * root_move_loss
@@ -7821,6 +7849,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                 + config.guide_smooth_weight * guide_smooth_loss
                 + config.effective_smooth_weight * effective_smooth_loss
                 + config.guide_prior_weight * guide_prior_loss
+                + config.guide_support_gauge_weight * guide_support_gauge_loss
                 + config.clean_flow_guide_anchor_weight * guide_clean_flow_loss
                 + config.clean_flow_3d_smooth_weight * clean_flow_smooth_loss
                 + config.root_move_reg_weight * root_move_loss
@@ -7838,6 +7867,9 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                             "mask_loss": float(mask_loss.detach().cpu()),
                             "smooth_loss": float(smooth_loss.detach().cpu()),
                             "guide_prior_loss": float(guide_prior_loss.detach().cpu()),
+                            "guide_support_gauge_loss": float(
+                                guide_support_gauge_loss.detach().cpu()
+                            ),
                             "guide_clean_flow_loss": float(guide_clean_flow_loss.detach().cpu()),
                             "mesh_no_penetration_loss": float(
                                 mesh_no_penetration_loss.detach().cpu()
@@ -8064,6 +8096,10 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         mode=config.smooth_graph_mode,
                         k=config.guide_interpolation_k,
                     )
+                    if model.guide_enabled() and float(config.guide_support_gauge_weight) > 0.0:
+                        guide_support_gauge_area_weights = model.guide_surface_smoothing_graph(
+                            config.guide_interpolation_k
+                        ).source_area_weights
                     if not model.secondary_guides_enabled():
                         geometry_graph_edges = graph_edges
                         geometry_graph_report = dict(graph_report)
@@ -8189,6 +8225,15 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "guide_smooth_loss": float(guide_smooth_loss.detach().cpu()),
                     "effective_smooth_loss": float(effective_smooth_loss.detach().cpu()),
                     "guide_prior_loss": float(guide_prior_loss.detach().cpu()),
+                    "guide_support_gauge_total": float(
+                        guide_support_gauge_loss.detach().cpu()
+                    ),
+                    "guide_support_gauge_length_collapse": float(
+                        guide_support_gauge_length_collapse.detach().cpu()
+                    ),
+                    "guide_support_gauge_slenderness_expansion": float(
+                        guide_support_gauge_slenderness_expansion.detach().cpu()
+                    ),
                     "clean_flow_guide_anchor_loss": float(guide_clean_flow_loss.detach().cpu()),
                     "clean_flow_3d_smooth_loss": float(clean_flow_smooth_loss.detach().cpu()),
                     "clean_flow_guide_anchor_fraction": float((model.guide_clean_flow_anchor_confidence >= float(config.clean_flow_anchor_min_confidence)).float().mean().detach().cpu()) if model.guide_clean_flow_anchor_confidence.numel() else 0.0,
@@ -8580,6 +8625,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guide-prior-width-weight", type=float, default=0.0)
     parser.add_argument("--guide-prior-child-radius-weight", type=float, default=0.0)
     parser.add_argument("--guide-prior-clump-weight", type=float, default=0.0)
+    parser.add_argument("--guide-support-gauge-weight", type=float, default=0.0)
     parser.add_argument(
         "--render-length-prior-coordinate",
         choices=("decoded", "natural_log_ratio", "raw"),
@@ -8794,6 +8840,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         guide_prior_width_weight=args.guide_prior_width_weight,
         guide_prior_child_radius_weight=args.guide_prior_child_radius_weight,
         guide_prior_clump_weight=args.guide_prior_clump_weight,
+        guide_support_gauge_weight=args.guide_support_gauge_weight,
         render_length_prior_coordinate=args.render_length_prior_coordinate,
         render_length_prior_reduction=args.render_length_prior_reduction,
         guide_smooth_weight=args.guide_smooth_weight,

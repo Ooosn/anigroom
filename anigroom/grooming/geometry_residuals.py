@@ -25,6 +25,15 @@ class DecodedGeometryResiduals:
     direction_local: torch.Tensor
 
 
+@dataclass(frozen=True)
+class GuideSupportGaugeTerms:
+    """Population-stable primary-guide support-gauge terms."""
+
+    total: torch.Tensor
+    length_collapse: torch.Tensor
+    slenderness_expansion: torch.Tensor
+
+
 class RenderGeometryResidualField(nn.Module):
     """Late render-root geometry expressed as zero-centered residuals.
 
@@ -298,6 +307,50 @@ def fourth_moment_norm(
         dtype=value.dtype,
     )
     return (moment + tiny).pow(0.25) - tiny.pow(0.25)
+
+
+def guide_support_gauge(
+    guide_length_raw: torch.Tensor,
+    guide_root_width_raw: torch.Tensor,
+    guide_clean_flow_length_confidence: torch.Tensor,
+    source_area_weights: torch.Tensor | None = None,
+) -> GuideSupportGaugeTerms:
+    """Penalize only primary-guide support failures relative to clean flow.
+
+    The positive reference-relative coordinates are ``asinh(raw)``. Shortening
+    below the stored length reference and width growth beyond length growth are
+    measured separately with the population-stable fourth moment. Confidence
+    contributes a continuous floor of ``0.25`` and is optionally multiplied by
+    intrinsic source-area quadrature weights.
+    """
+
+    length_raw = guide_length_raw.reshape(-1)
+    width_raw = guide_root_width_raw.reshape(-1)
+    confidence = guide_clean_flow_length_confidence.reshape(-1)
+    if length_raw.shape != width_raw.shape:
+        raise ValueError("guide length and root-width coordinates must have equal size")
+    if confidence.shape != length_raw.shape:
+        raise ValueError("guide clean-flow confidence must match guide coordinates")
+    confidence = confidence.to(device=length_raw.device, dtype=length_raw.dtype)
+
+    trust = 0.25 + 0.75 * confidence.clamp(0.0, 1.0)
+    if source_area_weights is not None:
+        area = source_area_weights.reshape(-1)
+        if area.shape != length_raw.shape:
+            raise ValueError("guide source-area weights must match guide coordinates")
+        trust = trust * area.to(device=trust.device, dtype=trust.dtype)
+
+    log_length_ratio = torch.asinh(length_raw)
+    log_width_ratio = torch.asinh(width_raw)
+    length_collapse = F.relu(-log_length_ratio)
+    slenderness_expansion = F.relu(log_width_ratio - log_length_ratio)
+    length_term = fourth_moment_norm(length_collapse, trust)
+    slenderness_term = fourth_moment_norm(slenderness_expansion, trust)
+    return GuideSupportGaugeTerms(
+        total=length_term + slenderness_term,
+        length_collapse=length_term,
+        slenderness_expansion=slenderness_term,
+    )
 
 
 def population_stable_residual_norm(

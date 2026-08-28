@@ -13,6 +13,8 @@ from .geometry_residuals import (
     length_residual_prior_coordinate,
     local_components_to_world,
     population_stable_residual_norm,
+    GuideSupportGaugeTerms,
+    guide_support_gauge,
     tail_concentration_residual_loss,
     vector_to_local_components,
 )
@@ -72,6 +74,8 @@ __all__ = [
     "encode_positive_softplus",
     "encode_asinh_logit_residual",
     "fourth_moment_norm",
+    "GuideSupportGaugeTerms",
+    "guide_support_gauge",
     "make_tangent_frames",
     "local_components_to_world",
     "length_residual_prior_coordinate",

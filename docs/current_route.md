@@ -83,9 +83,9 @@ Both samples pass fixed original-resolution views `00/09/18/27`. A matched
 64-step graph-streamline audit reduces Panda/white severe selected transitions
 `113 -> 75` and `144 -> 113`; Panda view-27 crop transitions become `13 -> 0`
 and two-cycles `2 -> 0`, without reducing median path length or increasing
-P99 convergence. V7 is the accepted initialization target for the next
-cross-sample run; V6 remains the fixed-axis parent and V5 remains the completed
-trained rollback.
+P99 convergence. V7 is the accepted initialization target; V6 remains the
+fixed-axis parent and V5 remains the completed trained rollback. Its first
+Panda R068 cross-sample run is now complete and recorded below.
 
 The white-tiger V6 baseline is tracked under
 `baseline_inputs/v6_surface_direction/` with SHA-256
@@ -337,6 +337,34 @@ about five times stronger than the Tiger control and creates visible shoulder
 and leg waves while adding `+1.36 dB`. The checkpoint is accepted as
 cross-sample evidence, not as a generalized structure baseline. See
 `docs/panda_r068_v5_cross_sample.md`.
+
+The matched Panda R068+V7 run then changes only the accepted clean-flow target
+and trains strictly from zero through 30k at source commit
+`58bba7b7ea66745cf79346aa8e7046b08b9ea3a5`. Final train/test composite is
+`29.815145/28.763426`; roots/preclip Gaussians are `669143/7891276`; peak
+allocated CUDA memory is `22407.746 MB`; and the final checkpoint SHA-256 is
+`fb8c52ab50c7a879e6f18d2d1b2fd12475b276be89b194913c0507a843dc0ec2`.
+The test metric is effectively unchanged from V5 (`-0.0096 dB`), so this run
+validates the corrected directed initialization rather than claiming a PSNR
+gain.
+
+Checkpoint-native audits at 9k/20k/30k find no large transparent interior hole
+in fixed views 09/27 at 20k or 30k. At 30k, alpha below `0.5` after an 8-pixel
+mesh-interior erosion is `0%` in view 09 and `0.00365%` in view 27, and is zero
+in both after a 16-pixel erosion. However, concentrated low-length and
+low-opacity root bands grow after the 20k geometry unlock; the largest final
+low-length component covers `5.42%/6.89%` of visible roots in attribute views
+09/32. Original-resolution user review rejects this as a visually valid groom:
+the upper-back basin is a real noisy bald patch, not merely healthy short fur.
+Primary-guide attribution finds `74 / 4500` guides below one quarter of their
+stored length reference while those same guides average `9.37x` reference
+width; guide log length and width ratios correlate at `-0.737`. Secondary
+length/width residuals are too small to cause the defect. The run remains an
+accepted completed execution and V7-direction artifact, but it fails visual
+coverage acceptance. R069 guide-support-gauge work is a separate pending
+training-method candidate; it does not reopen V7 flow. See
+`docs/panda_r068_v7_training_20260828.md` and
+`docs/r069_guide_support_gauge.md`.
 
 ## Active Entry Points
 
