@@ -33,7 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 ACTIVATION_CHECKPOINT_MAX_DEVICE_MEMORY_BYTES = 48 * 1024**3
-CURRENT_CHECKPOINT_VERSION = 10
+CURRENT_CHECKPOINT_VERSION = 11
 
 
 def memory_constrained_activation_checkpointing(device: torch.device) -> bool:
@@ -77,6 +77,7 @@ from anigroom.flow.direction_geometry import (  # noqa: E402
 )
 from anigroom.grooming import (  # noqa: E402
     GaussianRGBResidualField,
+    GuideViewSHField,
     GroomParameterField,
     GroomRanges,
     RenderGeometryResidualField,
@@ -98,6 +99,7 @@ from anigroom.grooming import (  # noqa: E402
     expand_child_strands,
     fourth_moment_norm,
     guide_support_gauge,
+    load_trusted_guide_view_confidence,
     length_residual_prior_coordinate,
     local_components_to_world,
     make_tangent_frames,
@@ -1799,6 +1801,9 @@ class Stage1Config:
     guide_prior_child_radius_weight: float = 0.0
     guide_prior_clump_weight: float = 0.0
     guide_support_gauge_weight: float = 0.0
+    guide_view_sh_support: bool = False
+    guide_view_sh_scale: float = 0.20
+    lr_guide_view_sh: float = 2.0e-2
     render_length_prior_coordinate: str = "decoded"
     render_length_prior_reduction: str = "mean_l1"
     guide_smooth_weight: float = 0.0
@@ -1945,6 +1950,8 @@ class WhiteTigerStage1Model(torch.nn.Module):
         gaussian_rgb_residual_support: bool = False,
         gaussian_rgb_residual_control_points: int = 36,
         gaussian_rgb_residual_scale: float = 0.20,
+        guide_view_sh_support: bool = False,
+        guide_view_sh_scale: float = 0.20,
         guide_face_ids: np.ndarray | None = None,
         guide_barycentric: np.ndarray | None = None,
         guide_region_ids: np.ndarray | None = None,
@@ -2061,6 +2068,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             if bool(gaussian_rgb_residual_support)
             else None
         )
+        self.guide_view_sh: GuideViewSHField | None = None
         if guide_face_ids is not None and guide_barycentric is not None:
             self.register_buffer("guide_face_ids", torch.from_numpy(guide_face_ids).to(device=device, dtype=torch.long))
             self.register_buffer("guide_barycentric", torch.from_numpy(guide_barycentric).to(device=device))
@@ -2125,6 +2133,12 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.guide_direction_local_raw = torch.nn.Parameter(
                 torch.zeros((guide_count, 3), device=device)
             )
+            if bool(guide_view_sh_support):
+                self.guide_view_sh = GuideViewSHField(
+                    guide_count,
+                    float(guide_view_sh_scale),
+                    device=device,
+                )
         else:
             self.register_buffer("guide_face_ids", torch.empty((0,), device=device, dtype=torch.long))
             self.register_buffer("guide_barycentric", torch.empty((0, 3), device=device))
@@ -2149,6 +2163,18 @@ class WhiteTigerStage1Model(torch.nn.Module):
             self.register_parameter("guide_child_radius_raw", None)
             self.register_parameter("guide_clump_strength_raw", None)
             self.register_parameter("guide_direction_local_raw", None)
+        if bool(guide_view_sh_support) and self.guide_view_sh is None:
+            raise ValueError("guide-view SH requires primary guide roots")
+        self.register_buffer(
+            "guide_view_sh_view_indices_cache",
+            torch.empty((0,), device=device, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "guide_view_sh_confidence_cache",
+            torch.empty((0, 0), device=device),
+            persistent=False,
+        )
         if self.render_geometry_parameterization != "absolute_endpoint" and not self.guide_enabled():
             raise ValueError("zero-centered geometry requires primary guide roots")
         self.register_buffer(
@@ -3081,6 +3107,137 @@ class WhiteTigerStage1Model(torch.nn.Module):
             root_bitangents,
             support=self.guide_interpolation_support(),
         )
+
+    @torch.no_grad()
+    def set_guide_view_sh_confidence(
+        self,
+        view_indices: torch.Tensor,
+        confidence: torch.Tensor,
+    ) -> None:
+        if self.guide_view_sh is None:
+            raise RuntimeError("guide-view SH confidence supplied while support is disabled")
+        view_indices = view_indices.to(
+            device=self.vertices.device,
+            dtype=torch.long,
+        ).reshape(-1)
+        confidence = confidence.to(
+            device=self.vertices.device,
+            dtype=self.vertices.dtype,
+        )
+        expected = (int(view_indices.shape[0]), int(self.guide_points_local.shape[0]))
+        if tuple(confidence.shape) != expected:
+            raise ValueError(
+                "guide-view SH confidence must have shape [V, G]: "
+                f"{tuple(confidence.shape)} != {expected}"
+            )
+        if torch.unique(view_indices).numel() != view_indices.numel():
+            raise ValueError("guide-view SH view indices must be unique")
+        if not bool(torch.isfinite(confidence).all()):
+            raise ValueError("guide-view SH confidence must be finite")
+        self.guide_view_sh_view_indices_cache = view_indices.detach()
+        self.guide_view_sh_confidence_cache = confidence.detach().clamp(0.0, 1.0)
+
+    def guide_view_sh_confidence_for_view(self, view_index: int) -> torch.Tensor:
+        if self.guide_view_sh is None:
+            raise RuntimeError("guide-view SH support is disabled")
+        if self.guide_view_sh_confidence_cache.numel() == 0:
+            raise RuntimeError("guide-view SH confidence has not been initialized")
+        matches = torch.nonzero(
+            self.guide_view_sh_view_indices_cache == int(view_index),
+            as_tuple=False,
+        ).reshape(-1)
+        if matches.numel() == 0:
+            return self.guide_view_sh_confidence_cache.new_zeros(
+                (int(self.guide_points_local.shape[0]),)
+            )
+        if matches.numel() != 1:
+            raise RuntimeError(f"duplicate guide-view SH view index: {int(view_index)}")
+        return self.guide_view_sh_confidence_cache[int(matches[0])]
+
+    def guide_view_sh_residual_at_render_roots(
+        self,
+        roots_local: torch.Tensor,
+        viewmat: torch.Tensor,
+        *,
+        view_index: int | None,
+    ) -> torch.Tensor:
+        """Evaluate guide SH in a detached hair-local frame and interpolate it."""
+
+        if self.guide_view_sh is None:
+            return roots_local.new_zeros((int(roots_local.shape[0]), 3))
+        if int(roots_local.shape[0]) != int(self.face_ids.shape[0]):
+            raise RuntimeError("guide-view SH render-root count mismatch")
+
+        with torch.no_grad():
+            detached_viewmat = viewmat.detach().to(
+                device=self.vertices.device,
+                dtype=self.vertices.dtype,
+            )
+            rotation = detached_viewmat[:3, :3]
+            translation = detached_viewmat[:3, 3]
+            camera_center = -(rotation.transpose(0, 1) @ translation)
+            guide_points_world = (
+                self.guide_points_local.detach()
+                * torch.exp(self.log_scale.detach()).reshape(1, 1)
+                + self.translation.detach().reshape(1, 3)
+            )
+            view_direction = F.normalize(
+                camera_center.reshape(1, 3) - guide_points_world,
+                dim=-1,
+                eps=EPS,
+            )
+            guide_normals, guide_tangents, guide_bitangents = (
+                self.guide_normals_and_tangent_frames()
+            )
+            guide_normals = guide_normals.detach()
+            guide_tangents = guide_tangents.detach()
+            guide_bitangents = guide_bitangents.detach()
+            hair_axis = self.guide_direction_world()
+            if hair_axis is None:
+                raise RuntimeError("guide-view SH requires guide directions")
+            hair_axis = hair_axis.detach()
+            side_raw = torch.cross(guide_normals, hair_axis, dim=-1)
+            fallback_side = torch.cross(guide_tangents, hair_axis, dim=-1)
+            use_fallback = torch.linalg.vector_norm(side_raw, dim=-1, keepdim=True) <= EPS
+            side_raw = torch.where(use_fallback, fallback_side, side_raw)
+            second_fallback = torch.cross(guide_bitangents, hair_axis, dim=-1)
+            use_second = torch.linalg.vector_norm(side_raw, dim=-1, keepdim=True) <= EPS
+            side_raw = torch.where(use_second, second_fallback, side_raw)
+            if bool((torch.linalg.vector_norm(side_raw, dim=-1) <= EPS).any()):
+                raise RuntimeError("guide-view SH could not construct a hair-local frame")
+            side_axis = F.normalize(side_raw, dim=-1, eps=EPS)
+            up_axis = F.normalize(
+                torch.cross(hair_axis, side_axis, dim=-1),
+                dim=-1,
+                eps=EPS,
+            )
+            local_view_direction = torch.stack(
+                (
+                    (view_direction * hair_axis).sum(dim=-1),
+                    (view_direction * side_axis).sum(dim=-1),
+                    (view_direction * up_axis).sum(dim=-1),
+                ),
+                dim=-1,
+            )
+
+        gradient_confidence = None
+        if torch.is_grad_enabled():
+            if view_index is None:
+                raise RuntimeError(
+                    "gradient-enabled guide-view SH rendering requires view_index"
+                )
+            gradient_confidence = self.guide_view_sh_confidence_for_view(view_index)
+        guide_residual = self.guide_view_sh.residual(
+            local_view_direction,
+            gradient_confidence=gradient_confidence,
+        )
+        support = self.guide_interpolation_support()
+        weights = self.guide_surface_interpolator().weights(
+            roots_local.detach(),
+            self.face_ids,
+            support,
+        )
+        return interpolate_physical(guide_residual, support.indices, weights)
 
     def geometry_residual_at_render_roots(
         self,
@@ -4479,6 +4636,29 @@ def initialize_groom_from_clean_flow(
     }
 
 
+@torch.no_grad()
+def initialize_guide_view_sh_confidence(
+    model: WhiteTigerStage1Model,
+    clean_flow_target_path: Path,
+) -> dict[str, float | int | str | list[int]]:
+    if model.guide_view_sh is None:
+        return {"guide_view_sh_support": 0}
+    trusted = load_trusted_guide_view_confidence(
+        clean_flow_target_path,
+        expected_face_ids=model.guide_face_ids,
+        expected_barycentric=model.guide_barycentric,
+        device=model.vertices.device,
+    )
+    model.set_guide_view_sh_confidence(
+        trusted.view_indices,
+        trusted.confidence,
+    )
+    return {
+        "guide_view_sh_support": 1,
+        **trusted.report(),
+    }
+
+
 def sample_backing_color(config: Stage1Config, device: torch.device, *, train: bool) -> torch.Tensor:
     if train and config.random_backing_color:
         lo = float(config.backing_color_min)
@@ -4874,6 +5054,7 @@ def render_view(
     mesh_no_penetration_root_indices: torch.Tensor | None = None,
     strand_crossing_active_set: TorchStrandCrossingActiveSet | None = None,
     capture_strand_crossing_snapshot: bool = False,
+    view_index: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, object, torch.Tensor, dict[str, float | int], dict]:
     render_args = (
         config.samples,
@@ -4918,6 +5099,17 @@ def render_view(
             mesh_no_penetration_field=mesh_no_penetration_field,
             mesh_no_penetration_root_indices=mesh_no_penetration_root_indices,
             strand_crossing_active_set=strand_crossing_active_set,
+        )
+    if model.guide_view_sh is not None:
+        root_sh_residual = model.guide_view_sh_residual_at_render_roots(
+            roots_local,
+            viewmat,
+            view_index=view_index,
+        )
+        gaussian_sh_residual = root_sh_residual[gaussians.root_indices]
+        gaussians = replace(
+            gaussians,
+            colors=(gaussians.colors + gaussian_sh_residual).clamp(0.0, 1.0),
         )
     preclip_gaussians = gaussians
     if config.mesh_depth_clipping:
@@ -5058,6 +5250,7 @@ def evaluate(
                 background=mesh_color,
                 mesh_depth=mesh_depth,
                 backing_image=backing_image,
+                view_index=idx,
             )
         except RuntimeError as exc:
             raise RuntimeError(
@@ -5194,6 +5387,10 @@ def make_stage1_optimizer(model: WhiteTigerStage1Model, config: Stage1Config) ->
         {"params": high_frequency_params, "lr": high_frequency_lr},
         {"params": color_params, "lr": config.lr_color},
     ]
+    if model.guide_view_sh is not None:
+        optimizer_groups.append(
+            {"params": [model.guide_view_sh.raw], "lr": config.lr_guide_view_sh}
+        )
     if float(config.lr_calibration) > 0.0:
         optimizer_groups.insert(
             1,
@@ -5297,6 +5494,8 @@ def stage1_optimizer_param_names(model: WhiteTigerStage1Model, config: Stage1Con
         high_frequency_names,
         color_names,
     ]
+    if model.guide_view_sh is not None:
+        names.append(["guide_view_sh.raw"])
     if float(config.lr_calibration) > 0.0:
         names.insert(1, ["log_scale", "translation"])
     return names
@@ -5610,6 +5809,8 @@ def zero_color_gradients(model: WhiteTigerStage1Model) -> None:
         params.append(model.child_color_delta_raw)
     if model.gaussian_rgb_residual is not None:
         params.append(model.gaussian_rgb_residual.raw)
+    if model.guide_view_sh is not None:
+        params.append(model.guide_view_sh.raw)
     for param in params:
         if param.grad is not None:
             param.grad.zero_()
@@ -5705,6 +5906,8 @@ def stage1_color_parameters(
         parameters.append(model.child_color_delta_raw)
     if model.gaussian_rgb_residual is not None:
         parameters.append(model.gaussian_rgb_residual.raw)
+    if model.guide_view_sh is not None:
+        parameters.append(model.guide_view_sh.raw)
     return unique_trainable_parameters(parameters)
 
 
@@ -6341,6 +6544,8 @@ def build_stage1_model_from_checkpoint(
         gaussian_rgb_residual_support=config.gaussian_rgb_residual_support,
         gaussian_rgb_residual_control_points=config.gaussian_rgb_residual_control_points,
         gaussian_rgb_residual_scale=config.gaussian_rgb_residual_scale,
+        guide_view_sh_support=config.guide_view_sh_support,
+        guide_view_sh_scale=config.guide_view_sh_scale,
         guide_face_ids=guide_face_ids,
         guide_barycentric=guide_barycentric,
         guide_region_ids=guide_region_ids,
@@ -6718,6 +6923,21 @@ def validate_strand_crossing_config(config: Stage1Config) -> None:
         )
 
 
+def validate_guide_view_sh_config(config: Stage1Config) -> None:
+    if not config.guide_view_sh_support:
+        return
+    if int(config.guide_root_count) <= 0 or not bool(config.guide_roots_from_clean_flow):
+        raise ValueError("guide-view SH requires clean-flow-owned primary guides")
+    if not config.clean_flow_target.strip():
+        raise ValueError("guide-view SH requires --clean-flow-target")
+    if float(config.guide_view_sh_scale) <= 0.0:
+        raise ValueError("guide-view SH scale must be positive")
+    if float(config.lr_guide_view_sh) <= 0.0:
+        raise ValueError("guide-view SH learning rate must be positive")
+    if int(config.guide_densify_interval) > 0:
+        raise ValueError("guide-view SH does not yet support guide-root lifecycle changes")
+
+
 def restore_strand_crossing_state(
     config: Stage1Config,
     checkpoint: dict[str, object] | None,
@@ -6849,6 +7069,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("White Tiger Stage 1 requires CUDA")
     validate_strand_crossing_config(config)
+    validate_guide_view_sh_config(config)
     if float(config.geometry_residual_smooth_scale) < 0.0:
         raise ValueError("geometry residual smooth scale must be non-negative")
     shape_detail_enabled = (
@@ -7121,6 +7342,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         gaussian_rgb_residual_support=config.gaussian_rgb_residual_support,
         gaussian_rgb_residual_control_points=config.gaussian_rgb_residual_control_points,
         gaussian_rgb_residual_scale=config.gaussian_rgb_residual_scale,
+        guide_view_sh_support=config.guide_view_sh_support,
+        guide_view_sh_scale=config.guide_view_sh_scale,
         guide_face_ids=guide_surface_roots.face_ids if guide_surface_roots is not None else None,
         guide_barycentric=guide_surface_roots.barycentric if guide_surface_roots is not None else None,
         guide_region_ids=guide_region_ids,
@@ -7267,6 +7490,20 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         require_current_checkpoint_version(checkpoint)
         model.load_state_dict(checkpoint["model"], strict=True)
         start_iteration = int(checkpoint.get("iteration", 0))
+
+    if bool(config.guide_view_sh_support):
+        if clean_flow_target_path is None:
+            raise RuntimeError("guide-view SH requires --clean-flow-target")
+        guide_view_sh_confidence_report = initialize_guide_view_sh_confidence(
+            model,
+            clean_flow_target_path,
+        )
+    else:
+        guide_view_sh_confidence_report = {"guide_view_sh_support": 0}
+    (output_dir / "guide_view_sh_confidence_report.json").write_text(
+        json.dumps(guide_view_sh_confidence_report, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     setup_progress("root_graph_start", root_count=int(model.face_ids.shape[0]))
     graph_edges, graph_report = rebuild_graph_edges(
@@ -7576,6 +7813,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     ),
                     strand_crossing_active_set=strand_crossing_active_set_torch,
                     capture_strand_crossing_snapshot=should_refresh_strand_crossing,
+                    view_index=idx,
                 )
                 if trace_iteration:
                     progress_event(
@@ -8316,6 +8554,11 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         if model.gaussian_rgb_residual is not None
                         else None
                     ),
+                    "guide_view_sh": (
+                        model.guide_view_sh.stats()
+                        if model.guide_view_sh is not None
+                        else None
+                    ),
                     "rgb_flow": rgb_flow_stats,
                     "loss_mask": {
                         "edge_kernel": int(config.loss_mask_edge_kernel),
@@ -8423,6 +8666,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     background=diag_mesh_color,
                     mesh_depth=diag_mesh_depth,
                     backing_image=diag_backing,
+                    view_index=diag_idx,
                 )
                 diag_target_eval = composite_target(diag_target, diag_mask, diag_backing)
                 save_image(eval_dir / f"view_{diag_idx:02d}_eval_gt.png", diag_target)
@@ -8626,6 +8870,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guide-prior-child-radius-weight", type=float, default=0.0)
     parser.add_argument("--guide-prior-clump-weight", type=float, default=0.0)
     parser.add_argument("--guide-support-gauge-weight", type=float, default=0.0)
+    parser.add_argument("--guide-view-sh-support", action="store_true")
+    parser.add_argument("--guide-view-sh-scale", type=float, default=0.20)
+    parser.add_argument("--lr-guide-view-sh", type=float, default=2.0e-2)
     parser.add_argument(
         "--render-length-prior-coordinate",
         choices=("decoded", "natural_log_ratio", "raw"),
@@ -8841,6 +9088,9 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         guide_prior_child_radius_weight=args.guide_prior_child_radius_weight,
         guide_prior_clump_weight=args.guide_prior_clump_weight,
         guide_support_gauge_weight=args.guide_support_gauge_weight,
+        guide_view_sh_support=args.guide_view_sh_support,
+        guide_view_sh_scale=args.guide_view_sh_scale,
+        lr_guide_view_sh=args.lr_guide_view_sh,
         render_length_prior_coordinate=args.render_length_prior_coordinate,
         render_length_prior_reduction=args.render_length_prior_reduction,
         guide_smooth_weight=args.guide_smooth_weight,

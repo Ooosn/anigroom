@@ -180,6 +180,7 @@ def run_diagnostics(args: argparse.Namespace) -> None:
         background=mesh_color,
         mesh_depth=mesh_depth,
         backing_image=backing_image,
+        view_index=view_index,
     )
     target_eval = stage1.composite_target(target, mask, backing_image)
     metric = stage1.MetricComputer(compute_lpips=False).to(device)

@@ -217,6 +217,15 @@ RGB_FLOW_EXCLUDE_COLOR_GRADIENTS="${RGB_FLOW_EXCLUDE_COLOR_GRADIENTS:-0}"
 MESH_NO_PENETRATION_SUPPORT="${MESH_NO_PENETRATION_SUPPORT:-0}"
 STRAND_CROSSING_SUPPORT="${STRAND_CROSSING_SUPPORT:-0}"
 GUIDE_SUPPORT_GAUGE_WEIGHT="${GUIDE_SUPPORT_GAUGE_WEIGHT:-0}"
+GUIDE_VIEW_SH_SUPPORT="${GUIDE_VIEW_SH_SUPPORT:-0}"
+if [[ "$GUIDE_VIEW_SH_SUPPORT" == "1" ]]; then
+  for name in GUIDE_VIEW_SH_SCALE LR_GUIDE_VIEW_SH; do
+    require_var "$name"
+  done
+else
+  GUIDE_VIEW_SH_SCALE=0.20
+  LR_GUIDE_VIEW_SH=0.020
+fi
 if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
   for name in \
     GAUSSIAN_RGB_RESIDUAL_CONTROL_POINTS \
@@ -357,6 +366,8 @@ cmd=(
   --guide-prior-child-radius-weight "$GUIDE_PRIOR_CHILD_RADIUS_WEIGHT"
   --guide-prior-clump-weight "$GUIDE_PRIOR_CLUMP_WEIGHT"
   --guide-support-gauge-weight "$GUIDE_SUPPORT_GAUGE_WEIGHT"
+  --guide-view-sh-scale "$GUIDE_VIEW_SH_SCALE"
+  --lr-guide-view-sh "$LR_GUIDE_VIEW_SH"
   --render-length-prior-coordinate "$RENDER_LENGTH_PRIOR_COORDINATE"
   --render-length-prior-reduction "$RENDER_LENGTH_PRIOR_REDUCTION"
   --guide-smooth-weight "$GUIDE_SMOOTH_WEIGHT"
@@ -493,6 +504,9 @@ if [[ "$LOCAL_CHILD_COLOR_SUPPORT" == "1" ]]; then
 fi
 if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
   cmd+=(--gaussian-rgb-residual-support)
+fi
+if [[ "$GUIDE_VIEW_SH_SUPPORT" == "1" ]]; then
+  cmd+=(--guide-view-sh-support)
 fi
 if [[ "$RGB_FLOW_EXCLUDE_COLOR_GRADIENTS" == "1" ]]; then
   cmd+=(--rgb-flow-exclude-color-gradients)

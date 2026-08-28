@@ -87,6 +87,14 @@ def main() -> None:
         and float(model.shape_curl_scale) > 0.0
     )
     local_render_color_enabled = model.child_color_delta_raw is not None
+    guide_view_sh_enabled = model.guide_view_sh is not None
+    guide_view_sh_stats = (
+        model.guide_view_sh.stats() if guide_view_sh_enabled else None
+    )
+    guide_view_sh_active = bool(
+        guide_view_sh_stats is not None
+        and float(guide_view_sh_stats["active_fraction"]) > 0.0
+    )
     local_render_color_stats = None
     if local_render_color_enabled:
         local_render_color = (
@@ -118,6 +126,7 @@ def main() -> None:
                 background=mesh_color,
                 mesh_depth=mesh_depth,
                 backing_image=backing,
+                view_index=idx,
             )
             target_eval = composite_target(target, mask, backing)
             raw_diff = torch.abs(pred - target) * 4.0
@@ -139,6 +148,62 @@ def main() -> None:
                 "composite_psnr": float((-10.0 * torch.log10(comp_mse)).detach().cpu()),
                 "stats": stats,
             }
+            without_guide_view_sh = None
+            if guide_view_sh_active:
+                saved_guide_view_sh = model.guide_view_sh.raw.detach().clone()
+                model.guide_view_sh.raw.zero_()
+                try:
+                    without_guide_view_sh, _, _, _, without_guide_view_sh_stats, _ = render_view(
+                        model,
+                        viewmats[idx],
+                        ks[idx],
+                        width,
+                        height,
+                        config,
+                        background=mesh_color,
+                        mesh_depth=mesh_depth,
+                        backing_image=backing,
+                        view_index=idx,
+                    )
+                finally:
+                    model.guide_view_sh.raw.copy_(saved_guide_view_sh)
+                without_sh_mse = torch.mean(
+                    (without_guide_view_sh - target_eval).square()
+                ).clamp_min(1.0e-12)
+                without_sh_psnr = -10.0 * torch.log10(without_sh_mse)
+                guide_sh_delta = pred - without_guide_view_sh
+                save_image(
+                    output_dir / f"view_{idx:02d}_pred_without_guide_view_sh.png",
+                    without_guide_view_sh,
+                )
+                save_image(
+                    output_dir / f"view_{idx:02d}_guide_view_sh_abs_x4.png",
+                    (guide_sh_delta.abs() * 4.0).clamp(0.0, 1.0),
+                )
+                record.update(
+                    {
+                        "pred_without_guide_view_sh": f"view_{idx:02d}_pred_without_guide_view_sh.png",
+                        "guide_view_sh_abs_x4": f"view_{idx:02d}_guide_view_sh_abs_x4.png",
+                        "composite_psnr_without_guide_view_sh": float(
+                            without_sh_psnr.detach().cpu()
+                        ),
+                        "composite_psnr_gain_from_guide_view_sh": float(
+                            ((-10.0 * torch.log10(comp_mse)) - without_sh_psnr)
+                            .detach()
+                            .cpu()
+                        ),
+                        "guide_view_sh_image_abs_mean": float(
+                            guide_sh_delta.abs().mean().detach().cpu()
+                        ),
+                        "without_guide_view_sh_stats": without_guide_view_sh_stats,
+                    }
+                )
+                del (
+                    saved_guide_view_sh,
+                    without_sh_mse,
+                    without_sh_psnr,
+                    guide_sh_delta,
+                )
             base_pred = None
             residual_abs = None
             residual_signed = None
@@ -341,6 +406,8 @@ def main() -> None:
             del target, mask, mesh_depth, backing, pred, alpha, target_eval, raw_diff, composite_diff
             if base_pred is not None:
                 del base_pred, residual_abs, residual_signed
+            if without_guide_view_sh is not None:
+                del without_guide_view_sh
             if without_local_render_color is not None:
                 del without_local_render_color, root_tip_only
             if without_shape_detail is not None:
@@ -362,6 +429,7 @@ def main() -> None:
             if residual_enabled
             else None
         ),
+        "guide_view_sh": guide_view_sh_stats,
         "local_render_color": local_render_color_stats,
         "records": records,
     }
