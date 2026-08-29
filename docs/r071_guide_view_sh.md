@@ -1,9 +1,28 @@
 # R071 Primary-Guide View-Dependent SH Gate
 
-Status date: 2026-08-28.
+Status date: 2026-08-28. Result recorded 2026-08-30.
 
-Status: implementation and local validation in progress. No H100 result is
-accepted by this document.
+Status: rejected. The 0-9k H100 run completed normally and is a valid
+execution, but it fails the acceptance gate below.
+
+## Result
+
+| quantity | R071 | R068+V7 parent |
+|---|---:|---:|
+| composite PSNR gain at 3k/6k/9k | `+0.145/+0.210/+0.288 dB` | baseline |
+| render roots at 9k | `668,060` | `669,143` |
+| SH saturation at 3k -> 9k | `50.2% -> 71.7%` | n/a |
+
+The 9k crop still shows granular, short, discontinuous coverage. The field
+became a new appearance shortcut: it absorbed view-dependent error without
+changing the root distribution that produces the visible defect. Gate item 3
+(materially closer to the clean single-view control) and item 5 (coefficients
+remain nonsaturated) both fail. No 30k run was authorized.
+
+The conclusion is that appearance is not the lever. A view-dependent field may
+return later as an auxiliary term, but only behind ownership of the root
+distribution, not as a substitute for it. See
+`docs/r072_view_gated_ownership.md`.
 
 ## Question
 

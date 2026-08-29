@@ -1,9 +1,8 @@
 # R069: Guide Support Gauge
 
-Status: causal evidence, schema-10 implementation, local regression, and
-checkpoint counterfactual rendering complete; matched short training gates are
-pending. R068 remains the accepted single-sample execution baseline. R069 is
-not yet an accepted method.
+Status: rejected at the matched Panda 12k gate. R068 remains the accepted
+single-sample execution baseline. R070 retains the R069 forward scalar but
+corrects its gradient ownership.
 
 ## Failure
 
@@ -162,3 +161,55 @@ white tiger must use the same from-zero source, weight, and audit protocol.
 The duration-only gate config is
 `configs/r069_guide_support_gauge_0_12k_gate.env`; its shell snapshot differs
 from the 30k candidate only by `ITERATIONS=30000 -> 12000`.
+
+## Panda 12k Result And Rejection
+
+The strict from-zero H100 gate completes successfully from source commit
+`d0d10cb8f4ed5cbd1210f0ffaadb7e0870ac38fb` after `347` tests. The schema-10
+checkpoint is `493609354` bytes with SHA-256
+`bf0cdb42973642d5fcccdae8d400eca3a3240fbc69a852d1148d57ba09bc11c1`.
+
+R069 fixes the measured lower-support failure at matched 12k:
+
+| metric | R068+V7 | R069 | change |
+| --- | ---: | ---: | ---: |
+| effective length min | `0.002698` | `0.007462` | collapse removed |
+| effective length P05 | `0.008619` | `0.011999` | `+39.2%` |
+| root width mean | `0.000367` | `0.000300` | `-18.1%` |
+| root width P95 | `0.000718` | `0.000423` | `-41.1%` |
+| root opacity P05 | `0.571320` | `0.573589` | matched |
+| tip opacity P05 | `0.172952` | `0.172944` | matched |
+| test composite PSNR | `27.233932` | `27.105999` | `-0.127933 dB` |
+
+Matched original-resolution view-09/view-27 composite PSNR changes
+`28.282824/27.527412 -> 28.107889/27.360321`. The candidate images show finer,
+less collapsed support without a new broad alpha hole at this stage.
+
+However, R069 opens a new upper-length escape. Effective length
+mean/P99/max changes
+`0.020307/0.050884/0.116587 -> 0.022149/0.051196/0.162458`.
+Among the exact top 128 effective roots, R069 has `78` above `0.12` and `11`
+above `0.15`; R068 has `0 / 0`. The outliers form visible surface clusters on
+the rump/shoulder views. White-tiger validation is therefore not authorized.
+
+The cause is exact: the slenderness forward term
+`relu(log_width_ratio - log_length_ratio)` gives a corrective gradient to both
+coordinates. The optimizer can reduce the loss either by narrowing hair or by
+lengthening it, and the 12k run uses both routes. The slenderness term is the
+dominant gauge component (`0.413904` versus `0.004859` for length collapse).
+
+R069 is rejected rather than repaired by an upper length cap. R070 keeps the
+same scalar value and changes only gradient ownership: the length coordinate is
+detached inside the slenderness comparison, so slenderness can narrow width but
+cannot lengthen hair. The one-sided collapse term remains the sole new length
+gradient.
+
+Subsequent user review corrected the experiment target itself. An exact
+template match localizes the reported crop to view-09 pixels
+`[507,160]-[1309,567]`. In that crop the rendered alpha is broadly continuous,
+but both composite RGB and raw-fur RGB contain gray/black granular noise. A
+dark-luma root overlay shows dense black render-root colors scattered through
+nominally white upper-back fur. Thus R069 improved a correlated length/width
+symptom but did not address the reported visual defect. R070 was cancelled
+before commit/training; the next causal isolation concerns root/tip color-field
+ownership with geometry held fixed.
