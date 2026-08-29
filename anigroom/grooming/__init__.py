@@ -26,6 +26,10 @@ from .guide_view_sh import (
     first_order_sh_basis,
     load_trusted_guide_view_confidence,
 )
+from .view_gated_ownership import (
+    ViewGatedOwnership,
+    straight_through_gate,
+)
 
 from .strand_gaussians import (
     BRUSH_STIFFNESS_RANGE,
@@ -88,6 +92,8 @@ __all__ = [
     "guide_support_gauge",
     "first_order_sh_basis",
     "load_trusted_guide_view_confidence",
+    "straight_through_gate",
+    "ViewGatedOwnership",
     "make_tangent_frames",
     "local_components_to_world",
     "length_residual_prior_coordinate",

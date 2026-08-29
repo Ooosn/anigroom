@@ -81,6 +81,7 @@ from anigroom.grooming import (  # noqa: E402
     GroomParameterField,
     GroomRanges,
     RenderGeometryResidualField,
+    ViewGatedOwnership,
     apply_asinh_logit_residual,
     apply_asinh_log_ratio_residual,
     apply_direction_residual,
@@ -105,6 +106,7 @@ from anigroom.grooming import (  # noqa: E402
     make_tangent_frames,
     population_stable_residual_norm,
     resample_strands_to_segment_budgets,
+    straight_through_gate,
     strand_segment_budgets,
     strands_to_gaussians,
     tail_concentration_residual_loss,
@@ -1804,6 +1806,8 @@ class Stage1Config:
     guide_view_sh_support: bool = False
     guide_view_sh_scale: float = 0.20
     lr_guide_view_sh: float = 2.0e-2
+    view_gated_ownership_support: bool = False
+    view_gate_floor: float = 0.0
     render_length_prior_coordinate: str = "decoded"
     render_length_prior_reduction: str = "mean_l1"
     guide_smooth_weight: float = 0.0
@@ -2172,6 +2176,19 @@ class WhiteTigerStage1Model(torch.nn.Module):
         )
         self.register_buffer(
             "guide_view_sh_confidence_cache",
+            torch.empty((0, 0), device=device),
+            persistent=False,
+        )
+        # R072 per-view ownership. The floor is baked into the cached matrix so
+        # the training-loop lookup stays a single index operation.
+        self.view_gate_floor = 1.0
+        self.register_buffer(
+            "view_gate_view_indices_cache",
+            torch.empty((0,), device=device, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "view_gate_cache",
             torch.empty((0, 0), device=device),
             persistent=False,
         )
@@ -3109,6 +3126,77 @@ class WhiteTigerStage1Model(torch.nn.Module):
         )
 
     @torch.no_grad()
+    def set_view_gate(
+        self,
+        view_indices: torch.Tensor,
+        gate: torch.Tensor,
+        floor: float,
+    ) -> None:
+        """Install the R072 per-view ownership gate with its floor baked in."""
+
+        view_indices = view_indices.to(
+            device=self.vertices.device,
+            dtype=torch.long,
+        ).reshape(-1)
+        gate = gate.to(device=self.vertices.device, dtype=self.vertices.dtype)
+        expected = (int(view_indices.shape[0]), int(self.guide_points_local.shape[0]))
+        if tuple(gate.shape) != expected:
+            raise ValueError(
+                f"view gate must have shape [V, G]: {tuple(gate.shape)} != {expected}"
+            )
+        if torch.unique(view_indices).numel() != view_indices.numel():
+            raise ValueError("view gate view indices must be unique")
+        if not bool(torch.isfinite(gate).all()):
+            raise ValueError("view gate must be finite")
+        floor = float(floor)
+        if not (0.0 <= floor <= 1.0):
+            raise ValueError(f"view gate floor must lie in [0, 1], got {floor}")
+        self.view_gate_view_indices_cache = view_indices.detach()
+        self.view_gate_cache = gate.detach().clamp(0.0, 1.0)
+        self.view_gate_floor = floor
+
+    def view_gate_enabled(self) -> bool:
+        return int(self.view_gate_cache.numel()) > 0
+
+    def view_gate_for_guides(self, view_index: int) -> torch.Tensor:
+        """Return the ``[G]`` gradient share this view owns per primary guide."""
+
+        if not self.view_gate_enabled():
+            raise RuntimeError("view gate has not been initialized")
+        guide_count = int(self.guide_points_local.shape[0])
+        matches = torch.nonzero(
+            self.view_gate_view_indices_cache == int(view_index),
+            as_tuple=False,
+        ).reshape(-1)
+        if matches.numel() == 0:
+            # A training view outside the trusted V7 set still renders forward
+            # but claims only the configured floor of geometry ownership.
+            return self.view_gate_cache.new_full((guide_count,), self.view_gate_floor)
+        if matches.numel() != 1:
+            raise RuntimeError(f"duplicate view gate index: {int(view_index)}")
+        return self.view_gate_cache[int(matches[0])]
+
+    def view_gate_at_render_roots(
+        self,
+        roots_local: torch.Tensor,
+        view_index: int,
+    ) -> torch.Tensor:
+        """Interpolate the per-view guide gate onto render roots as ``[R, 1]``.
+
+        This reuses the accepted K8 primary-guide surface support, so the gate
+        follows the same ownership contract as every other guide-owned field.
+        """
+
+        guide_gate = self.view_gate_for_guides(view_index).reshape(-1, 1)
+        support = self.guide_interpolation_support()
+        weights = self.guide_surface_interpolator().weights(
+            roots_local.detach(),
+            self.face_ids,
+            support,
+        )
+        gate = interpolate_physical(guide_gate, support.indices, weights)
+        return gate.reshape(-1, 1).clamp(0.0, 1.0)
+
     def set_guide_view_sh_confidence(
         self,
         view_indices: torch.Tensor,
@@ -3658,14 +3746,47 @@ class WhiteTigerStage1Model(torch.nn.Module):
         mesh_no_penetration_field: SignedDistanceGrid | None = None,
         mesh_no_penetration_root_indices: torch.Tensor | None = None,
         strand_crossing_active_set: TorchStrandCrossingActiveSet | None = None,
+        view_index: int | None = None,
     ):
         roots, normals, roots_local = self.roots_and_normals()
         tangents, bitangents = self.tangent_frames(normals)
-        groom = self.apply_guide_controls(self.groom.decode(), roots_local)
+        # R072: a view only owns the image gradient of the roots it is trusted
+        # on. Every gate below is straight-through, so the forward value is
+        # unchanged and a unit gate reproduces the parent run exactly.
+        #
+        # Both image-side consumers of the root position are gated: the strand
+        # roots themselves, and the copy that drives guide surface-support
+        # weights. The mesh-no-penetration constraint and the returned
+        # `roots_local` stay ungated, because those are view-independent
+        # geometry, and the surface regularizers are what propagate corrections
+        # into roots this view is not allowed to move.
+        view_gate = None
+        if self.view_gate_enabled() and torch.is_grad_enabled():
+            if view_index is None:
+                raise RuntimeError(
+                    "gradient-enabled rendering requires view_index while view gating is active"
+                )
+            view_gate = self.view_gate_at_render_roots(
+                roots_local,
+                int(view_index),
+            ).reshape(-1, 1)
+        guide_sample_local = (
+            roots_local
+            if view_gate is None
+            else straight_through_gate(roots_local, view_gate)
+        )
+        groom = self.apply_guide_controls(self.groom.decode(), guide_sample_local)
         curl_enabled = (
             self.shape_detail_multiplier > 0.0
             and self.shape_curl_scale > 0.0
         )
+        if view_gate is not None:
+            roots = straight_through_gate(roots, view_gate)
+            groom = replace(
+                groom,
+                root_opacity=straight_through_gate(groom.root_opacity, view_gate),
+                tip_opacity=straight_through_gate(groom.tip_opacity, view_gate),
+            )
         strands, widths, colors, opacities = build_strands(
             roots,
             normals,
@@ -4659,6 +4780,35 @@ def initialize_guide_view_sh_confidence(
     }
 
 
+def initialize_view_gate(
+    model: WhiteTigerStage1Model,
+    clean_flow_target_path: Path,
+    config: Stage1Config,
+    train_indices: list[int],
+) -> dict:
+    """Install the R072 per-view ownership gate from the accepted V7 target."""
+
+    trusted = load_trusted_guide_view_confidence(
+        clean_flow_target_path,
+        expected_face_ids=model.guide_face_ids,
+        expected_barycentric=model.guide_barycentric,
+        device=model.vertices.device,
+    )
+    ownership = ViewGatedOwnership(
+        confidence=trusted,
+        floor=float(config.view_gate_floor),
+    )
+    gate = torch.stack(
+        [ownership.guide_gate(int(view)) for view in trusted.view_indices.tolist()],
+        dim=0,
+    )
+    model.set_view_gate(trusted.view_indices, gate, float(config.view_gate_floor))
+    return {
+        "view_gated_ownership_support": 1,
+        **ownership.report(train_indices),
+    }
+
+
 def sample_backing_color(config: Stage1Config, device: torch.device, *, train: bool) -> torch.Tensor:
     if train and config.random_backing_color:
         lo = float(config.backing_color_min)
@@ -5080,6 +5230,7 @@ def render_view(
                 mesh_no_penetration_field=mesh_no_penetration_field,
                 mesh_no_penetration_root_indices=mesh_no_penetration_root_indices,
                 strand_crossing_active_set=strand_crossing_active_set,
+                view_index=view_index,
             ),
             model.groom.length_raw,
             use_reentrant=False,
@@ -5099,6 +5250,7 @@ def render_view(
             mesh_no_penetration_field=mesh_no_penetration_field,
             mesh_no_penetration_root_indices=mesh_no_penetration_root_indices,
             strand_crossing_active_set=strand_crossing_active_set,
+            view_index=view_index,
         )
     if model.guide_view_sh is not None:
         root_sh_residual = model.guide_view_sh_residual_at_render_roots(
@@ -6938,6 +7090,26 @@ def validate_guide_view_sh_config(config: Stage1Config) -> None:
         raise ValueError("guide-view SH does not yet support guide-root lifecycle changes")
 
 
+def validate_view_gated_ownership_config(config: Stage1Config) -> None:
+    floor = float(config.view_gate_floor)
+    if not config.view_gated_ownership_support:
+        if floor != 0.0:
+            raise ValueError(
+                "view gate floor must be zero while view-gated ownership is disabled"
+            )
+        return
+    if int(config.guide_root_count) <= 0 or not bool(config.guide_roots_from_clean_flow):
+        raise ValueError("view-gated ownership requires clean-flow-owned primary guides")
+    if not config.clean_flow_target.strip():
+        raise ValueError("view-gated ownership requires --clean-flow-target")
+    if not (0.0 <= floor <= 1.0):
+        raise ValueError(f"view gate floor must lie in [0, 1], got {floor}")
+    if int(config.guide_densify_interval) > 0:
+        raise ValueError(
+            "view-gated ownership does not yet support guide-root lifecycle changes"
+        )
+
+
 def restore_strand_crossing_state(
     config: Stage1Config,
     checkpoint: dict[str, object] | None,
@@ -7070,6 +7242,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         raise RuntimeError("White Tiger Stage 1 requires CUDA")
     validate_strand_crossing_config(config)
     validate_guide_view_sh_config(config)
+    validate_view_gated_ownership_config(config)
     if float(config.geometry_residual_smooth_scale) < 0.0:
         raise ValueError("geometry residual smooth scale must be non-negative")
     shape_detail_enabled = (
@@ -7574,6 +7747,21 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
     generator.manual_seed(config.seed)
     train_indices = parse_index_override(config.train_views, report.train_indices)
     test_indices = parse_index_override(config.test_views, report.test_indices)
+    if bool(config.view_gated_ownership_support):
+        if clean_flow_target_path is None:
+            raise RuntimeError("view-gated ownership requires --clean-flow-target")
+        view_gate_report = initialize_view_gate(
+            model,
+            clean_flow_target_path,
+            config,
+            train_indices,
+        )
+    else:
+        view_gate_report = {"view_gated_ownership_support": 0}
+    (output_dir / "view_gate_report.json").write_text(
+        json.dumps(view_gate_report, indent=2) + "\n",
+        encoding="utf-8",
+    )
     checkpoint_rng_state = resume_checkpoint.get("rng_state") if resume_checkpoint is not None else None
     if start_iteration > 0 and len(train_indices) > 0 and checkpoint_rng_state is None:
         torch.randint(len(train_indices), (int(start_iteration),), generator=generator)
@@ -7916,6 +8104,19 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                         )
                 if residual_per_root is not None:
                     residual_per_root = residual_per_root * float(config.densify_residual_weight)
+                    if model.view_gate_enabled():
+                        # R072: a view may only contribute densification
+                        # evidence for the roots it is trusted on. Visibility
+                        # and opacity history stay ungated, because a root is
+                        # genuinely visible regardless of direction trust.
+                        with torch.no_grad():
+                            evidence_gate = model.view_gate_at_render_roots(
+                                roots_local_for_grad,
+                                int(idx),
+                            )
+                        residual_per_root = (
+                            residual_per_root.reshape(-1, 1) * evidence_gate
+                        )
             if needs_rgb_flow_loss:
                 if trace_iteration:
                     progress_event("before_rgb_flow_loss", iteration=int(iteration))
@@ -8873,6 +9074,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guide-view-sh-support", action="store_true")
     parser.add_argument("--guide-view-sh-scale", type=float, default=0.20)
     parser.add_argument("--lr-guide-view-sh", type=float, default=2.0e-2)
+    parser.add_argument("--view-gated-ownership-support", action="store_true")
+    parser.add_argument("--view-gate-floor", type=float, default=0.0)
     parser.add_argument(
         "--render-length-prior-coordinate",
         choices=("decoded", "natural_log_ratio", "raw"),
@@ -9091,6 +9294,8 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         guide_view_sh_support=args.guide_view_sh_support,
         guide_view_sh_scale=args.guide_view_sh_scale,
         lr_guide_view_sh=args.lr_guide_view_sh,
+        view_gated_ownership_support=args.view_gated_ownership_support,
+        view_gate_floor=args.view_gate_floor,
         render_length_prior_coordinate=args.render_length_prior_coordinate,
         render_length_prior_reduction=args.render_length_prior_reduction,
         guide_smooth_weight=args.guide_smooth_weight,

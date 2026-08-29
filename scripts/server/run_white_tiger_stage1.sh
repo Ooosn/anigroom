@@ -218,6 +218,12 @@ MESH_NO_PENETRATION_SUPPORT="${MESH_NO_PENETRATION_SUPPORT:-0}"
 STRAND_CROSSING_SUPPORT="${STRAND_CROSSING_SUPPORT:-0}"
 GUIDE_SUPPORT_GAUGE_WEIGHT="${GUIDE_SUPPORT_GAUGE_WEIGHT:-0}"
 GUIDE_VIEW_SH_SUPPORT="${GUIDE_VIEW_SH_SUPPORT:-0}"
+VIEW_GATED_OWNERSHIP_SUPPORT="${VIEW_GATED_OWNERSHIP_SUPPORT:-0}"
+if [[ "$VIEW_GATED_OWNERSHIP_SUPPORT" == "1" ]]; then
+  require_var VIEW_GATE_FLOOR
+else
+  VIEW_GATE_FLOOR=0.0
+fi
 if [[ "$GUIDE_VIEW_SH_SUPPORT" == "1" ]]; then
   for name in GUIDE_VIEW_SH_SCALE LR_GUIDE_VIEW_SH; do
     require_var "$name"
@@ -507,6 +513,9 @@ if [[ "$GAUSSIAN_RGB_RESIDUAL_SUPPORT" == "1" ]]; then
 fi
 if [[ "$GUIDE_VIEW_SH_SUPPORT" == "1" ]]; then
   cmd+=(--guide-view-sh-support)
+fi
+if [[ "$VIEW_GATED_OWNERSHIP_SUPPORT" == "1" ]]; then
+  cmd+=(--view-gated-ownership-support --view-gate-floor "$VIEW_GATE_FLOOR")
 fi
 if [[ "$RGB_FLOW_EXCLUDE_COLOR_GRADIENTS" == "1" ]]; then
   cmd+=(--rgb-flow-exclude-color-gradients)

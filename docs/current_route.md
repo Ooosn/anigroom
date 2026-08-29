@@ -361,10 +361,29 @@ stored length reference while those same guides average `9.37x` reference
 width; guide log length and width ratios correlate at `-0.737`. Secondary
 length/width residuals are too small to cause the defect. The run remains an
 accepted completed execution and V7-direction artifact, but it fails visual
-coverage acceptance. R069 guide-support-gauge work is a separate pending
-training-method candidate; it does not reopen V7 flow. See
-`docs/panda_r068_v7_training_20260828.md` and
-`docs/r069_guide_support_gauge.md`.
+coverage acceptance. R069 guide-support-gauge training fixes the lower-length
+and width failure at 12k but is rejected because its shared slenderness gradient
+creates `78/11` effective roots above `0.12/0.15`, versus `0/0` in R068. R070
+width-only ownership was then cancelled before commit/training when exact-crop
+review established that the user's visible upper-back failure is salt-and-
+pepper raw-fur RGB noise with continuous alpha, not the scalar length field.
+Dark render-root colors are dispersed through nominally white coat regions.
+R071 then tested the appearance reading of that evidence with a bounded
+guide-owned view-dependent SH field, and is rejected: it gained only
+`+0.145/+0.210/+0.288 dB` at 3k/6k/9k while its own coefficients saturated from
+`50.2%` to `71.7%` and the render-root population barely moved (`668,060`
+against `669,143`). Appearance absorbed error without repairing the root
+distribution, so the color reading of the defect is closed. The matched
+single-view control is the positive result that remains: view 09 alone produces
+a materially more continuous coat by 6k with everything else unchanged.
+R072 therefore moves to per-view ownership of the only pre-9k degrees of
+freedom that reach the image, namely render-root placement, opacity, and
+densification evidence. No rejected candidate reopens V7 flow. See
+`docs/panda_r068_v7_training_20260828.md`,
+`docs/r069_guide_support_gauge.md`,
+`docs/r070_width_only_slenderness_ownership.md`,
+`docs/r071_guide_view_sh.md`, and
+`docs/r072_view_gated_ownership.md`.
 
 ## Active Entry Points
 
