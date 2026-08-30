@@ -163,15 +163,18 @@ confidence/area-weighted data-relative length anchor, with low-confidence
 regions left to intrinsic surface propagation. See
 `docs/r076_early_guide_length.md`.
 
-R077 is the active bounded 0-3k treatment for that isolated ownership failure.
-It inherits R076 exactly and adds only `VIEW_GATE_GEOMETRY_SUPPORT=1` plus
-`CLEAN_FLOW_GUIDE_LENGTH_ANCHOR_WEIGHT=0.080`. The first change leaves the
-forward render unchanged while applying the accepted per-view owner budget to
-decoded geometry gradients. The second anchors only reliable primary-guide
-lengths to the target's own unscaled shell height through a confidence- and
-intrinsic-area-weighted log ratio; zero-confidence guides receive no anchor and
-remain governed by surface propagation. No physical cap or species, region, or
-view rule is present. See `docs/r077_confidence_owned_length.md`.
+R077 is the completed and rejected confidence-owned mean-anchor control. It
+inherits R076 and adds only geometry view gating plus a `0.080`
+confidence/area-weighted mean absolute data-relative log anchor. It repairs the
+short side (`8.37% -> 1.49%` below V8 q05) and reduces the over-q95 population
+`60.11% -> 46.45%`, but test composite falls to `19.540701`, effective maximum
+grows to `0.186631`, and K8 local log-length discontinuity q95 worsens
+`0.11588 -> 0.17080`. Fixed-region direction remains zero-reversal. Exact guide
+attribution finds `24/45` top-tail guides have zero length confidence but a
+view owner, while `21/45` have positive confidence; therefore both a
+length-confidence-specific image-gradient gate and a tail-concentration anchor
+are required. R075 remains accepted. See
+`docs/r077_confidence_owned_length.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
