@@ -12,8 +12,10 @@ K32 render support. Guide support remains K8.
 ## Flow Initialization
 
 - Code: `anigroom/flow`, `anigroom/projection`, and the flow-building tools.
-- Accepted target: `v7_surface_direction` documented in
-  `docs/modules/01_flow_initialization.md`.
+- Accepted target: `v7_surface_direction`; the explicit opt-in pre-training
+  candidate is V8 confidence-guided directed propagation. Both are documented
+  in `docs/modules/01_flow_initialization.md`, with V8 evidence in
+  `docs/panda_v8_confidence_guided_flow_20260830.md`.
 - Optional artist-guided acquisition is isolated in
   `tools/groom_flow_annotator.py` and `anigroom/seed_flow_annotations.py`.
   It stores no-length directed 2D seeds, manual-anchor ownership, and cached

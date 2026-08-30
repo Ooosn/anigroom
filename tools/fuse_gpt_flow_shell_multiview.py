@@ -17,6 +17,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from anigroom.grooming import make_tangent_frames  # noqa: E402
+from anigroom.flow.confidence_guided_direction import (  # noqa: E402
+    refine_confidence_guided_directed_flow,
+)
 from anigroom.flow.direction_geometry import parallel_transport_vectors  # noqa: E402
 from anigroom.flow.global_sign_orientation import refine_global_tangent_sign_field  # noqa: E402
 from anigroom.flow.surface_graph import (  # noqa: E402
@@ -1416,6 +1419,11 @@ def main() -> None:
     parser.add_argument("--direction-consensus-iters", type=int, default=0)
     parser.add_argument("--direction-consensus-blend", type=float, default=0.45)
     parser.add_argument("--direction-consensus-anchor-threshold", type=float, default=0.75)
+    parser.add_argument(
+        "--directed-flow-propagation-mode",
+        choices=["none", "confidence-guided"],
+        default="none",
+    )
     parser.add_argument("--axis-field-mode", choices=["raw", "anchor-propagated", "trusted-view-cluster"], default="trusted-view-cluster")
     parser.add_argument("--axis-field-iters", type=int, default=10)
     parser.add_argument("--axis-field-smooth-strength", type=float, default=0.65)
@@ -1452,6 +1460,14 @@ def main() -> None:
     parser.add_argument("--clean-smooth-strength", type=float, default=2.0)
     parser.add_argument("--clean-vector-blend", type=float, default=0.35)
     args = parser.parse_args()
+    if (
+        args.directed_flow_propagation_mode != "none"
+        and args.axis_field_mode != "trusted-view-cluster"
+    ):
+        parser.error(
+            "--directed-flow-propagation-mode requires "
+            "--axis-field-mode trusted-view-cluster"
+        )
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for mesh-depth visibility; do not use a CPU fallback for this diagnostic.")
@@ -2186,6 +2202,10 @@ def main() -> None:
     ratio_refinement_report: dict[str, object] = {"enabled": 0}
     global_orientation_report: dict[str, object] = {"enabled": 0}
     fixed_sign_directed_ratio_report: dict[str, object] = {"enabled": 0}
+    confidence_guided_direction_report: dict[str, object] = {
+        "enabled": 0,
+        "mode": str(args.directed_flow_propagation_mode),
+    }
     consensus_report: dict[str, object]
     if args.axis_field_mode == "trusted-view-cluster":
         assert trusted_knn is not None
@@ -2360,10 +2380,95 @@ def main() -> None:
                 "axis_view_cluster_postratio_residual_before": postratio_npz_array("residual_before", dtype=np.dtype(np.float32)),
                 "axis_view_cluster_postratio_residual_after": postratio_npz_array("residual_after", dtype=np.dtype(np.float32)),
                 "axis_view_cluster_postratio_normalized_residual_improvement": postratio_npz_array("normalized_residual_improvement", dtype=np.dtype(np.float32)),
+                "axis_view_cluster_postratio_edge_u": postratio_npz_array("edge_u", dtype=np.dtype(np.int64)),
+                "axis_view_cluster_postratio_edge_v": postratio_npz_array("edge_v", dtype=np.dtype(np.int64)),
                 "axis_view_cluster_postratio_baseline_edge_dot": postratio_npz_array("baseline_edge_dots", dtype=np.dtype(np.float32)),
                 "axis_view_cluster_postratio_final_edge_dot": postratio_npz_array("final_edge_dots", dtype=np.dtype(np.float32)),
             }
         )
+        if args.directed_flow_propagation_mode == "confidence-guided":
+            confidence_result = refine_confidence_guided_directed_flow(
+                direction=postratio_result["direction"],
+                normals=root_normals,
+                observed=observed,
+                edge_u=postratio_result["edge_u"],
+                edge_v=postratio_result["edge_v"],
+                field_confidence=trusted_result["final_confidence"],
+                unary_normalized_margin=global_result["unary_normalized_margin"],
+                unary_vote_coherence=global_result["unary_vote_coherence"],
+                canonical_rank=global_result["canonical_rank"],
+            )
+            confidence_new_severe = confidence_result["new_severe_edge_mask"]
+            if not isinstance(confidence_new_severe, torch.Tensor):
+                raise TypeError(
+                    "confidence-guided new-severe diagnostic must be a tensor"
+                )
+            if bool(confidence_new_severe.any()):
+                raise RuntimeError(
+                    "confidence-guided direction propagation introduced a new "
+                    "severe edge"
+                )
+            cleaned_directed_flow3d = confidence_result["direction"]
+            if not isinstance(cleaned_directed_flow3d, torch.Tensor):
+                raise TypeError("confidence-guided direction must be a tensor")
+            cleaned["flow"] = cleaned_directed_flow3d
+            final_normal_component = (
+                cleaned_directed_flow3d * root_normals
+            ).sum(dim=-1).clamp_min(0.0)
+            final_tangent = (
+                cleaned_directed_flow3d
+                - final_normal_component[:, None] * root_normals
+            )
+            final_tangent_length = torch.linalg.vector_norm(
+                final_tangent, dim=-1
+            ).clamp_min(EPS)
+            cleaned["lambda"] = final_normal_component / final_tangent_length
+            cleaned["sign"] = torch.where(
+                (final_tangent * selected_axis).sum(dim=-1) >= 0.0,
+                torch.ones_like(final_normal_component),
+                -torch.ones_like(final_normal_component),
+            )
+            confidence_guided_direction_report = dict(confidence_result["report"])
+            confidence_guided_direction_report["enabled"] = 1
+            confidence_guided_direction_report["mode"] = str(
+                args.directed_flow_propagation_mode
+            )
+            confidence_guided_direction_report["zero_new_severe_verification"] = {
+                "new_severe_edge_count": int(
+                    confidence_new_severe.sum().detach().cpu()
+                ),
+                "passed": not bool(confidence_new_severe.any()),
+            }
+
+            def confidence_npz_array(key: str, *, dtype: np.dtype) -> np.ndarray:
+                value = confidence_result[key]
+                if not isinstance(value, torch.Tensor):
+                    raise TypeError(
+                        "confidence-guided diagnostics must be tensors"
+                    )
+                return value.detach().cpu().numpy().astype(dtype)
+
+            axis_view_cluster_npz.update(
+                {
+                    "axis_view_cluster_confidence_flow_input_direction": postratio_npz_array("direction", dtype=np.dtype(np.float32)),
+                    "axis_view_cluster_confidence_flow_watershed_direction": confidence_npz_array("watershed_direction", dtype=np.dtype(np.float32)),
+                    "axis_view_cluster_confidence_flow_joint_confidence": confidence_npz_array("joint_confidence", dtype=np.dtype(np.float32)),
+                    "axis_view_cluster_confidence_flow_watershed_owner": confidence_npz_array("watershed_owner", dtype=np.dtype(np.int64)),
+                    "axis_view_cluster_confidence_flow_watershed_parent": confidence_npz_array("watershed_parent", dtype=np.dtype(np.int64)),
+                    "axis_view_cluster_confidence_flow_propagated_confidence": confidence_npz_array("watershed_propagated_confidence", dtype=np.dtype(np.float32)),
+                    "axis_view_cluster_confidence_flow_watershed_changed": confidence_npz_array("watershed_changed_mask", dtype=np.dtype(np.bool_)),
+                    "axis_view_cluster_confidence_flow_local_changed": confidence_npz_array("local_changed_mask", dtype=np.dtype(np.bool_)),
+                    "axis_view_cluster_confidence_flow_changed": confidence_npz_array("changed_mask", dtype=np.dtype(np.bool_)),
+                    "axis_view_cluster_confidence_flow_protected_owner": confidence_npz_array("protected_owner_mask", dtype=np.dtype(np.bool_)),
+                    "axis_view_cluster_confidence_flow_local_update_count": confidence_npz_array("local_update_count", dtype=np.dtype(np.int64)),
+                    "axis_view_cluster_confidence_flow_edge_u": confidence_npz_array("edge_u", dtype=np.dtype(np.int64)),
+                    "axis_view_cluster_confidence_flow_edge_v": confidence_npz_array("edge_v", dtype=np.dtype(np.int64)),
+                    "axis_view_cluster_confidence_flow_initial_edge_dot": confidence_npz_array("initial_edge_dots", dtype=np.dtype(np.float32)),
+                    "axis_view_cluster_confidence_flow_watershed_edge_dot": confidence_npz_array("watershed_edge_dots", dtype=np.dtype(np.float32)),
+                    "axis_view_cluster_confidence_flow_final_edge_dot": confidence_npz_array("final_edge_dots", dtype=np.dtype(np.float32)),
+                    "axis_view_cluster_confidence_flow_new_severe_edge": confidence_npz_array("new_severe_edge_mask", dtype=np.dtype(np.bool_)),
+                }
+            )
         consensus_report = {
             "enabled": 0,
             "mode": "superseded-by-global-sign-and-fixed-sign-directed-multiview-ratio",
@@ -2482,6 +2587,7 @@ def main() -> None:
         "fixed_axis_multiview_ratio": ratio_refinement_report,
         "global_sign_orientation": global_orientation_report,
         "fixed_sign_directed_multiview_ratio": fixed_sign_directed_ratio_report,
+        "confidence_guided_directed_flow": confidence_guided_direction_report,
         "direction_consensus": consensus_report,
         "shell_height_refine": shell_height_refine_report,
         "observed_roots": int(observed.sum().detach().cpu()),

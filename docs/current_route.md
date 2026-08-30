@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-08-28.
+Status date: 2026-08-30.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -98,6 +98,27 @@ and
 `6a220f52b15ca996c88e71802d3309f9499ade442f79dc72300f1af12b5fa56f`.
 See `docs/v7_global_directed_flow.md` and
 `docs/panda_v5_multiview_discontinuity_20260827.md`.
+
+V8 confidence-guided directed propagation is the current pre-training
+candidate; V7 remains the accepted immutable target until formal V8 generation
+finishes. The Panda R073 experiment is frozen at 3k and must not continue:
+guide-direction residual strength is zero there, so its upper-back opposing
+flow is an initialization defect rather than a learned direction. Corrected
+root/edge attribution finds 87 negative edges in the user box, all inside one
+V7 sign supernode. V8 therefore propagates the product of axial confidence,
+global unary margin, and vote coherence through a canonical surface watershed,
+then performs a monotone stronger-confidence local cleanup. There are no
+species, region, view, or image-coordinate rules.
+
+On frozen local V7 Panda/white targets, observed negative/severe edges become
+`594/233 -> 92/5` and `1104/246 -> 202/40`, with zero newly severe edges. The
+Panda user box becomes `87 -> 0` negative edges, including `41 -> 0`
+front-facing edges. Formal implementation reproduces the accepted prototype to
+`1.7881393e-7` maximum component error and retains protected confidence
+anchors. The opt-in launcher is
+`scripts/server/run_panda_white_confidence_guided_v8.sh`; full formal target,
+fixed-view, and canonical asset acceptance must pass before any new H100
+training. See `docs/panda_v8_confidence_guided_flow_20260830.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual

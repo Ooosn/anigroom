@@ -209,6 +209,9 @@ def test_collapse_per_view_shell_evidence_matches_additive_decomposition() -> No
 
 def test_fusion_module_imports_trusted_refinement_and_parser_keeps_modes() -> None:
     module = _module()
+    from anigroom.flow.confidence_guided_direction import (
+        refine_confidence_guided_directed_flow,
+    )
     from anigroom.flow.global_sign_orientation import refine_global_tangent_sign_field
     from anigroom.flow.view_cluster_refinement import (
         refine_fixed_axis_multiview_ratio,
@@ -217,6 +220,7 @@ def test_fusion_module_imports_trusted_refinement_and_parser_keeps_modes() -> No
     )
 
     assert module.refine_global_tangent_sign_field is refine_global_tangent_sign_field
+    assert module.refine_confidence_guided_directed_flow is refine_confidence_guided_directed_flow
     assert module.refine_trusted_multiview_axis_field is refine_trusted_multiview_axis_field
     assert module.refine_fixed_axis_multiview_ratio is refine_fixed_axis_multiview_ratio
     assert module.refine_fixed_sign_directed_multiview_ratio is refine_fixed_sign_directed_multiview_ratio
@@ -235,6 +239,13 @@ def test_fusion_module_imports_trusted_refinement_and_parser_keeps_modes() -> No
         action = next(item for item in parser._actions if item.dest == "axis_field_mode")
         captured["choices"] = tuple(action.choices or ())
         captured["default"] = action.default
+        directed_action = next(
+            item
+            for item in parser._actions
+            if item.dest == "directed_flow_propagation_mode"
+        )
+        captured["directed_choices"] = tuple(directed_action.choices or ())
+        captured["directed_default"] = directed_action.default
         raise _ParserCaptured
 
     original_parse_args = argparse.ArgumentParser.parse_args
@@ -247,6 +258,8 @@ def test_fusion_module_imports_trusted_refinement_and_parser_keeps_modes() -> No
 
     assert captured["choices"] == ("raw", "anchor-propagated", "trusted-view-cluster")
     assert captured["default"] == "trusted-view-cluster"
+    assert captured["directed_choices"] == ("none", "confidence-guided")
+    assert captured["directed_default"] == "none"
 
 
 def test_fusion_helpers_have_no_species_region_or_view_index_parameters() -> None:
@@ -359,6 +372,126 @@ def test_trusted_pipeline_orders_provisional_global_sign_and_postratio_calls() -
     assert postratio_kw["canonical_rank"] == "global_result['canonical_rank']"
 
 
+def test_confidence_guided_flow_runs_after_postratio_with_trusted_global_evidence() -> None:
+    module = _module()
+    function = _main_ast(module)
+    postratio = _main_call(function, "refine_fixed_sign_directed_multiview_ratio")
+    confidence = _main_call(function, "refine_confidence_guided_directed_flow")
+
+    assert postratio.lineno < confidence.lineno
+    confidence_kw = _call_keywords(confidence)
+    assert confidence_kw == {
+        "direction": "postratio_result['direction']",
+        "normals": "root_normals",
+        "observed": "observed",
+        "edge_u": "postratio_result['edge_u']",
+        "edge_v": "postratio_result['edge_v']",
+        "field_confidence": "trusted_result['final_confidence']",
+        "unary_normalized_margin": "global_result['unary_normalized_margin']",
+        "unary_vote_coherence": "global_result['unary_vote_coherence']",
+        "canonical_rank": "global_result['canonical_rank']",
+    }
+
+    confidence_guards = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test)
+        == "args.directed_flow_propagation_mode == 'confidence-guided'"
+        and any(candidate is confidence for candidate in ast.walk(node))
+    ]
+    assert len(confidence_guards) == 1
+
+
+def test_confidence_guided_flow_owns_final_direction_and_zero_new_severe_guard() -> None:
+    module = _module()
+    function = _main_ast(module)
+    confidence_call = _main_call(function, "refine_confidence_guided_directed_flow")
+    confidence_guards = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test)
+        == "args.directed_flow_propagation_mode == 'confidence-guided'"
+        and any(candidate is confidence_call for candidate in ast.walk(node))
+    ]
+    assert len(confidence_guards) == 1
+    confidence_guard = confidence_guards[0]
+
+    flow_replacements = [
+        node
+        for node in ast.walk(confidence_guard)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "cleaned_directed_flow3d"
+            for target in node.targets
+        )
+        and isinstance(node.value, ast.Subscript)
+        and ast.unparse(node.value) == "confidence_result['direction']"
+    ]
+    assert len(flow_replacements) == 1
+
+    outside_flow_replacements = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "cleaned_directed_flow3d"
+            for target in node.targets
+        )
+        and isinstance(node.value, ast.Subscript)
+        and ast.unparse(node.value) == "confidence_result['direction']"
+        and not any(candidate is node for candidate in ast.walk(confidence_guard))
+    ]
+    assert not outside_flow_replacements
+
+    severe_guard = next(
+        (
+            node
+            for node in ast.walk(confidence_guard)
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "bool(confidence_new_severe.any())"
+        ),
+        None,
+    )
+    assert severe_guard is not None
+    assert any(
+        isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and isinstance(node.exc.func, ast.Name)
+        and node.exc.func.id == "RuntimeError"
+        for node in ast.walk(severe_guard)
+    )
+
+    verification_assignments = [
+        node
+        for node in ast.walk(confidence_guard)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Subscript)
+            and ast.unparse(target) == "confidence_guided_direction_report['zero_new_severe_verification']"
+            for target in node.targets
+        )
+    ]
+    assert len(verification_assignments) == 1
+    verification = verification_assignments[0].value
+    assert isinstance(verification, ast.Dict)
+    verification_keys = {
+        key.value
+        for key in verification.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    assert verification_keys == {"new_severe_edge_count", "passed"}
+    passed_value = next(
+        value
+        for key, value in zip(verification.keys, verification.values)
+        if isinstance(key, ast.Constant) and key.value == "passed"
+    )
+    assert ast.unparse(passed_value) == "not bool(confidence_new_severe.any())"
+
+
 def test_global_sign_and_postratio_are_trusted_only_and_own_final_field() -> None:
     module = _module()
     source = inspect.getsource(module.main)
@@ -409,12 +542,71 @@ def test_trusted_npz_and_summary_expose_global_and_postratio_diagnostics() -> No
         "axis_view_cluster_postratio_residual_after",
         "axis_view_cluster_postratio_baseline_edge_dot",
         "axis_view_cluster_postratio_final_edge_dot",
+        "axis_view_cluster_postratio_edge_u",
+        "axis_view_cluster_postratio_edge_v",
+        "axis_view_cluster_confidence_flow_input_direction",
+        "axis_view_cluster_confidence_flow_watershed_direction",
+        "axis_view_cluster_confidence_flow_joint_confidence",
+        "axis_view_cluster_confidence_flow_watershed_owner",
+        "axis_view_cluster_confidence_flow_watershed_parent",
+        "axis_view_cluster_confidence_flow_propagated_confidence",
+        "axis_view_cluster_confidence_flow_watershed_changed",
+        "axis_view_cluster_confidence_flow_local_changed",
+        "axis_view_cluster_confidence_flow_changed",
+        "axis_view_cluster_confidence_flow_protected_owner",
+        "axis_view_cluster_confidence_flow_local_update_count",
+        "axis_view_cluster_confidence_flow_edge_u",
+        "axis_view_cluster_confidence_flow_edge_v",
+        "axis_view_cluster_confidence_flow_initial_edge_dot",
+        "axis_view_cluster_confidence_flow_watershed_edge_dot",
+        "axis_view_cluster_confidence_flow_final_edge_dot",
+        "axis_view_cluster_confidence_flow_new_severe_edge",
     )
     for key in required_npz_keys:
         assert f'"{key}"' in source
     assert '"global_sign_orientation": global_orientation_report' in source
     assert '"fixed_sign_directed_multiview_ratio": fixed_sign_directed_ratio_report' in source
+    assert '"confidence_guided_directed_flow": confidence_guided_direction_report' in source
     assert '"zero_new_severe_verification"' in source
+
+
+def test_trusted_postratio_edge_endpoints_use_postratio_result() -> None:
+    module = _module()
+    function = _main_ast(module)
+    endpoint_keys = {
+        "axis_view_cluster_postratio_edge_u": "edge_u",
+        "axis_view_cluster_postratio_edge_v": "edge_v",
+    }
+    endpoint_entries: dict[str, ast.AST] = {}
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, ast.Constant) and key.value in endpoint_keys:
+                endpoint_entries[key.value] = value
+
+    assert set(endpoint_entries) == set(endpoint_keys)
+    for output_key, result_key in endpoint_keys.items():
+        value = endpoint_entries[output_key]
+        assert isinstance(value, ast.Call)
+        assert isinstance(value.func, ast.Name)
+        assert value.func.id == "postratio_npz_array"
+        assert len(value.args) == 1
+        assert ast.literal_eval(value.args[0]) == result_key
+        assert not any(name in ast.unparse(value) for name in ("global_edge", "global_npz_array"))
+
+    helpers = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.FunctionDef) and node.name == "postratio_npz_array"
+    ]
+    assert len(helpers) == 1
+    assert any(
+        isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Subscript)
+        and ast.unparse(node.value) == "postratio_result[key]"
+        for node in ast.walk(helpers[0])
+    )
 
 
 def test_formal_global_and_directed_ratio_helpers_are_keyword_only_and_semantic_free() -> None:

@@ -252,6 +252,37 @@ Panda/white selected severe transitions `113 -> 75` and `144 -> 113`; the
 Panda view-27 crop becomes `13 -> 0` with two-cycles `2 -> 0`.
 See `docs/v7_global_directed_flow.md`.
 
+### V8 confidence-guided directed propagation
+
+The R073 3k Panda asset exposed a second class of V7 failure: all conflicting
+upper-back edges were already inside one protected global-sign supernode. A
+binary block flip therefore could not repair the continuous 3D-axis seam. The
+defect exists before training and curl, while the corresponding 2D source flow
+is smooth.
+
+V8 is an explicit opt-in pass after the guarded post-sign ratio refit. It forms
+joint root reliability from trusted axial confidence, global unary margin, and
+global vote coherence. A canonical max-confidence watershed propagates
+parallel-transported directions from stronger roots into weaker roots. A basin
+is accepted only with strict severe/negative/hinge improvement, zero newly
+severe edges, and repair density above the sample's own graph defect density.
+Accepted source roots are protected. A second local queue removes residual
+negative edges only through strictly stronger decayed confidence and monotone
+continuity improvement.
+
+The method has no species, region, view-index, image-coordinate, or semantic
+rule. It uses the existing trusted-view-cluster confidence decay and does not
+introduce a confidence cutoff. Unobserved-only edges cannot initiate repair;
+training already samples only observed clean-flow roots and reconstructs other
+locations through the surface-aware interpolator.
+
+On the frozen local Panda/white V7 targets, observed negative/severe edges move
+`594/233 -> 92/5` and `1104/246 -> 202/40`, respectively, with zero new severe
+edges. The user-marked Panda upper-back box moves from 87 total and 41
+front-facing negative edges to zero. Formal target generation and fixed-view
+acceptance remain required before V8 replaces V7 as a training input. See
+`docs/panda_v8_confidence_guided_flow_20260830.md`.
+
 ## Acceptance Evidence
 
 Before using a new target in training, produce:
