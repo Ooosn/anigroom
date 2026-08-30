@@ -376,9 +376,16 @@ against `669,143`). Appearance absorbed error without repairing the root
 distribution, so the color reading of the defect is closed. The matched
 single-view control is the positive result that remains: view 09 alone produces
 a materially more continuous coat by 6k with everything else unchanged.
-R072 therefore moves to per-view ownership of the only pre-9k degrees of
-freedom that reach the image, namely render-root placement, opacity, and
-densification evidence. No rejected candidate reopens V7 flow. See
+R072 then applies raw V7 trusted-view weights to the only pre-9k degrees of
+freedom that reach the image: render-root placement, opacity, and densification
+evidence. It is also rejected. Its mean training gate is only `0.06993`, roots
+fall to `608,775`, and fixed view-09 composite loses
+`0.525/0.784/0.915 dB` at 3k/6k/9k while the crop stays granular. The failure
+is gradient starvation: raw confidence magnitude conflates selecting an owner
+with shrinking total optimization strength. The trusted nonzero owner set is
+not yet rejected. The next isolated candidate must normalize that same set per
+guide so uniform view sampling conserves expected gradient mass; no SH, floor,
+new confidence source, or view rule is added. No rejected candidate reopens V7 flow. See
 `docs/panda_r068_v7_training_20260828.md`,
 `docs/r069_guide_support_gauge.md`,
 `docs/r070_width_only_slenderness_ownership.md`,

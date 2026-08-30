@@ -2,8 +2,54 @@
 
 Status date: 2026-08-30.
 
-Status: implementation and local validation complete. No H100 result is
-accepted by this document.
+Status: rejected after a completed Panda 0-9k H100 gate. The implementation,
+preflight, checkpoints, and renders are valid; the ownership magnitude is not.
+
+## Formal Result
+
+The source at `29e7eab656b62aafb99dde65a04405c7d9feb372` passes all
+`390` local tests. The full-resolution H100 preflight and uninterrupted 0-9k
+run complete without OOM, CUDA error, nonfinite state, or fallback.
+
+| iteration | R068+V7 view09 composite | R072 | delta |
+|---:|---:|---:|---:|
+| 3k | `17.81787` | `17.29291` | `-0.52496 dB` |
+| 6k | `19.70916` | `18.92481` | `-0.78435 dB` |
+| 9k | `21.00030` | `20.08535` | `-0.91494 dB` |
+
+At 9k R072 has `608,775` roots versus the parent's `669,143`; the final
+lifecycle event selects `2,260` parents versus `3,017`. The root-move loss is
+about half the parent value, fixed-RGB L1 is worse (`0.09635` versus
+`0.08998`), and mask L1 is worse (`0.04041` versus `0.03609`). The fixed crop
+remains granular and becomes more weakly supported rather than approaching the
+clean single-view control.
+
+The decisive measurement is gradient mass. Only `21.20%` of training
+view/guide entries are owned and the mean gate is `0.06993`. R072 therefore
+does not merely select trusted views; it reduces the expected placement and
+opacity gradient by about fourteen-fold. It starves trusted owners along with
+rejecting untrusted ones. This result rejects the raw confidence magnitude as
+the optimizer gate, but it does not reject the trusted-view support set.
+
+The next isolated candidate must separate selection from strength: preserve
+the same nonzero trusted owner set while normalizing each guide's owner weights
+to conserve its expected gradient budget under uniform 30-view sampling. No
+appearance field, floor, species rule, or new confidence source is mixed into
+that experiment.
+
+Formal artifacts:
+
+- HGC runtime: `/home/wangyy/panda-r072-view-gate-runtime-20260830`;
+- 9k checkpoint SHA-256:
+  `aa060a1fe7dc0022ba4c7c2d105801ee1f4dcc2f52ca2d22c6f69e3d9581f1b6`;
+- training log SHA-256:
+  `8976bffb9020828975b0eb163944a2755413dbe2d848e50510502edf9698ffa8`;
+- local crops:
+  `D:/RTS/_tmp/panda_r072_view_gate_acceptance_20260830`.
+
+The retained first preflight attempt completed its real one-step model work
+and failed only a wrapper post-assertion (`AssertionError: 1`); the corrected
+preflight then passed before the formal run. No 30k continuation is authorized.
 
 ## Question
 
