@@ -3,10 +3,12 @@
   "source_ref": "stage1-r036",
   "frozen_at": "2026-08-05",
   "schema_contract": {
-    "checkpoint_version": 13,
+    "checkpoint_version": 14,
     "defaults": {
       "clean_flow_guide_length_anchor_weight": 0.0,
-      "view_gate_geometry_support": false
+      "clean_flow_guide_length_anchor_reduction": "mean_l1",
+      "view_gate_geometry_support": false,
+      "view_gate_length_confidence_support": false
     }
   },
   "formal_run": {

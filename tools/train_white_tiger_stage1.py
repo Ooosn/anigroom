@@ -33,7 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 ACTIVATION_CHECKPOINT_MAX_DEVICE_MEMORY_BYTES = 48 * 1024**3
-CURRENT_CHECKPOINT_VERSION = 13
+CURRENT_CHECKPOINT_VERSION = 14
 
 
 def memory_constrained_activation_checkpointing(device: torch.device) -> bool:
@@ -1780,6 +1780,7 @@ class Stage1Config:
     clean_flow_length_init_min_confidence: float = 0.50
     clean_flow_guide_anchor_weight: float = 0.0
     clean_flow_guide_length_anchor_weight: float = 0.0
+    clean_flow_guide_length_anchor_reduction: str = "mean_l1"
     clean_flow_3d_smooth_weight: float = 0.0
     guide_root_count: int = 0
     guide_candidate_multiplier: float = 8.0
@@ -1810,6 +1811,7 @@ class Stage1Config:
     lr_guide_view_sh: float = 2.0e-2
     view_gated_ownership_support: bool = False
     view_gate_geometry_support: bool = False
+    view_gate_length_confidence_support: bool = False
     view_gate_floor: float = 0.0
     view_gate_normalization: str = "raw_q95"
     render_length_prior_coordinate: str = "decoded"
@@ -1973,6 +1975,7 @@ def clean_flow_guide_length_anchor_loss(
     guide_clean_flow_length_confidence: torch.Tensor,
     source_area_weights: torch.Tensor | None = None,
     clean_flow_length_init_scale: float = 1.0,
+    reduction: str = "mean_l1",
 ) -> torch.Tensor:
     """Anchor primary-guide physical length to clean-flow data identity.
 
@@ -1982,6 +1985,12 @@ def clean_flow_guide_length_anchor_loss(
     and intrinsic source-area quadrature weights are detached from the loss.
     """
 
+    reduction = str(reduction)
+    if reduction not in {"mean_l1", "tail_concentration"}:
+        raise ValueError(
+            "clean-flow guide length anchor reduction must be mean_l1 or "
+            "tail_concentration"
+        )
     raw = guide_length_raw.reshape(-1)
     reference = guide_length_reference.to(
         device=raw.device,
@@ -2024,7 +2033,30 @@ def clean_flow_guide_length_anchor_loss(
     identity_target = target[reliable].detach() / scale
     weight = confidence[reliable].detach() * area[reliable].detach()
     error = torch.abs(torch.log(current[reliable] / identity_target))
-    return (error * weight).sum() / weight.sum().clamp_min(EPS)
+    weight_sum = weight.sum().clamp_min(EPS)
+    weighted_mean_abs = (error * weight).sum() / weight_sum
+    if reduction == "mean_l1":
+        return weighted_mean_abs
+
+    weighted_l2 = (
+        (error.square() * weight).sum() / weight_sum
+        + torch.as_tensor(
+            torch.finfo(error.dtype).tiny,
+            device=error.device,
+            dtype=error.dtype,
+        )
+    ).sqrt()
+    weighted_l2 = weighted_l2 - torch.as_tensor(
+        torch.finfo(error.dtype).tiny,
+        device=error.device,
+        dtype=error.dtype,
+    ).sqrt()
+    weighted_l4 = fourth_moment_norm(error, weight)
+    concentration = (weighted_l4 - weighted_l2).clamp_min(0.0)
+    active = weight > 0.0
+    if not bool(active.any()) or bool(torch.all(error[active] == error[active][0])):
+        concentration = concentration * 0.0
+    return weighted_mean_abs + concentration
 
 
 def primary_guide_length_anchor_metrics(
@@ -2049,6 +2081,7 @@ def primary_guide_length_anchor_metrics(
         model.guide_clean_flow_length_confidence,
         source_area_weights,
         config.clean_flow_length_init_scale,
+        reduction=config.clean_flow_guide_length_anchor_reduction,
     )
     fraction = clean_flow_guide_length_anchor_reliable_fraction(
         model.guide_clean_flow_length_target,
@@ -2096,11 +2129,15 @@ class WhiteTigerStage1Model(torch.nn.Module):
         guide_curl_residual_scale: float = 1.0,
         shape_curl_scale: float = 1.0,
         view_gate_geometry_support: bool = False,
+        view_gate_length_confidence_support: bool = False,
     ) -> None:
         super().__init__()
         self.max_child_count = max(1, int(max_child_count))
         self.local_child_color_scale = float(local_child_color_scale)
         self.view_gate_geometry_support = bool(view_gate_geometry_support)
+        self.view_gate_length_confidence_support = bool(
+            view_gate_length_confidence_support
+        )
         self.gaussian_rgb_residual_multiplier = 1.0
         if bool(gaussian_rgb_residual_support) and self.max_child_count != 1:
             raise ValueError(
@@ -3162,7 +3199,32 @@ class WhiteTigerStage1Model(torch.nn.Module):
         root_tangents: torch.Tensor,
         root_bitangents: torch.Tensor,
         support: SurfaceSupport | None = None,
+        length_gradient_confidence: torch.Tensor | None = None,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor | None]:
+        if length_gradient_confidence is not None:
+            if not isinstance(length_gradient_confidence, torch.Tensor):
+                raise TypeError("length gradient confidence must be a tensor")
+            guide_count = int(self.guide_points_local.shape[0])
+            if tuple(length_gradient_confidence.shape) not in {
+                (guide_count,),
+                (guide_count, 1),
+            }:
+                raise ValueError(
+                    "length gradient confidence must have shape [G] or [G, 1]"
+                )
+            length_gradient_confidence = length_gradient_confidence.to(
+                device=self.vertices.device,
+                dtype=self.vertices.dtype,
+            ).reshape(-1, 1)
+            if not bool(torch.isfinite(length_gradient_confidence).all()):
+                raise ValueError("length gradient confidence must be finite")
+            if bool(
+                (
+                    (length_gradient_confidence < 0.0)
+                    | (length_gradient_confidence > 1.0)
+                ).any()
+            ):
+                raise ValueError("length gradient confidence must lie in [0, 1]")
         if not self.guide_enabled():
             return {}, None
         if self._guide_surface_interpolator is None:
@@ -3212,6 +3274,11 @@ class WhiteTigerStage1Model(torch.nn.Module):
             ),
             "clump_strength": GroomParameterField._decode_range(self.guide_clump_strength_raw, ranges.clump_strength),
         }
+        if length_gradient_confidence is not None:
+            guide_values["length"] = straight_through_gate(
+                guide_values["length"],
+                length_gradient_confidence,
+            )
         guide_direction = self.guide_direction_world()
         if guide_direction is not None:
             guide_normals, _, _ = self.guide_normals_and_tangent_frames()
@@ -3237,6 +3304,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         root_normals: torch.Tensor,
         root_tangents: torch.Tensor,
         root_bitangents: torch.Tensor,
+        length_gradient_confidence: torch.Tensor | None = None,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor | None]:
         if int(roots_local.shape[0]) != int(self.anchor_local.shape[0]):
             raise RuntimeError("guide interpolation root count does not match render root support count")
@@ -3247,6 +3315,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             root_tangents,
             root_bitangents,
             support=self.guide_interpolation_support(),
+            length_gradient_confidence=length_gradient_confidence,
         )
 
     @torch.no_grad()
@@ -3511,6 +3580,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
         root_face_ids: torch.Tensor | None = None,
         guide_support: SurfaceSupport | None = None,
         residual_sample_override: InterpolatedGeometryResiduals | None = None,
+        length_gradient_confidence: torch.Tensor | None = None,
     ):
         if not self.guide_enabled():
             return self.apply_shape_detail_gate(groom)
@@ -3525,6 +3595,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 normals,
                 tangents,
                 bitangents,
+                length_gradient_confidence=length_gradient_confidence,
             )
         else:
             if root_face_ids is None:
@@ -3536,6 +3607,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
                 tangents,
                 bitangents,
                 support=guide_support,
+                length_gradient_confidence=length_gradient_confidence,
             )
         residual_sample = residual_sample_override
         if residual_sample is None:
@@ -3901,7 +3973,16 @@ class WhiteTigerStage1Model(torch.nn.Module):
             if view_gate is None
             else straight_through_gate(roots_local, view_gate)
         )
-        groom = self.apply_guide_controls(self.groom.decode(), guide_sample_local)
+        length_gradient_confidence = (
+            self.guide_clean_flow_length_confidence
+            if view_gate is not None and self.view_gate_length_confidence_support
+            else None
+        )
+        groom = self.apply_guide_controls(
+            self.groom.decode(),
+            guide_sample_local,
+            length_gradient_confidence=length_gradient_confidence,
+        )
         if view_gate is not None and self.view_gate_geometry_support:
             groom = straight_through_gate_geometry(groom, view_gate)
         curl_enabled = (
@@ -4934,6 +5015,9 @@ def initialize_view_gate(
     return {
         "view_gated_ownership_support": 1,
         "view_gate_geometry_support": int(bool(config.view_gate_geometry_support)),
+        "view_gate_length_confidence_support": int(
+            bool(config.view_gate_length_confidence_support)
+        ),
         **ownership.report(
             train_indices,
             mode=str(config.view_gate_normalization),
@@ -6846,6 +6930,7 @@ def build_stage1_model_from_checkpoint(
         guide_view_sh_support=config.guide_view_sh_support,
         guide_view_sh_scale=config.guide_view_sh_scale,
         view_gate_geometry_support=config.view_gate_geometry_support,
+        view_gate_length_confidence_support=config.view_gate_length_confidence_support,
         guide_face_ids=guide_face_ids,
         guide_barycentric=guide_barycentric,
         guide_region_ids=guide_region_ids,
@@ -7238,7 +7323,33 @@ def validate_guide_view_sh_config(config: Stage1Config) -> None:
         raise ValueError("guide-view SH does not yet support guide-root lifecycle changes")
 
 
+def validate_view_gate_length_confidence_config(config: Stage1Config) -> None:
+    if not config.view_gate_length_confidence_support:
+        return
+    if not config.view_gate_geometry_support:
+        raise ValueError(
+            "view-gate length confidence support requires view-gate geometry support"
+        )
+    if not config.view_gated_ownership_support:
+        raise ValueError(
+            "view-gate length confidence support requires view-gated ownership support"
+        )
+    if int(config.guide_root_count) <= 0 or not bool(config.guide_roots_from_clean_flow):
+        raise ValueError(
+            "view-gate length confidence support requires clean-flow-owned primary guides"
+        )
+    if not bool(config.clean_flow_length_init):
+        raise ValueError(
+            "view-gate length confidence support requires clean-flow length init"
+        )
+    if not config.clean_flow_target.strip():
+        raise ValueError(
+            "view-gate length confidence support requires --clean-flow-target"
+        )
+
+
 def validate_view_gated_ownership_config(config: Stage1Config) -> None:
+    validate_view_gate_length_confidence_config(config)
     floor = float(config.view_gate_floor)
     if config.view_gate_geometry_support and not config.view_gated_ownership_support:
         raise ValueError(
@@ -7282,6 +7393,17 @@ def validate_clean_flow_guide_length_anchor_config(config: Stage1Config) -> None
     if not math.isfinite(weight) or weight < 0.0:
         raise ValueError(
             "clean-flow guide length anchor weight must be finite and non-negative"
+        )
+    reduction = str(config.clean_flow_guide_length_anchor_reduction)
+    if reduction not in {"mean_l1", "tail_concentration"}:
+        raise ValueError(
+            "clean-flow guide length anchor reduction must be mean_l1 or "
+            "tail_concentration"
+        )
+    if reduction == "tail_concentration" and weight <= 0.0:
+        raise ValueError(
+            "tail_concentration clean-flow guide length anchor reduction "
+            "requires a positive guide length anchor weight"
         )
     if weight == 0.0:
         return
@@ -7714,6 +7836,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         guide_view_sh_support=config.guide_view_sh_support,
         guide_view_sh_scale=config.guide_view_sh_scale,
         view_gate_geometry_support=config.view_gate_geometry_support,
+        view_gate_length_confidence_support=config.view_gate_length_confidence_support,
         guide_face_ids=guide_surface_roots.face_ids if guide_surface_roots is not None else None,
         guide_barycentric=guide_surface_roots.barycentric if guide_surface_roots is not None else None,
         guide_region_ids=guide_region_ids,
@@ -7960,6 +8083,7 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
         view_gate_report = {
             "view_gated_ownership_support": 0,
             "view_gate_geometry_support": 0,
+            "view_gate_length_confidence_support": 0,
         }
     (output_dir / "view_gate_report.json").write_text(
         json.dumps(view_gate_report, indent=2) + "\n",
@@ -9326,6 +9450,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
     )
+    parser.add_argument(
+        "--clean-flow-guide-length-anchor-reduction",
+        choices=("mean_l1", "tail_concentration"),
+        default="mean_l1",
+    )
     parser.add_argument("--clean-flow-3d-smooth-weight", type=float, default=0.0)
     parser.add_argument("--guide-root-count", type=int, default=0)
     parser.add_argument("--guide-candidate-multiplier", type=float, default=8.0)
@@ -9370,6 +9499,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr-guide-view-sh", type=float, default=2.0e-2)
     parser.add_argument("--view-gated-ownership-support", action="store_true")
     parser.add_argument("--view-gate-geometry-support", action="store_true")
+    parser.add_argument("--view-gate-length-confidence-support", action="store_true")
     parser.add_argument("--view-gate-floor", type=float, default=0.0)
     parser.add_argument(
         "--view-gate-normalization",
@@ -9570,6 +9700,9 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         clean_flow_guide_length_anchor_weight=(
             args.clean_flow_guide_length_anchor_weight
         ),
+        clean_flow_guide_length_anchor_reduction=(
+            args.clean_flow_guide_length_anchor_reduction
+        ),
         clean_flow_3d_smooth_weight=args.clean_flow_3d_smooth_weight,
         guide_root_count=args.guide_root_count,
         guide_candidate_multiplier=args.guide_candidate_multiplier,
@@ -9600,6 +9733,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         lr_guide_view_sh=args.lr_guide_view_sh,
         view_gated_ownership_support=args.view_gated_ownership_support,
         view_gate_geometry_support=args.view_gate_geometry_support,
+        view_gate_length_confidence_support=args.view_gate_length_confidence_support,
         view_gate_floor=args.view_gate_floor,
         view_gate_normalization=args.view_gate_normalization,
         render_length_prior_coordinate=args.render_length_prior_coordinate,

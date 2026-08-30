@@ -176,6 +176,17 @@ length-confidence-specific image-gradient gate and a tail-concentration anchor
 are required. R075 remains accepted. See
 `docs/r077_confidence_owned_length.md`.
 
+R078 is the active bounded 0-3k treatment for the two attributed R077
+omissions. It inherits R077 and adds exactly
+`VIEW_GATE_LENGTH_CONFIDENCE_SUPPORT=1` and
+`CLEAN_FLOW_GUIDE_LENGTH_ANCHOR_REDUCTION=tail_concentration`. The first gates
+only each source guide's render-path decoded-length gradient by stored length
+confidence before exact surface interpolation; anchor and surface propagation
+remain active. The second retains weight `0.080` and adds weighted `L4-L2`
+concentration to the existing mean absolute natural-log ratio, targeting sparse
+tails without a physical endpoint. See
+`docs/r078_length_confidence_tail.md`.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049
