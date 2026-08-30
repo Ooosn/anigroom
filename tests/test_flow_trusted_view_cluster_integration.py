@@ -387,8 +387,8 @@ def test_confidence_guided_flow_runs_after_postratio_with_trusted_global_evidenc
         "edge_u": "postratio_result['edge_u']",
         "edge_v": "postratio_result['edge_v']",
         "field_confidence": "trusted_result['final_confidence']",
-        "unary_normalized_margin": "global_result['unary_normalized_margin']",
-        "unary_vote_coherence": "global_result['unary_vote_coherence']",
+        "unary_normalized_margin": "global_unary['normalized_margin']",
+        "unary_vote_coherence": "global_unary['vote_coherence']",
         "canonical_rank": "global_result['canonical_rank']",
     }
 

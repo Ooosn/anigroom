@@ -229,3 +229,15 @@ fails if any confidence-guided edge becomes newly severe.
 Only after formal Panda and White targets pass fixed-view arrows and canonical
 asset inspection may a new from-zero H100 training run begin. The frozen R073
 3k experiment must not be resumed as a substitute for that from-zero gate.
+
+### Formal attempt ledger
+
+The first HGC attempt from source `02a175e` passed all 408 server tests and
+entered Panda fusion, then failed before writing any target because the tool
+read `normalized_margin` and `vote_coherence` as top-level global-result keys.
+The global-sign API stores both under its validated `unary` mapping. Panda's
+created output directory was empty, White never started, and no hash or visual
+was produced. The held H100 qlogin remained running and idle. The failed
+runtime is retained at
+`/home/wangyy/anigroom-confidence-guided-v8-20260830` as evidence; retries must
+use a new runtime rather than overwrite it.
