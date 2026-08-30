@@ -183,7 +183,7 @@ assert config["guide_length_freeze_until"] == 0
 assert config["guide_freeze_until"] == 9000
 assert config["root_count"] == 400000
 assert config["child_count"] == 1
-assert config["iterations"] == 3000
+assert config["iterations"] == 1
 assert clean["clean_flow_source"] == target
 assert config["view_gated_ownership_support"] is True
 assert config["view_gate_floor"] == 0.0
@@ -203,7 +203,8 @@ print(json.dumps({
         "guide_length_freeze_until": config["guide_length_freeze_until"],
         "guide_freeze_until": config["guide_freeze_until"],
         "root_count": config["root_count"],
-        "iterations": config["iterations"],
+        "preflight_iterations": config["iterations"],
+        "training_checkpoint_iteration": 3000,
     },
     "gate": gate,
     "clean_flow": clean,

@@ -57,3 +57,15 @@ scale, both freeze settings, root population, and iteration-1 metric flags
 pass together. R074 and R075 remain the comparison controls; this experiment
 does not change the V8 target, root population, view ownership, or later-stage
 schedule.
+
+## Attempt ledger
+
+The first H100 launch passed all 426 tests and the native one-iteration
+full-resolution preflight. It then stopped before training because the outer
+launcher incorrectly asserted that the preflight's saved `iterations` field
+must be 3000. `STAGE1_PREFLIGHT_ONLY=1` intentionally resolves that field to
+1. The useful preflight evidence is valid: `guide_length_frozen=false`,
+`guide_frozen=true`, effective length mean `0.0109705`, 400000 roots, finite
+gradients, and 7111.63 MB peak allocation. No checkpoint or training output was
+created. The retry requires `preflight iterations=1`; the inherited config and
+required `checkpoint_003000.pt` retain the formal 3k training contract.
