@@ -1820,6 +1820,7 @@ class Stage1Config:
     guide_coverage_residual_unlock_end: int = 0
     guide_coverage_residual_initial_multiplier: float = 1.0
     guide_freeze_until: int = 0
+    guide_length_freeze_until: int = -1
     shape_detail_freeze_until: int = 0
     shape_detail_unlock_end: int = 0
     secondary_shape_residual_unlock_start: int = 0
@@ -5974,22 +5975,32 @@ def zero_color_gradients(model: WhiteTigerStage1Model) -> None:
             param.grad.zero_()
 
 
-def zero_guide_gradients(model: WhiteTigerStage1Model) -> None:
+def zero_guide_gradients(
+    model: WhiteTigerStage1Model,
+    *,
+    freeze_length: bool = True,
+    freeze_other: bool = True,
+) -> None:
     if not model.guide_enabled():
         return
-    params = [
-        model.guide_length_raw,
-        model.guide_root_width_raw,
-        model.guide_tip_width_ratio_raw,
-        model.guide_width_taper_raw,
-        model.guide_brush_stiffness_raw,
-        model.guide_curl_radius_ratio_raw,
-        model.guide_curl_turns_raw,
-        model.guide_child_radius_raw,
-        model.guide_clump_strength_raw,
-    ]
-    if model.guide_direction_local_raw is not None:
-        params.append(model.guide_direction_local_raw)
+    params: list[torch.nn.Parameter] = []
+    if bool(freeze_length):
+        params.append(model.guide_length_raw)
+    if bool(freeze_other):
+        params.extend(
+            [
+                model.guide_root_width_raw,
+                model.guide_tip_width_ratio_raw,
+                model.guide_width_taper_raw,
+                model.guide_brush_stiffness_raw,
+                model.guide_curl_radius_ratio_raw,
+                model.guide_curl_turns_raw,
+                model.guide_child_radius_raw,
+                model.guide_clump_strength_raw,
+            ]
+        )
+        if model.guide_direction_local_raw is not None:
+            params.append(model.guide_direction_local_raw)
     for param in params:
         if param is not None and param.grad is not None:
             param.grad.zero_()
@@ -6515,6 +6526,11 @@ def guide_coverage_residual_multiplier_for_iteration(config: Stage1Config, itera
         start=start,
         end=end,
     )
+
+
+def resolved_guide_length_freeze_until(config: Stage1Config) -> int:
+    configured = int(config.guide_length_freeze_until)
+    return int(config.guide_freeze_until) if configured < 0 else configured
 
 
 def shape_detail_multiplier_for_iteration(config: Stage1Config, iteration: int) -> float:
@@ -8377,8 +8393,21 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     infos=[render_info],
                     residual_per_root=residual_per_root,
                 )
-            if int(config.guide_freeze_until) > 0 and iteration <= int(config.guide_freeze_until):
-                zero_guide_gradients(model)
+            guide_frozen = (
+                int(config.guide_freeze_until) > 0
+                and iteration <= int(config.guide_freeze_until)
+            )
+            guide_length_freeze_until = resolved_guide_length_freeze_until(config)
+            guide_length_frozen = (
+                guide_length_freeze_until > 0
+                and iteration <= guide_length_freeze_until
+            )
+            if guide_frozen or guide_length_frozen:
+                zero_guide_gradients(
+                    model,
+                    freeze_length=guide_length_frozen,
+                    freeze_other=guide_frozen,
+                )
             if (
                 model.uses_zero_centered_geometry()
                 and iteration <= int(config.guide_residual_unlock_start)
@@ -8704,7 +8733,8 @@ def train_white_tiger_stage1(config: Stage1Config) -> None:
                     "gaussian_rgb_residual_multiplier": float(
                         model.gaussian_rgb_residual_multiplier
                     ),
-                    "guide_frozen": bool(int(config.guide_freeze_until) > 0 and iteration <= int(config.guide_freeze_until)),
+                    "guide_frozen": bool(guide_frozen),
+                    "guide_length_frozen": bool(guide_length_frozen),
                     "shape_detail_frozen": bool(shape_detail_frozen),
                     "secondary_shape_residual_frozen": bool(
                         secondary_shape_residual_frozen
@@ -9128,6 +9158,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guide-coverage-residual-unlock-end", type=int, default=0)
     parser.add_argument("--guide-coverage-residual-initial-multiplier", type=float, default=1.0)
     parser.add_argument("--guide-freeze-until", type=int, default=0)
+    parser.add_argument("--guide-length-freeze-until", type=int, default=-1)
     parser.add_argument("--shape-detail-freeze-until", type=int, default=0)
     parser.add_argument("--shape-detail-unlock-end", type=int, default=0)
     parser.add_argument("--secondary-shape-residual-unlock-start", type=int, default=0)
@@ -9332,6 +9363,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         guide_coverage_residual_unlock_end=args.guide_coverage_residual_unlock_end,
         guide_coverage_residual_initial_multiplier=args.guide_coverage_residual_initial_multiplier,
         guide_freeze_until=args.guide_freeze_until,
+        guide_length_freeze_until=args.guide_length_freeze_until,
         shape_detail_freeze_until=args.shape_detail_freeze_until,
         shape_detail_unlock_end=args.shape_detail_unlock_end,
         secondary_shape_residual_unlock_start=(

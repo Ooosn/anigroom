@@ -212,6 +212,7 @@ for name in "${required_config[@]}"; do
   require_var "$name"
 done
 
+GUIDE_LENGTH_FREEZE_UNTIL="${GUIDE_LENGTH_FREEZE_UNTIL:-$GUIDE_FREEZE_UNTIL}"
 GAUSSIAN_RGB_RESIDUAL_SUPPORT="${GAUSSIAN_RGB_RESIDUAL_SUPPORT:-0}"
 RGB_FLOW_EXCLUDE_COLOR_GRADIENTS="${RGB_FLOW_EXCLUDE_COLOR_GRADIENTS:-0}"
 MESH_NO_PENETRATION_SUPPORT="${MESH_NO_PENETRATION_SUPPORT:-0}"
@@ -387,6 +388,7 @@ cmd=(
   --guide-coverage-residual-unlock-end "$GUIDE_COVERAGE_RESIDUAL_UNLOCK_END"
   --guide-coverage-residual-initial-multiplier "$GUIDE_COVERAGE_RESIDUAL_INITIAL_MULTIPLIER"
   --guide-freeze-until "$GUIDE_FREEZE_UNTIL"
+  --guide-length-freeze-until "$GUIDE_LENGTH_FREEZE_UNTIL"
   --shape-detail-freeze-until "$SHAPE_DETAIL_FREEZE_UNTIL"
   --shape-detail-unlock-end "$SHAPE_DETAIL_UNLOCK_END"
   --secondary-shape-residual-unlock-start "$SECONDARY_SHAPE_RESIDUAL_UNLOCK_START"

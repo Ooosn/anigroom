@@ -149,6 +149,15 @@ upper-back guide/render negative and >120-degree counts are all zero, with
 `0/4119` render chord-versus-guide reversals. No later training stage is
 authorized yet. See `docs/r075_full_shell_length.md`.
 
+R076 is the active timing candidate requested after the R075 ablation. It
+returns to R074's `400000` roots and `CLEAN_FLOW_LENGTH_INIT_SCALE=0.30`, keeps
+the V8 direction and every non-length guide attribute frozen through 9k, and
+changes only `GUIDE_LENGTH_FREEZE_UNTIL=0`. This tests whether the deliberately
+short coat learns its own length during the first 3k rather than receiving the
+R075 full-shell initialization. The new schedule field is strict-checkpoint
+schema state; R076 therefore trains from zero. No R076 result is accepted yet.
+See `docs/r076_early_guide_length.md`.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049
