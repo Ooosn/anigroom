@@ -99,9 +99,9 @@ and
 See `docs/v7_global_directed_flow.md` and
 `docs/panda_v5_multiview_discontinuity_20260827.md`.
 
-V8 confidence-guided directed propagation is the current pre-training
-candidate; V7 remains the accepted immutable target until formal V8 generation
-finishes. The Panda R073 experiment is frozen at 3k and must not continue:
+V8 confidence-guided directed propagation is the accepted formal pre-training
+target; V7 remains its immutable rollback. The Panda R073 experiment is frozen
+at 3k and must not continue:
 guide-direction residual strength is zero there, so its upper-back opposing
 flow is an initialization defect rather than a learned direction. Corrected
 root/edge attribution finds 87 negative edges in the user box, all inside one
@@ -110,15 +110,36 @@ global unary margin, and vote coherence through a canonical surface watershed,
 then performs a monotone stronger-confidence local cleanup. There are no
 species, region, view, or image-coordinate rules.
 
-On frozen local V7 Panda/white targets, observed negative/severe edges become
+On formal Panda/white targets, observed negative/severe edges become
 `594/233 -> 92/5` and `1104/246 -> 202/40`, with zero newly severe edges. The
 Panda user box becomes `87 -> 0` negative edges, including `41 -> 0`
-front-facing edges. Formal implementation reproduces the accepted prototype to
-`1.7881393e-7` maximum component error and retains protected confidence
-anchors. The opt-in launcher is
-`scripts/server/run_panda_white_confidence_guided_v8.sh`; full formal target,
-fixed-view, and canonical asset acceptance must pass before any new H100
-training. See `docs/panda_v8_confidence_guided_flow_20260830.md`.
+front-facing edges. Panda/white target SHA-256 values are respectively
+`5cb76945adb034e9666bfc98ae05647062d7ac4e3609e68162e561e4eebd54b1`
+and
+`92a6d496aa39e85272f35668967f82d34df7f884681ade4e336c07256b47a3d7`.
+Both pass fixed views `00/09/18/27`; formal implementation retains protected
+confidence anchors and introduces zero severe edges. R074 is the active
+target-only from-zero 3k gate: it inherits R073 exactly and changes only
+`CLEAN_FLOW_TARGET` from V7 to V8. Its H100 run completes at train/test
+composite `18.826702/18.988163`, `480292` render roots, `5160579` reload
+preclip Gaussians, and `9761.45 MB` peak allocation. Direction reconstruction
+mean/P95 improves from R073 `4.33902/17.37752 deg` to
+`4.02535/16.20302 deg`. No later stage is authorized until matched 100k and
+full-population assets pass flow, baldness, and noise inspection. The trained
+100k upper-back asset now has zero guide/render negative or >120-degree edges,
+so direction transfer passes. The full 480292-strand NPZ and 5160579-Gaussian
+PLY are complete; a 240k physical-width render proves export subsampling is one
+coverage factor, while the unchanged ~0.0111 mean strand length proves the
+inherited 0.30 length scale is the remaining short-coat variable. See
+`docs/panda_v8_confidence_guided_flow_20260830.md` and
+`docs/r074_v8_confidence_flow.md`.
+
+R075 is the next isolated 3k gate. It inherits R074 and changes only
+`CLEAN_FLOW_LENGTH_INIT_SCALE=0.30 -> 1.0`, restoring the formal target's own
+reliable shell-height range `0.02524-0.04706` instead of adding a Panda length
+cap or tuned multiplier. No R075 training result is accepted yet; flow,
+coverage, memory, lifecycle, and full-asset gates must all pass. See
+`docs/r075_full_shell_length.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual

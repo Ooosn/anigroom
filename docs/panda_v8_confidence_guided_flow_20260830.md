@@ -214,21 +214,41 @@ SHA-256:
 
 `1f582294fde1cc7a4bd47b477e56363ed46f6eaedd6650d8f1c25ca6d587b726`
 
-## Formal Generation Gate
+## Formal Generation Result
 
-The local candidate is diagnostic evidence, not yet an accepted immutable
-training target. The next step is to commit and review the source, then run:
+The reviewed HGC retry from source
+`bc8265716fb1493af73dc5a165a885df6e4aa915` completed Panda and White target
+generation on 2026-08-30. It ran all 410 source tests, preserved the V7 data and
+fusion arguments, selected the V8 mode explicitly, verified 113 NPZ entries,
+and introduced zero new severe edges.
 
-`scripts/server/run_panda_white_confidence_guided_v8.sh`
+Formal Panda target:
 
-The launcher preserves V7 data and fusion arguments, selects the V8 mode
-explicitly, runs the full test suite, refuses a dirty or mismatched source
-commit, refuses output overwrite, verifies every NPZ diagnostic contract, and
-fails if any confidence-guided edge becomes newly severe.
+`/home/wangyy/anigroom-confidence-guided-v8-20260830-retry1/outputs/panda_v8_confidence_guided/guide_flow3d_shell_targets_exclude_004_024_025.npz`
 
-Only after formal Panda and White targets pass fixed-view arrows and canonical
-asset inspection may a new from-zero H100 training run begin. The frozen R073
-3k experiment must not be resumed as a substitute for that from-zero gate.
+SHA-256:
+
+`5cb76945adb034e9666bfc98ae05647062d7ac4e3609e68162e561e4eebd54b1`
+
+Formal White target:
+
+`/home/wangyy/anigroom-confidence-guided-v8-20260830-retry1/outputs/white_v8_confidence_guided/guide_flow3d_shell_targets_exclude_004_024_025.npz`
+
+SHA-256:
+
+`92a6d496aa39e85272f35668967f82d34df7f884681ade4e336c07256b47a3d7`
+
+Formal changed-root counts are 842 / 810 for Panda / White. Their observed
+negative/severe counts exactly reproduce the accepted `594/233 -> 92/5` and
+`1104/246 -> 202/40` results. Fixed views `00/09/18/27` were generated for
+both samples without exception or OOM. The formal Panda target re-ran the user
+box at all/front/back negative counts `0/0/0` and >120-degree counts `0/0/0`.
+Its local overlay SHA-256 is identical to the accepted prototype:
+
+`ff041c0c001f1ac3e6c79e18d834f8dde120108214e78104d3d6af745cbe44a9`
+
+The immutable target gate is therefore complete. R074 is the from-zero 3k
+training/asset gate; the frozen R073 checkpoint is not resumed.
 
 ### Formal attempt ledger
 
@@ -241,3 +261,8 @@ was produced. The held H100 qlogin remained running and idle. The failed
 runtime is retained at
 `/home/wangyy/anigroom-confidence-guided-v8-20260830` as evidence; retries must
 use a new runtime rather than overwrite it.
+
+The retry used the new runtime
+`/home/wangyy/anigroom-confidence-guided-v8-20260830-retry1` and completed with
+`ALL_DONE` at `2026-08-30T18:20:56+09:00`. The qlogin allocation remained
+running and was not released.
