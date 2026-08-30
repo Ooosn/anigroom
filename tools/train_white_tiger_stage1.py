@@ -33,7 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 ACTIVATION_CHECKPOINT_MAX_DEVICE_MEMORY_BYTES = 48 * 1024**3
-CURRENT_CHECKPOINT_VERSION = 11
+CURRENT_CHECKPOINT_VERSION = 12
 
 
 def memory_constrained_activation_checkpointing(device: torch.device) -> bool:
@@ -1808,6 +1808,7 @@ class Stage1Config:
     lr_guide_view_sh: float = 2.0e-2
     view_gated_ownership_support: bool = False
     view_gate_floor: float = 0.0
+    view_gate_normalization: str = "raw_q95"
     render_length_prior_coordinate: str = "decoded"
     render_length_prior_reduction: str = "mean_l1"
     guide_smooth_weight: float = 0.0
@@ -3148,11 +3149,13 @@ class WhiteTigerStage1Model(torch.nn.Module):
             raise ValueError("view gate view indices must be unique")
         if not bool(torch.isfinite(gate).all()):
             raise ValueError("view gate must be finite")
+        if bool((gate < 0.0).any()):
+            raise ValueError("view gate must be non-negative")
         floor = float(floor)
         if not (0.0 <= floor <= 1.0):
             raise ValueError(f"view gate floor must lie in [0, 1], got {floor}")
         self.view_gate_view_indices_cache = view_indices.detach()
-        self.view_gate_cache = gate.detach().clamp(0.0, 1.0)
+        self.view_gate_cache = gate.detach().clamp_min(0.0)
         self.view_gate_floor = floor
 
     def view_gate_enabled(self) -> bool:
@@ -3195,7 +3198,7 @@ class WhiteTigerStage1Model(torch.nn.Module):
             support,
         )
         gate = interpolate_physical(guide_gate, support.indices, weights)
-        return gate.reshape(-1, 1).clamp(0.0, 1.0)
+        return gate.reshape(-1, 1).clamp_min(0.0)
 
     def set_guide_view_sh_confidence(
         self,
@@ -4798,14 +4801,17 @@ def initialize_view_gate(
         confidence=trusted,
         floor=float(config.view_gate_floor),
     )
-    gate = torch.stack(
-        [ownership.guide_gate(int(view)) for view in trusted.view_indices.tolist()],
-        dim=0,
+    gate = ownership.cache_matrix(
+        train_indices,
+        mode=str(config.view_gate_normalization),
     )
     model.set_view_gate(trusted.view_indices, gate, float(config.view_gate_floor))
     return {
         "view_gated_ownership_support": 1,
-        **ownership.report(train_indices),
+        **ownership.report(
+            train_indices,
+            mode=str(config.view_gate_normalization),
+        ),
     }
 
 
@@ -7097,13 +7103,26 @@ def validate_view_gated_ownership_config(config: Stage1Config) -> None:
             raise ValueError(
                 "view gate floor must be zero while view-gated ownership is disabled"
             )
+        if str(config.view_gate_normalization) != "raw_q95":
+            raise ValueError(
+                "view gate normalization must be raw_q95 while support is disabled"
+            )
         return
+    if str(config.view_gate_normalization) not in {
+        "raw_q95",
+        "equal_owner_budget",
+    }:
+        raise ValueError(
+            "view gate normalization must be raw_q95 or equal_owner_budget"
+        )
     if int(config.guide_root_count) <= 0 or not bool(config.guide_roots_from_clean_flow):
         raise ValueError("view-gated ownership requires clean-flow-owned primary guides")
     if not config.clean_flow_target.strip():
         raise ValueError("view-gated ownership requires --clean-flow-target")
     if not (0.0 <= floor <= 1.0):
         raise ValueError(f"view gate floor must lie in [0, 1], got {floor}")
+    if str(config.view_gate_normalization) == "equal_owner_budget" and floor != 0.0:
+        raise ValueError("equal_owner_budget requires view gate floor 0")
     if int(config.guide_densify_interval) > 0:
         raise ValueError(
             "view-gated ownership does not yet support guide-root lifecycle changes"
@@ -9077,6 +9096,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--view-gated-ownership-support", action="store_true")
     parser.add_argument("--view-gate-floor", type=float, default=0.0)
     parser.add_argument(
+        "--view-gate-normalization",
+        choices=("raw_q95", "equal_owner_budget"),
+        default="raw_q95",
+    )
+    parser.add_argument(
         "--render-length-prior-coordinate",
         choices=("decoded", "natural_log_ratio", "raw"),
         default="decoded",
@@ -9296,6 +9320,7 @@ def config_from_args(args: argparse.Namespace) -> Stage1Config:
         lr_guide_view_sh=args.lr_guide_view_sh,
         view_gated_ownership_support=args.view_gated_ownership_support,
         view_gate_floor=args.view_gate_floor,
+        view_gate_normalization=args.view_gate_normalization,
         render_length_prior_coordinate=args.render_length_prior_coordinate,
         render_length_prior_reduction=args.render_length_prior_reduction,
         guide_smooth_weight=args.guide_smooth_weight,

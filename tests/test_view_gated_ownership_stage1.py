@@ -176,6 +176,16 @@ def test_render_root_gate_is_interpolated_into_the_unit_interval() -> None:
     assert float(gate.max() - gate.min()) > 0.0
 
 
+def test_render_root_multiplier_preserves_amplification() -> None:
+    model = make_model()
+    install_gate(model, [7.5, 3.0])
+    _, _, roots_local = model.roots_and_normals()
+    multiplier = model.view_gate_at_render_roots(roots_local, TRUSTED_VIEW)
+    assert float(multiplier.min()) >= 3.0
+    assert float(multiplier.max()) <= 7.5
+    assert float(multiplier.max()) > 1.0
+
+
 def test_gradient_disabled_rendering_does_not_require_a_view_index() -> None:
     model = make_model()
     install_gate(model, [1.0, 0.0])
@@ -212,10 +222,17 @@ def test_set_view_gate_rejects_invalid_state() -> None:
     with pytest.raises(ValueError):
         model.set_view_gate(torch.tensor([1]), torch.full((1, 2), float("nan")), 0.0)
     with pytest.raises(ValueError):
+        model.set_view_gate(torch.tensor([1]), torch.full((1, 2), -0.1), 0.0)
+    with pytest.raises(ValueError):
         model.set_view_gate(torch.tensor([1]), torch.zeros((1, 2)), 1.5)
 
 
-def make_config(*, support: bool, floor: float = 0.0) -> Stage1Config:
+def make_config(
+    *,
+    support: bool,
+    floor: float = 0.0,
+    normalization: str = "raw_q95",
+) -> Stage1Config:
     return Stage1Config(
         data_root="data",
         mesh_path="mesh.obj",
@@ -226,6 +243,7 @@ def make_config(*, support: bool, floor: float = 0.0) -> Stage1Config:
         clean_flow_target="target.npz",
         view_gated_ownership_support=support,
         view_gate_floor=floor,
+        view_gate_normalization=normalization,
         render_geometry_parameterization="zero_centered_residual",
         guide_length_residual_scale=0.18,
         guide_direction_residual_scale=0.10,
@@ -253,3 +271,25 @@ def test_config_validation_requires_clean_flow_guides() -> None:
 def test_disabled_support_forbids_a_nonzero_floor() -> None:
     with pytest.raises(ValueError, match="must be zero"):
         validate_view_gated_ownership_config(make_config(support=False, floor=0.5))
+
+
+def test_budget_normalization_requires_zero_floor_and_valid_mode() -> None:
+    validate_view_gated_ownership_config(
+        make_config(support=True, normalization="equal_owner_budget")
+    )
+    with pytest.raises(ValueError, match="requires view gate floor 0"):
+        validate_view_gated_ownership_config(
+            make_config(
+                support=True,
+                floor=0.1,
+                normalization="equal_owner_budget",
+            )
+        )
+    with pytest.raises(ValueError, match="normalization"):
+        validate_view_gated_ownership_config(
+            make_config(support=True, normalization="unknown")
+        )
+    with pytest.raises(ValueError, match="raw_q95"):
+        validate_view_gated_ownership_config(
+            make_config(support=False, normalization="equal_owner_budget")
+        )

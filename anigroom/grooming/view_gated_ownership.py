@@ -7,9 +7,9 @@ the granularity comes from thirty views competing over the same pre-9k degrees
 of freedom, not from appearance alone.
 
 This module keeps the accepted V7 trusted-view evidence as the only source of
-ownership and exposes it as a gradient gate. The forward value is never
-modified, so a gate of one reproduces the parent run exactly and any measured
-difference is attributable to gradient ownership alone.
+ownership and exposes it as a gradient multiplier. The forward value is never
+modified, so a multiplier of one reproduces the parent run exactly and any
+measured difference is attributable to gradient ownership alone.
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ def straight_through_gate(value: torch.Tensor, gate: torch.Tensor) -> torch.Tens
     gate = gate.to(device=value.device, dtype=value.dtype)
     if not bool(torch.isfinite(gate).all()):
         raise ValueError("gate must be finite")
-    if bool((gate < 0.0).any()) or bool((gate > 1.0).any()):
-        raise ValueError("gate must lie in [0, 1]")
+    if bool((gate < 0.0).any()):
+        raise ValueError("gate must be non-negative")
     try:
         gate = torch.broadcast_to(gate, value.shape)
     except RuntimeError as exc:
@@ -92,13 +92,81 @@ class ViewGatedOwnership:
             return raw
         return raw * (1.0 - floor) + floor
 
-    def report(self, view_indices: list[int] | tuple[int, ...]) -> dict:
+    def cache_matrix(
+        self,
+        training_view_indices: list[int] | tuple[int, ...],
+        *,
+        mode: str = "raw_q95",
+    ) -> torch.Tensor:
+        """Return a ``[V,G]`` matrix aligned to ``confidence.view_indices``.
+
+        ``raw_q95`` reproduces R072 exactly. ``equal_owner_budget`` keeps the
+        same nonzero trusted support but gives each owner of guide ``g`` the
+        multiplier ``N_train / k_g``. Uniform sampling over the concrete
+        training-view list then has expected multiplier one for every guide
+        with at least one owner, without introducing a tuned scale.
+        """
+
+        requested = [int(value) for value in training_view_indices]
+        if not requested:
+            raise ValueError("training_view_indices must not be empty")
+        if len(set(requested)) != len(requested):
+            raise ValueError("training_view_indices must be unique")
+        if mode == "raw_q95":
+            return torch.stack(
+                [
+                    self.guide_gate(int(view))
+                    for view in self.confidence.view_indices.tolist()
+                ],
+                dim=0,
+            )
+        if mode != "equal_owner_budget":
+            raise ValueError(f"unsupported ownership normalization mode: {mode}")
+        if float(self.floor) != 0.0:
+            raise ValueError("equal_owner_budget requires floor=0")
+
+        requested_set = set(requested)
+        in_training = torch.tensor(
+            [
+                int(view) in requested_set
+                for view in self.confidence.view_indices.detach().cpu().tolist()
+            ],
+            device=self.confidence.confidence.device,
+            dtype=torch.bool,
+        )
+        support = (self.confidence.confidence > 0.0) & in_training[:, None]
+        owner_count = support.sum(dim=0)
+        multiplier = torch.where(
+            owner_count > 0,
+            owner_count.new_full(owner_count.shape, len(requested), dtype=torch.float32)
+            / owner_count.clamp_min(1).to(dtype=torch.float32),
+            owner_count.new_zeros(owner_count.shape, dtype=torch.float32),
+        ).to(device=self.confidence.confidence.device, dtype=self.confidence.confidence.dtype)
+        return support.to(dtype=self.confidence.confidence.dtype) * multiplier[None]
+
+    def report(
+        self,
+        view_indices: list[int] | tuple[int, ...],
+        *,
+        mode: str = "raw_q95",
+    ) -> dict:
         """Summarize how the trusted set covers a concrete training view list."""
 
         requested = [int(value) for value in view_indices]
         trusted = [value for value in requested if self.has_view(value)]
         untrusted = [value for value in requested if not self.has_view(value)]
-        gates = [self.guide_gate(value) for value in requested]
+        cache = self.cache_matrix(requested, mode=mode)
+        cache_views = {
+            int(view): cache[row]
+            for row, view in enumerate(self.confidence.view_indices.tolist())
+        }
+        gates = [
+            cache_views.get(
+                value,
+                self.confidence.confidence.new_zeros((self.guide_count,)),
+            )
+            for value in requested
+        ]
         stacked = (
             torch.stack(gates, dim=0)
             if gates
@@ -106,7 +174,19 @@ class ViewGatedOwnership:
         )
         owned = stacked > 0.0
         guide_support = owned.sum(dim=0) if owned.numel() else owned.new_zeros((self.guide_count,))
+        positive = stacked[stacked > 0.0]
+        supported = guide_support > 0
+        per_guide_expected = stacked.mean(dim=0) if stacked.numel() else stacked.new_zeros((self.guide_count,))
+        quantiles = (
+            torch.quantile(
+                positive,
+                positive.new_tensor([0.50, 0.90, 0.95, 0.99, 1.0]),
+            )
+            if positive.numel()
+            else positive.new_zeros((5,))
+        )
         return {
+            "normalization_mode": str(mode),
             "floor": float(self.floor),
             "requested_view_count": len(requested),
             "trusted_view_count": len(trusted),
@@ -120,6 +200,16 @@ class ViewGatedOwnership:
                 float(guide_support.float().mean()) if guide_support.numel() else 0.0
             ),
             "gate_mean": float(stacked.mean()) if stacked.numel() else 0.0,
+            "supported_guide_expected_multiplier_mean": (
+                float(per_guide_expected[supported].mean())
+                if bool(supported.any())
+                else 0.0
+            ),
+            "positive_multiplier_p50_p90_p95_p99_max": [
+                float(value) for value in quantiles.detach().cpu()
+            ],
+            "zero_owner_guide_count": int((~supported).sum()),
+            "zero_owner_guide_fraction": float((~supported).float().mean()),
             "source_path": self.confidence.source_path,
             "summary_path": self.confidence.summary_path,
         }

@@ -176,7 +176,7 @@ def test_zero_weight_keeps_config_path_inert_and_cli_wires_candidate() -> None:
     assert Stage1Config(data_root="data", mesh_path="mesh", output_dir="out").guide_support_gauge_weight == 0.0
     assert default_config.guide_support_gauge_weight == 0.0
     assert candidate_config.guide_support_gauge_weight == 0.001
-    assert CURRENT_CHECKPOINT_VERSION == 11
+    assert CURRENT_CHECKPOINT_VERSION == 12
 
 
 def test_r069_config_inherits_r068_and_assigns_only_gauge_weight() -> None:

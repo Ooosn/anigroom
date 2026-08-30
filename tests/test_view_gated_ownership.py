@@ -70,13 +70,18 @@ def test_gate_broadcasts_over_trailing_dimensions() -> None:
 def test_gate_rejects_invalid_values() -> None:
     value = torch.randn(4, 3, requires_grad=True)
     with pytest.raises(ValueError):
-        straight_through_gate(value, torch.full((4, 1), 1.5))
-    with pytest.raises(ValueError):
         straight_through_gate(value, torch.full((4, 1), -0.1))
     with pytest.raises(ValueError):
         straight_through_gate(value, torch.full((4, 1), float("nan")))
     with pytest.raises(ValueError):
         straight_through_gate(value, torch.ones(5, 1))
+
+
+def test_amplifying_multiplier_scales_gradient_exactly() -> None:
+    value = torch.randn(12, 3)
+    reference = grad_of(value, None)
+    amplified = grad_of(value, torch.full((12, 1), 7.5))
+    torch.testing.assert_close(amplified, reference * 7.5, rtol=0.0, atol=0.0)
 
 
 def test_guide_gate_returns_trusted_confidence() -> None:
@@ -133,3 +138,74 @@ def test_report_separates_trusted_and_untrusted_training_views() -> None:
     # guides 0 and 1 have an owner; guide 2 has none.
     assert report["guides_with_owner_fraction"] == pytest.approx(2.0 / 3.0)
     assert report["owner_views_per_guide_mean"] == pytest.approx(2.0 / 3.0)
+
+
+def test_equal_owner_budget_conserves_supported_guide_expectation() -> None:
+    ownership = ViewGatedOwnership(
+        confidence=make_confidence(
+            [1, 2, 3, 4],
+            [
+                [0.8, 0.0, 0.2, 0.0],
+                [0.1, 0.4, 0.0, 0.0],
+                [0.0, 0.6, 0.3, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+        )
+    )
+    training_views = [1, 2, 3, 4, 5, 6]
+    matrix = ownership.cache_matrix(training_views, mode="equal_owner_budget")
+    # guide 0 has two owners -> 6/2; guide 1 has two; guide 2 has two;
+    # guide 3 has no owner and remains zero.
+    torch.testing.assert_close(matrix[:, 0], torch.tensor([3.0, 3.0, 0.0, 0.0]))
+    torch.testing.assert_close(matrix[:, 1], torch.tensor([0.0, 3.0, 3.0, 0.0]))
+    torch.testing.assert_close(matrix[:, 2], torch.tensor([3.0, 0.0, 3.0, 0.0]))
+    torch.testing.assert_close(matrix[:, 3], torch.zeros(4))
+
+    # Include missing training views as zero rows when checking expectation.
+    full = torch.zeros((len(training_views), 4))
+    for row, view in enumerate(training_views):
+        if view in [1, 2, 3, 4]:
+            full[row] = matrix[[1, 2, 3, 4].index(view)]
+    torch.testing.assert_close(full[:, :3].mean(dim=0), torch.ones(3))
+    torch.testing.assert_close(full[:, 3], torch.zeros(6))
+
+    report = ownership.report(training_views, mode="equal_owner_budget")
+    assert report["normalization_mode"] == "equal_owner_budget"
+    assert report["supported_guide_expected_multiplier_mean"] == pytest.approx(1.0)
+    assert report["zero_owner_guide_count"] == 1
+    assert report["zero_owner_guide_fraction"] == pytest.approx(0.25)
+
+
+def test_equal_owner_budget_uses_n_over_k_and_ignores_nontraining_views() -> None:
+    ownership = ViewGatedOwnership(
+        confidence=make_confidence(
+            [1, 2, 9],
+            [
+                [1.0, 0.5],
+                [0.2, 0.0],
+                [1.0, 1.0],
+            ],
+        )
+    )
+    matrix = ownership.cache_matrix([1, 2, 3, 4], mode="equal_owner_budget")
+    # View 9 is not a training view and receives zero in the cache.
+    torch.testing.assert_close(matrix[2], torch.zeros(2))
+    # Guide 0 has two training owners -> 4/2; guide 1 has one -> 4.
+    torch.testing.assert_close(matrix[:, 0], torch.tensor([2.0, 2.0, 0.0]))
+    torch.testing.assert_close(matrix[:, 1], torch.tensor([4.0, 0.0, 0.0]))
+
+
+def test_equal_owner_budget_rejects_floor_and_invalid_mode() -> None:
+    confidence = make_confidence([1], [[1.0, 0.0]])
+    with pytest.raises(ValueError, match="floor=0"):
+        ViewGatedOwnership(confidence=confidence, floor=0.1).cache_matrix(
+            [1, 2], mode="equal_owner_budget"
+        )
+    with pytest.raises(ValueError, match="unsupported"):
+        ViewGatedOwnership(confidence=confidence).cache_matrix(
+            [1, 2], mode="mystery"
+        )
+    with pytest.raises(ValueError, match="unique"):
+        ViewGatedOwnership(confidence=confidence).cache_matrix(
+            [1, 1], mode="equal_owner_budget"
+        )
