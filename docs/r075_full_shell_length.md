@@ -65,3 +65,18 @@ regression against R074:
 
 The 3k gate is not a request for a new flow method or a later training stage.
 Any continuation requires this coverage/length gate to pass first.
+
+## HGC attempt ledger
+
+The first qsub attempt, job `127370930`, was accepted with
+`h100=1,mem_req=16G` and no `s_vmem`, but the H100 qsub environment did not
+inject `CUDA_VISIBLE_DEVICES`. The main launcher's safety requirement therefore
+exited in `0.454 s` before importing torch or creating the runtime
+(`exit_status=1`, `ru_maxrss=18448`). No training occurred.
+
+The correction is a qsub-only wrapper that reads the live `$JOB_ID` with
+`qstat -j`, extracts and deduplicates `granted_devices=/dev/nvidiaN`, requires
+exactly one physical device, exports that index, and only then enters the
+unchanged main launcher. It contains no hard-coded GPU index, qdel, kill,
+release, or scheduler-resource mutation. The failed log is retained; retry
+uses a new log and runtime.

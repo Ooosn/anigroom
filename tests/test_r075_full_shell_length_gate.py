@@ -8,6 +8,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs" / "r075_full_shell_length_0_3k_gate.env"
 R074_CONFIG = ROOT / "configs" / "r074_v8_confidence_flow_0_3k_gate.env"
 LAUNCHER = ROOT / "scripts" / "server" / "run_panda_r075_full_shell_length.sh"
+QSUB_WRAPPER = (
+    ROOT / "scripts" / "server" / "run_panda_r075_full_shell_length_qsub.sh"
+)
 R074_SOURCE = 'source "${CONFIG_DIR}/r074_v8_confidence_flow_0_3k_gate.env"'
 
 
@@ -120,3 +123,33 @@ def test_r075_launcher_enforces_v8_panda_3k_length_gate_contract() -> None:
     lowered = source.lower()
     for term in forbidden:
         assert term not in lowered, term
+
+
+def test_r075_qsub_wrapper_uses_the_single_scheduler_granted_device() -> None:
+    source = QSUB_WRAPPER.read_text(encoding="utf-8")
+
+    required = (
+        ': "${JOB_ID:?R075 qsub wrapper requires JOB_ID}"',
+        ': "${PROJECT_ROOT:?R075 qsub wrapper requires PROJECT_ROOT}"',
+        'job_detail="$(qstat -j "$JOB_ID")"',
+        "granted_devices",
+        "/dev\\/nvidia([0-9]+)",
+        '| sort -u',
+        '[[ "${#granted_devices[@]}" -ne 1 ]]',
+        'export CUDA_VISIBLE_DEVICES="${granted_devices[0]}"',
+        'nvidia-smi -i "$CUDA_VISIBLE_DEVICES"',
+        'exec bash "$PROJECT_ROOT/scripts/server/run_panda_r075_full_shell_length.sh"',
+    )
+    for fragment in required:
+        assert fragment in source
+
+    forbidden = (
+        "CUDA_VISIBLE_DEVICES=0",
+        "CUDA_VISIBLE_DEVICES=1",
+        "qdel",
+        "kill",
+        "release",
+        "s_vmem",
+    )
+    for fragment in forbidden:
+        assert fragment not in source
