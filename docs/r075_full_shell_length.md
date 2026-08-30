@@ -2,9 +2,9 @@
 
 Status date: 2026-08-30.
 
-Status: prepared/pending. The strict R075 config, launcher, contract tests, and
-acceptance record are prepared; the from-zero H100 0-3k run and asset gate are
-pending.
+Status: from-zero H100 0-3k run completed and checkpoint/reload gates passed.
+Matched/full-strand and full-3DGS asset export is pending; no later training
+stage is authorized yet.
 
 ## Question
 
@@ -66,6 +66,30 @@ regression against R074:
 The 3k gate is not a request for a new flow method or a later training stage.
 Any continuation requires this coverage/length gate to pass first.
 
+## H100 3k result
+
+Retry2 job `127371170` completed from zero with `failed=0`, `exit_status=0`,
+and no OOM/traceback. The exact result is:
+
+- train/test composite PSNR: `21.963490 / 21.913940`;
+- gain over R074: `+3.136788 / +2.925777 dB`;
+- effective length q05/q50/q95:
+  `0.029179 / 0.036531 / 0.042835`;
+- effective length min/max: `0.024463 / 0.046553`;
+- checkpoint/reload roots: `447462 / 449482`;
+- training/reload Gaussians: `5690498 / 5716077`;
+- peak allocated CUDA memory: `9644.07 MB`;
+- checkpoint SHA-256:
+  `779e5a18f852bfa24d927cbe1410090d22cfee036bcd6404ce60a293beb42193`.
+
+The measured length interval lies inside the formal reliable shell evidence
+and removes R074's ~`0.01111` mean short-coat state; measured arc mean is
+`0.037064`. Direction reconstruction is unchanged from R074 at mean/P95
+`4.02535/16.20302 deg`, and the equal-owner-budget view gate remains exact.
+The metric gain, lower peak memory, and finite lifecycle clear the numerical
+gate. Visual/full-asset coverage and the upper-back flow regression remain the
+final acceptance boundary.
+
 ## HGC attempt ledger
 
 The first qsub attempt, job `127370930`, was accepted with
@@ -88,3 +112,9 @@ main launcher, again with no runtime or training. The wrapper now records the
 single physical grant for audit, independently requires exactly one
 container-visible `nvidia-smi` index, and exports that local index. It still
 contains no fixed GPU ordinal.
+
+Retry2, job `127371170`, verified the final mapping: physical GPU2 was the sole
+scheduler grant and local CUDA ordinal 0 was the sole container-visible
+device. The job completed all tests, preflight, 3k training, checkpoint reload,
+and view-09 render on that isolated H100. The original qlogin job `127350058`
+and its separate GPU1 workload remained untouched.

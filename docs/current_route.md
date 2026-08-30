@@ -134,11 +134,16 @@ inherited 0.30 length scale is the remaining short-coat variable. See
 `docs/panda_v8_confidence_guided_flow_20260830.md` and
 `docs/r074_v8_confidence_flow.md`.
 
-R075 is the next isolated 3k gate. It inherits R074 and changes only
+R075 is the active isolated 3k asset gate. It inherits R074 and changes only
 `CLEAN_FLOW_LENGTH_INIT_SCALE=0.30 -> 1.0`, restoring the formal target's own
 reliable shell-height range `0.02524-0.04706` instead of adding a Panda length
-cap or tuned multiplier. No R075 training result is accepted yet; flow,
-coverage, memory, lifecycle, and full-asset gates must all pass. See
+cap or tuned multiplier. Its from-zero H100 run completes at train/test
+composite `21.963490/21.913940`, a `+3.136788/+2.925777 dB` gain over R074.
+Effective q05/q50/q95 length is `0.029179/0.036531/0.042835`, checkpoint roots
+are `447462`, reload Gaussians are `5716077`, and peak allocation is
+`9644.07 MB`. Direction reconstruction remains exactly at R074
+`4.02535/16.20302 deg` mean/P95. Numerical and reload gates pass; matched/full
+asset coverage and the user-region flow regression remain pending. See
 `docs/r075_full_shell_length.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
