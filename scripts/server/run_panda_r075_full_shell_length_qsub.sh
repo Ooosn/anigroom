@@ -16,8 +16,22 @@ if [[ "${#granted_devices[@]}" -ne 1 ]]; then
   exit 3
 fi
 
-export CUDA_VISIBLE_DEVICES="${granted_devices[0]}"
-echo "R075_QSUB_DEVICE JOB_ID=$JOB_ID CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+physical_granted_device="${granted_devices[0]}"
+unset CUDA_VISIBLE_DEVICES
+mapfile -t visible_devices < <(
+  nvidia-smi --query-gpu=index --format=csv,noheader,nounits \
+    | tr -d ' ' \
+    | sed '/^$/d' \
+    | sort -u
+)
+if [[ "${#visible_devices[@]}" -ne 1 ]]; then
+  echo "R075 expected exactly one container-visible NVIDIA device; got ${#visible_devices[@]}" >&2
+  nvidia-smi -L >&2 || true
+  exit 4
+fi
+
+export CUDA_VISIBLE_DEVICES="${visible_devices[0]}"
+echo "R075_QSUB_DEVICE JOB_ID=$JOB_ID PHYSICAL_GRANTED_DEVICE=$physical_granted_device CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 nvidia-smi -i "$CUDA_VISIBLE_DEVICES" \
   --query-gpu=index,name,memory.total,memory.used,utilization.gpu \
   --format=csv,noheader

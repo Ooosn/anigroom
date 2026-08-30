@@ -80,3 +80,11 @@ exactly one physical device, exports that index, and only then enters the
 unchanged main launcher. It contains no hard-coded GPU index, qdel, kill,
 release, or scheduler-resource mutation. The failed log is retained; retry
 uses a new log and runtime.
+
+Retry1, job `127371058`, proved a second scheduler boundary: `qstat` granted
+physical `/dev/nvidia2`, while the qsub container exposed that sole device as
+local ordinal `0`. Validating `nvidia-smi -i 2` therefore exited before the
+main launcher, again with no runtime or training. The wrapper now records the
+single physical grant for audit, independently requires exactly one
+container-visible `nvidia-smi` index, and exports that local index. It still
+contains no fixed GPU ordinal.

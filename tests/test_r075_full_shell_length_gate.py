@@ -136,7 +136,12 @@ def test_r075_qsub_wrapper_uses_the_single_scheduler_granted_device() -> None:
         "/dev\\/nvidia([0-9]+)",
         '| sort -u',
         '[[ "${#granted_devices[@]}" -ne 1 ]]',
-        'export CUDA_VISIBLE_DEVICES="${granted_devices[0]}"',
+        'physical_granted_device="${granted_devices[0]}"',
+        "unset CUDA_VISIBLE_DEVICES",
+        "nvidia-smi --query-gpu=index --format=csv,noheader,nounits",
+        '[[ "${#visible_devices[@]}" -ne 1 ]]',
+        'export CUDA_VISIBLE_DEVICES="${visible_devices[0]}"',
+        "PHYSICAL_GRANTED_DEVICE=$physical_granted_device",
         'nvidia-smi -i "$CUDA_VISIBLE_DEVICES"',
         'exec bash "$PROJECT_ROOT/scripts/server/run_panda_r075_full_shell_length.sh"',
     )
