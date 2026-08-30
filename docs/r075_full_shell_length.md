@@ -2,9 +2,9 @@
 
 Status date: 2026-08-30.
 
-Status: from-zero H100 0-3k run completed and checkpoint/reload gates passed.
-Matched/full-strand and full-3DGS asset export is pending; no later training
-stage is authorized yet.
+Status: accepted 0-3k length/coverage/flow gate. Checkpoint, reload, matched and
+full-strand export, full 3DGS PLY, Blender density controls, and user-region
+flow regression all pass. No later training stage is authorized by this note.
 
 ## Question
 
@@ -89,6 +89,47 @@ and removes R074's ~`0.01111` mean short-coat state; measured arc mean is
 The metric gain, lower peak memory, and finite lifecycle clear the numerical
 gate. Visual/full-asset coverage and the upper-back flow regression remain the
 final acceptance boundary.
+
+## Asset and user-region result
+
+The postprocess runs from source `4b6dfc8` and validates the exact R075
+checkpoint. It exports:
+
+- matched 100k strands, SHA-256
+  `4e9e6de1a0c2516448c0291597835dfe627f20fc7a201fff991079efa7955817`;
+- all 449482 render strands, SHA-256
+  `be4650ccf84eb205f37a22bd36ba46541ae37cc2b6ae00051364626c681f3deb`;
+- all 5716077 training Gaussians as binary SH3 3DGS PLY, SHA-256
+  `5edf56266b9dd2fdab1bbb7b5c7b05e096149a86a76ea916a6231528db22cd51`.
+
+The 100k Blender scene validates 100000 splines and one body mesh. Its
+side-positive-Y image SHA-256 is
+`fc2d6bcd51062392d7bd2145eaaba34989e66b6f63cf51a9cfeac80e0d4b9931`.
+The 240k physical-width (`1.0`) density-control image SHA-256 is
+`e25869bda22556a9f0eb28cbe19c2e66f06cdda90801f69b8ac6342f1ea67243`.
+Both remove R074's exposed-mesh/granular short-coat appearance; 240k retains a
+finer physical width without the historical 100k `1.65` compensation.
+
+The user upper-back crop matches at score `0.813764` despite the deliberately
+changed hair length. Guide and trained render all/front/back negative counts
+are `0/0/0`; their >120-degree counts are `0/0/0`; and render
+chord-versus-guide negatives are `0 / 4119`. The accepted render overlay
+SHA-256 is
+`f6a8aafd8743afa79dfb46f136bd4766d3107b2fc3cd412edf21bd02bcca60a9`.
+R075 therefore preserves the V8 flow repair while passing the length and
+coverage gate.
+
+Local deliverables:
+
+- `D:/RTS/exports/panda_r075_003000_blender_asset/manifest.json`;
+- `D:/RTS/exports/panda_r075_003000_blender_asset/panda_r075_003000_100k_strands.blend`;
+- `D:/RTS/exports/panda_r075_003000_blender_asset/panda_r075_003000_240k_preview_side_y_pos.png`;
+- `D:/RTS/exports/panda_r075_003000_3dgs/r075_003000_full_3dgs.ply`.
+
+A full 449482-curve Blender scene is intentionally not attempted: R074 proved
+that this representation exceeds the Blender/Cycles allocator near 33 GB.
+The full NPZ and full 3DGS PLY are complete and hash-validated, so this UI
+limit is not hidden as missing model data.
 
 ## HGC attempt ledger
 

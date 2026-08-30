@@ -134,7 +134,7 @@ inherited 0.30 length scale is the remaining short-coat variable. See
 `docs/panda_v8_confidence_guided_flow_20260830.md` and
 `docs/r074_v8_confidence_flow.md`.
 
-R075 is the active isolated 3k asset gate. It inherits R074 and changes only
+R075 is the accepted isolated 3k initialization/asset gate. It inherits R074 and changes only
 `CLEAN_FLOW_LENGTH_INIT_SCALE=0.30 -> 1.0`, restoring the formal target's own
 reliable shell-height range `0.02524-0.04706` instead of adding a Panda length
 cap or tuned multiplier. Its from-zero H100 run completes at train/test
@@ -142,9 +142,12 @@ composite `21.963490/21.913940`, a `+3.136788/+2.925777 dB` gain over R074.
 Effective q05/q50/q95 length is `0.029179/0.036531/0.042835`, checkpoint roots
 are `447462`, reload Gaussians are `5716077`, and peak allocation is
 `9644.07 MB`. Direction reconstruction remains exactly at R074
-`4.02535/16.20302 deg` mean/P95. Numerical and reload gates pass; matched/full
-asset coverage and the user-region flow regression remain pending. See
-`docs/r075_full_shell_length.md`.
+`4.02535/16.20302 deg` mean/P95. Matched 100k and 240k physical-width Blender
+assets remove the exposed-mesh/granular short-coat failure. The full
+449482-strand NPZ and 5716077-Gaussian PLY pass hashes and schema; the original
+upper-back guide/render negative and >120-degree counts are all zero, with
+`0/4119` render chord-versus-guide reversals. No later training stage is
+authorized yet. See `docs/r075_full_shell_length.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
