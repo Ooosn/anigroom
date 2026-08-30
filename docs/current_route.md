@@ -163,6 +163,16 @@ confidence/area-weighted data-relative length anchor, with low-confidence
 regions left to intrinsic surface propagation. See
 `docs/r076_early_guide_length.md`.
 
+R077 is the active bounded 0-3k treatment for that isolated ownership failure.
+It inherits R076 exactly and adds only `VIEW_GATE_GEOMETRY_SUPPORT=1` plus
+`CLEAN_FLOW_GUIDE_LENGTH_ANCHOR_WEIGHT=0.080`. The first change leaves the
+forward render unchanged while applying the accepted per-view owner budget to
+decoded geometry gradients. The second anchors only reliable primary-guide
+lengths to the target's own unscaled shell height through a confidence- and
+intrinsic-area-weighted log ratio; zero-confidence guides receive no anchor and
+remain governed by surface propagation. No physical cap or species, region, or
+view rule is present. See `docs/r077_confidence_owned_length.md`.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049

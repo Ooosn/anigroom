@@ -99,7 +99,7 @@ def test_support_off_has_no_parameter_and_roundtrip_is_strict() -> None:
     enabled_clone = make_model(support=True)
     enabled_clone.load_state_dict(enabled.state_dict(), strict=True)
     torch.testing.assert_close(enabled.guide_view_sh.raw, enabled_clone.guide_view_sh.raw)
-    assert CURRENT_CHECKPOINT_VERSION == 12
+    assert CURRENT_CHECKPOINT_VERSION == 13
 
 
 def test_view_confidence_gates_only_sh_gradient_and_detaches_geometry() -> None:

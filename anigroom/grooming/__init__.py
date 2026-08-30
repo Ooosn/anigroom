@@ -27,8 +27,11 @@ from .guide_view_sh import (
     load_trusted_guide_view_confidence,
 )
 from .view_gated_ownership import (
+    DECODED_GROOM_GEOMETRY_FIELDS,
     ViewGatedOwnership,
+    gate_decoded_groom_geometry,
     straight_through_gate,
+    straight_through_gate_geometry,
 )
 
 from .strand_gaussians import (
@@ -93,6 +96,9 @@ __all__ = [
     "first_order_sh_basis",
     "load_trusted_guide_view_confidence",
     "straight_through_gate",
+    "straight_through_gate_geometry",
+    "gate_decoded_groom_geometry",
+    "DECODED_GROOM_GEOMETRY_FIELDS",
     "ViewGatedOwnership",
     "make_tangent_frames",
     "local_components_to_world",

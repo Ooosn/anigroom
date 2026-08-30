@@ -28,12 +28,12 @@ def test_checkpoint_loader_retries_numpy2_pickle_on_numpy1(monkeypatch, tmp_path
             error.name = "numpy._core"
             raise error
         assert "numpy._core.multiarray" in __import__("sys").modules
-        return {"checkpoint_version": 12, "iteration": 1}
+        return {"checkpoint_version": 13, "iteration": 1}
 
     monkeypatch.setattr("tools.train_white_tiger_stage1.torch.load", fake_load)
     checkpoint = load_training_checkpoint(tmp_path / "checkpoint.pt")
 
-    assert checkpoint == {"checkpoint_version": 12, "iteration": 1}
+    assert checkpoint == {"checkpoint_version": 13, "iteration": 1}
     assert len(calls) == 2
 
 

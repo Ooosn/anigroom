@@ -1,4 +1,4 @@
-"""Per-view trusted ownership of render-root position, opacity, and lifecycle evidence.
+"""Per-view trusted ownership for roots, opacity, lifecycle, and opt-in geometry.
 
 R071 showed that a bounded view-dependent appearance field cannot repair the
 Panda multiview defect: the guide SH saturated while the render-root population
@@ -7,18 +7,37 @@ the granularity comes from thirty views competing over the same pre-9k degrees
 of freedom, not from appearance alone.
 
 This module keeps the accepted V7 trusted-view evidence as the only source of
-ownership and exposes it as a gradient multiplier. The forward value is never
-modified, so a multiplier of one reproduces the parent run exactly and any
-measured difference is attributable to gradient ownership alone.
+ownership and exposes it as a gradient multiplier. The historical render-root
+position, root/tip-opacity, and lifecycle ownership behavior remains unchanged.
+When explicitly enabled by Stage 1, ``straight_through_gate_geometry`` applies
+the same render-root multiplier to the eleven decoded groom geometry fields;
+appearance and opacity fields remain outside that opt-in gate. Forward values
+are never modified, so a multiplier of one reproduces the parent run exactly
+and any measured difference is attributable to gradient ownership alone.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
 from .guide_view_sh import TrustedGuideViewConfidence
+
+
+DECODED_GROOM_GEOMETRY_FIELDS = (
+    "length",
+    "root_width",
+    "tip_width",
+    "width_taper",
+    "direction_local",
+    "brush_stiffness",
+    "curl_radius_ratio",
+    "curl_turns",
+    "curl_phase",
+    "child_radius",
+    "clump_strength",
+)
 
 
 def straight_through_gate(value: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
@@ -47,14 +66,36 @@ def straight_through_gate(value: torch.Tensor, gate: torch.Tensor) -> torch.Tens
     return detached + gate * (value - detached)
 
 
+def straight_through_gate_geometry(groom, gate: torch.Tensor):
+    """Straight-through gate every geometry field in a decoded groom.
+
+    The decoded groom's appearance and opacity fields are intentionally left
+    untouched.  Each geometry field keeps its exact forward value while its
+    backward gradient is multiplied by the broadcast render-root ``gate``.
+    """
+
+    geometry = {
+        name: straight_through_gate(getattr(groom, name), gate)
+        for name in DECODED_GROOM_GEOMETRY_FIELDS
+    }
+    return replace(groom, **geometry)
+
+
+# Descriptive aliases keep the helper convenient for callers that name the
+# operation after the decoded groom rather than its straight-through detail.
+gate_decoded_groom_geometry = straight_through_gate_geometry
+
+
 @dataclass(frozen=True)
 class ViewGatedOwnership:
-    """Turn V7 trusted-view evidence into a per-view guide gradient gate.
+    """Turn V7 evidence into the historical per-view ownership gradient gate.
 
     ``floor`` is the gradient share retained where the trusted evidence is
     zero. ``0.0`` detaches untrusted roots for that view and leaves them to the
-    view-independent surface regularizers; ``1.0`` disables gating entirely and
-    reproduces the parent behavior.
+    view-independent surface regularizers. This class supplies the gate used
+    for root position, root/tip opacity, and lifecycle evidence; callers may
+    separately pass it to the opt-in decoded-geometry helper. ``1.0`` disables
+    gating entirely and reproduces the parent behavior.
     """
 
     confidence: TrustedGuideViewConfidence
