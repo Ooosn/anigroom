@@ -117,3 +117,23 @@ Acceptance is a matched 3k comparison against R075 and R076:
 
 No continuation beyond this bounded 3k comparison is authorized by this
 contract alone.
+
+## Attempt ledger
+
+The first H100 invocation from source `12df16a` passed all 436 tests and the
+native one-iteration full-resolution run. The model-side preflight evidence is
+valid: anchor loss `1.191977`, reliable anchor fraction `0.762444`, effective
+q05/mean/q50/q95/max
+`0.008840/0.011025/0.011065/0.013004/0.014132`, finite gradients, and
+7108.67 MB peak allocation. The outer launcher then stopped before 3k training
+because it read the render-root `clean_flow_length_init_q05/q95` fields. Those
+fields are intentionally zero in guide-driven initialization; the populated
+guide evidence is reported by the guide-length counts. No checkpoint was
+created and the qlogin allocation was preserved.
+
+The corrected preflight derives its short-scale q05/q95 directly from the
+formal target's observed positive `shell_h` values at the configured confidence
+floor, then multiplies that data-relative range by the resolved initialization
+scale. It also requires positive reliable-guide count and complete guide-length
+fill. This changes only launcher verification, not model code, loss, schedule,
+or experiment parameters.

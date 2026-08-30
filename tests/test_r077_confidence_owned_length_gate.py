@@ -155,6 +155,12 @@ def test_r077_launcher_enforces_strict_from_zero_h100_3k_gate() -> None:
         'assert math.isfinite(length_anchor_fraction)',
         'assert length_anchor_fraction > 0.0',
         'initial_effective_mean = float(metric["effective_groom"]["length"]["mean"])',
+        'with np.load(target_path, allow_pickle=False) as target_data:',
+        'target_confidence = np.clip(target_weight / weight_q95, 0.0, 1.0)',
+        'identity_q05, identity_q95 = np.quantile(shell_h[length_source], [0.05, 0.95])',
+        'short_scale_q05 = float(identity_q05 * config["clean_flow_length_init_scale"])',
+        'assert clean["clean_flow_guide_length_init_reliable_count"] > 0',
+        'assert clean["clean_flow_guide_length_init_filled_count"] == config["guide_root_count"]',
         'assert short_scale_q05 <= initial_effective_mean <= short_scale_q95',
     )
     for fragment in preflight_contract:

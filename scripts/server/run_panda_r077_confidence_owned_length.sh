@@ -159,6 +159,8 @@ import math
 import sys
 from pathlib import Path
 
+import numpy as np
+
 root = Path(sys.argv[1])
 target = sys.argv[2]
 expected_target_sha256 = sys.argv[3]
@@ -208,13 +210,34 @@ assert math.isfinite(length_anchor_fraction)
 assert length_anchor_fraction > 0.0
 
 initial_effective_mean = float(metric["effective_groom"]["length"]["mean"])
-short_scale_q05 = float(clean["clean_flow_length_init_q05"])
-short_scale_q95 = float(clean["clean_flow_length_init_q95"])
+with np.load(target_path, allow_pickle=False) as target_data:
+    shell_h = np.asarray(target_data["shell_h"], dtype=np.float64)
+    target_weight = np.asarray(target_data["weight"], dtype=np.float64)
+    target_observed = np.asarray(target_data["observed"], dtype=bool)
+positive_weight = target_weight > 0.0
+assert int(positive_weight.sum()) >= 4
+weight_q95 = float(np.quantile(target_weight[positive_weight], 0.95))
+target_confidence = np.clip(target_weight / weight_q95, 0.0, 1.0)
+length_source = (
+    target_observed
+    & np.isfinite(shell_h)
+    & (shell_h > 0.0)
+    & (
+        target_confidence
+        >= float(config["clean_flow_length_init_min_confidence"])
+    )
+)
+assert int(length_source.sum()) >= 4
+identity_q05, identity_q95 = np.quantile(shell_h[length_source], [0.05, 0.95])
+short_scale_q05 = float(identity_q05 * config["clean_flow_length_init_scale"])
+short_scale_q95 = float(identity_q95 * config["clean_flow_length_init_scale"])
 assert math.isfinite(initial_effective_mean)
 assert math.isfinite(short_scale_q05)
 assert math.isfinite(short_scale_q95)
 assert 0.0 < short_scale_q05 <= short_scale_q95
 assert short_scale_q05 <= initial_effective_mean <= short_scale_q95
+assert clean["clean_flow_guide_length_init_reliable_count"] > 0
+assert clean["clean_flow_guide_length_init_filled_count"] == config["guide_root_count"]
 assert metric["max_memory_mb"] < 25000.0
 print(json.dumps({
     "target_path": target,
@@ -239,6 +262,8 @@ print(json.dumps({
         "clean_flow_guide_length_anchor_loss": length_anchor_loss,
         "clean_flow_guide_length_anchor_reliable_fraction": length_anchor_fraction,
         "initial_effective_mean": initial_effective_mean,
+        "target_identity_q05": float(identity_q05),
+        "target_identity_q95": float(identity_q95),
         "short_scale_q05": short_scale_q05,
         "short_scale_q95": short_scale_q95,
     },
