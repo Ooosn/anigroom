@@ -177,7 +177,7 @@ fixed-checkpoint numeric entry point is
 `tools/diagnose_adaptive_continuous_length_field.py`; it produces JSON only and
 does not render or mutate a checkpoint.
 
-Local verification on 2026-09-01:
+Initial local verification on 2026-09-01:
 
 - focused R081 plus inherited interpolation tests: `36 passed`;
 - complete repository suite: `484 passed`, `0 failed`;
@@ -190,6 +190,34 @@ The implementation intentionally stops before trainer/config integration. The
 next gate runs the complete Panda R080 iteration-4000 field through the numeric
 diagnostic and measures guide-site semantic drift, support-boundary continuity,
 time, and memory before any canonical visualization or training continuation.
+
+## H100 Attempt Ledger
+
+The first fixed-checkpoint invocation at commit `32f654a` passed the exact
+source/checkpoint preflight, focused tests, and complete HGC test suite, then
+stopped before candidate evaluation. The diagnostic validator incorrectly
+required all three cached query-face vertex paths for every support source to
+be finite. Formal `SurfaceSupport` stores `+inf` for unused face vertices and
+defines the source distance as the minimum over the three paths; one finite
+nonnegative path per support slot is the correct coverage invariant.
+
+The failed invocation produced no diagnostic JSON and did not train, render,
+mutate the checkpoint, or release the H100 allocation. Its preserved remote log
+is:
+
+`/home/wangyy/panda-r081-adaptive-continuous-field-runtime-20260901/logs/panda_r080_iter4000_r081_fixed_field.log`
+
+SHA-256:
+`7593af5f54a17f972a1ddfe9cde7a69f8e7c0ee079e3b77ff857a97d54db4518`.
+
+The corrected validator now accepts unused `+inf`, requires at least one finite
+nonnegative path in every `[query, source]` slot, and rejects NaN, `-inf`,
+negative finite paths, or all-three-`+inf` holes. This is a diagnostic-only
+correction; candidate and inherited interpolation values are unchanged.
+After the correction, the complete local suite reports `489 passed`, with
+focused mixed-path and coverage-hole regressions included. The exact H100 gate
+must be rerun under a new output/log identity rather than overwriting the failed
+attempt.
 
 ## Literature Basis
 

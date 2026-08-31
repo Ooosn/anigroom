@@ -219,7 +219,8 @@ log-length jump of unchanged-support edges. R081 leaves the inherited
 inverse-square path untouched and adds only an opt-in K+1 intrinsic-support,
 density-adaptive Wendland C2 partition-of-unity candidate for fixed-checkpoint
 length diagnosis. It has no trainer/config/checkpoint integration and is not an
-active behavior. All `484` local tests pass. Panda R080 4k and matched
+active behavior. After correcting a diagnostic-only support validator, all
+`489` local tests pass. Panda R080 4k and matched
 white-tiger fixed-field evidence, performance, guide-site semantics, and the
 unchanged canonical visualization protocol must pass before a training gate is
 authorized. See `docs/r081_adaptive_continuous_length_field.md`.

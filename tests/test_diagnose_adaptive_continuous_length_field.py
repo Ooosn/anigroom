@@ -8,6 +8,7 @@ import torch
 
 from anigroom.surface_interpolation import (
     SurfaceFieldInterpolator,
+    SurfaceSupport,
     adaptive_wendland_c2_weights,
     interpolate_physical,
 )
@@ -17,6 +18,7 @@ from tools.diagnose_adaptive_continuous_length_field import (
     select_mesh_path,
     summarize,
     validate_interpolation_invariants,
+    validate_surface_support,
     validate_support_ids,
     write_deterministic_json,
 )
@@ -61,6 +63,92 @@ def test_summary_and_partition_helpers_use_exact_small_tensors() -> None:
     assert validation["constant_field_reproduction"]["ok"]
     assert validation["convex_hull"]["ok"]
     assert validation["positivity"]["ok"]
+
+
+def test_mixed_infinite_vertex_paths_are_accepted_and_distances_are_finite() -> None:
+    vertices = np.asarray(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        dtype=np.float32,
+    )
+    faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    interpolator = SurfaceFieldInterpolator(
+        vertices=vertices,
+        faces=faces,
+        source_points=torch.tensor(
+            [[0.10, 0.10, 0.0], [0.70, 0.10, 0.0]],
+            dtype=torch.float32,
+        ),
+        source_face_ids=torch.zeros((2,), dtype=torch.long),
+        neighbor_count=2,
+        device="cpu",
+    )
+    support = SurfaceSupport(
+        indices=torch.tensor([[0, 1]], dtype=torch.long),
+        vertex_path_distances=torch.tensor(
+            [[[0.0, float("inf"), 0.25], [float("inf"), 0.10, 0.30]]],
+            dtype=torch.float32,
+        ),
+        report={"fallback_query_count": 0},
+    )
+
+    report = validate_surface_support(
+        support,
+        source_count=2,
+        expected_width=2,
+        name="mixed support",
+    )
+    distances = interpolator.distances(
+        torch.tensor([[0.20, 0.20, 0.0]], dtype=torch.float32),
+        torch.zeros((1,), dtype=torch.long),
+        support,
+    )
+
+    assert bool(torch.isfinite(distances).all())
+    assert report["path_entry_count"] == 6
+    assert report["finite_path_entry_count"] == 4
+    assert report["finite_path_entry_fraction"] == pytest.approx(4.0 / 6.0)
+    assert report["support_slot_count"] == 2
+    assert report["fully_covered_support_slot_count"] == 2
+    assert report["fully_covered_support_slot_fraction"] == 1.0
+
+
+def test_all_three_infinite_paths_are_rejected_as_coverage_hole() -> None:
+    support = SurfaceSupport(
+        indices=torch.tensor([[0, 1]], dtype=torch.long),
+        vertex_path_distances=torch.tensor(
+            [[[0.0, 0.0, 0.0], [float("inf"), float("inf"), float("inf")]]],
+            dtype=torch.float32,
+        ),
+        report={"fallback_query_count": 0},
+    )
+
+    with pytest.raises(RuntimeError, match="coverage hole"):
+        validate_surface_support(
+            support,
+            source_count=2,
+            expected_width=2,
+            name="hole support",
+        )
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("-inf"), -0.25])
+def test_invalid_path_entries_are_rejected(bad_value: float) -> None:
+    support = SurfaceSupport(
+        indices=torch.tensor([[0, 1]], dtype=torch.long),
+        vertex_path_distances=torch.tensor(
+            [[[0.0, 0.0, 0.0], [bad_value, 0.10, 0.20]]],
+            dtype=torch.float32,
+        ),
+        report={"fallback_query_count": 0},
+    )
+
+    with pytest.raises(RuntimeError, match="(NaN|-inf|negative finite)"):
+        validate_surface_support(
+            support,
+            source_count=2,
+            expected_width=2,
+            name="invalid support",
+        )
 
 
 def test_deterministic_json_and_overwrite_refusal(tmp_path) -> None:

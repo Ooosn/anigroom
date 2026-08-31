@@ -209,8 +209,18 @@ def validate_surface_support(
             f"{tuple(support.vertex_path_distances.shape)} != {expected_paths}"
         )
     paths = support.vertex_path_distances
-    if not bool(torch.isfinite(paths).all()) or bool((paths < 0.0).any()):
-        raise RuntimeError(f"{name} contains a coverage hole or invalid intrinsic path")
+    finite_paths = torch.isfinite(paths)
+    if bool(torch.isnan(paths).any()) or bool(torch.isneginf(paths).any()):
+        raise RuntimeError(f"{name} contains NaN or -inf intrinsic path entries")
+    if bool((finite_paths & (paths < 0.0)).any()):
+        raise RuntimeError(f"{name} contains negative finite intrinsic path entries")
+    covered_slots = finite_paths.any(dim=-1)
+    if not bool(covered_slots.all()):
+        raise RuntimeError(f"{name} contains a coverage hole with all-three +inf path entries")
+    path_entry_count = int(paths.numel())
+    finite_path_entry_count = int(finite_paths.sum().detach().cpu())
+    support_slot_count = int(covered_slots.numel())
+    fully_covered_support_slot_count = int(covered_slots.sum().detach().cpu())
     fallback_count = int(support.report.get("fallback_query_count", 0))
     if fallback_count != 0:
         raise RuntimeError(
@@ -219,7 +229,19 @@ def validate_surface_support(
         )
     report.update(
         {
-            "vertex_paths_finite": True,
+            "path_entry_count": path_entry_count,
+            "finite_path_entry_count": finite_path_entry_count,
+            "finite_path_entry_fraction": float(finite_path_entry_count / path_entry_count)
+            if path_entry_count
+            else 0.0,
+            "finite_path_entries_nonnegative": True,
+            "support_slot_count": support_slot_count,
+            "fully_covered_support_slot_count": fully_covered_support_slot_count,
+            "fully_covered_support_slot_fraction": float(
+                fully_covered_support_slot_count / support_slot_count
+            )
+            if support_slot_count
+            else 0.0,
             "fallback_query_count": fallback_count,
             "support_bytes": int(
                 support.indices.numel() * support.indices.element_size()
