@@ -112,3 +112,14 @@ R080 is judged with the fixed child-strand/clump, RGB-to-flow or edge-style,
 cleaned-flow initialization, render, and metric review protocols. There is no final metric threshold,
 no final PSNR threshold, and no final length threshold in this contract. Metrics
 and final length distributions remain measured evidence for review.
+
+## Attempt ledger
+
+The first H100 invocation passes all 468 tests, exact migration, migrated-3k
+render, optimizer/RNG resume, and the iteration-3001 all-guide preflight. The
+first-step guide fields and length remain finite and near initialization. The
+outer validator then stops before the 4k continuation because it asserts the
+generic baseline shape-detail freeze `14000`, while the inherited R074 contract
+is `20000` with unlock end `25000`. The corrected validator records the actual
+parent values; no model, config behavior, checkpoint, or optimizer state is
+changed.

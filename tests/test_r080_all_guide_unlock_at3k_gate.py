@@ -61,7 +61,8 @@ def test_r080_main_config_sources_r079_and_unlocks_all_low_frequency_guide_at_3k
     assert "ROOT_COUNT=400000" in inherited_assignments
     assert "GUIDE_LENGTH_FREEZE_UNTIL=3000" in inherited_assignments
     assert "ITERATIONS=4000" in inherited_assignments
-    assert "SHAPE_DETAIL_FREEZE_UNTIL=14000" in inherited_assignments
+    assert "SHAPE_DETAIL_FREEZE_UNTIL=20000" in inherited_assignments
+    assert "SHAPE_DETAIL_UNLOCK_END=25000" in inherited_assignments
     assert "SHAPE_CURL_SCALE=0.0" in inherited_assignments
     assert "GUIDE_FREEZE_UNTIL=9000" in inherited_assignments
     assert "VIEW_GATE_NORMALIZATION=equal_owner_budget" in inherited_assignments
@@ -147,6 +148,8 @@ def test_r080_launcher_enforces_migration_resume_and_4000_contract() -> None:
         'assert metric["guide_length_frozen"] is False',
         'assert metric["guide_frozen"] is False',
         'assert metric["shape_detail_frozen"] is True',
+        'assert config["shape_detail_freeze_until"] == 20000',
+        'assert config["shape_detail_unlock_end"] == 25000',
         'assert float(metric["shape_detail_multiplier"]) == 0.0',
         'assert float(metric["gaussian_rgb_residual_multiplier"]) == 0.0',
         'assert config["view_gate_geometry_support"] is False',

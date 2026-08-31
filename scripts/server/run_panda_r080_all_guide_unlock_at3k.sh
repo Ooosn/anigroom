@@ -477,7 +477,8 @@ assert config["resume_optimizer"] is True
 assert Path(str(config["resume_checkpoint"])).resolve() == migrated_path.resolve()
 assert config["guide_length_freeze_until"] == 3000
 assert config["guide_freeze_until"] == 3000
-assert config["shape_detail_freeze_until"] == 14000
+assert config["shape_detail_freeze_until"] == 20000
+assert config["shape_detail_unlock_end"] == 25000
 assert config["view_gated_ownership_support"] is True
 assert config["view_gate_normalization"] == "equal_owner_budget"
 assert config["view_gate_geometry_support"] is False
@@ -600,7 +601,8 @@ assert config["resume_optimizer"] is True
 assert Path(str(config["resume_checkpoint"])).resolve() == migrated_path.resolve()
 assert config["guide_length_freeze_until"] == 3000
 assert config["guide_freeze_until"] == 3000
-assert config["shape_detail_freeze_until"] == 14000
+assert config["shape_detail_freeze_until"] == 20000
+assert config["shape_detail_unlock_end"] == 25000
 assert config["view_gate_geometry_support"] is False
 assert config["view_gate_length_confidence_support"] is False
 assert float(config["clean_flow_guide_length_anchor_weight"]) == 0.0
