@@ -243,10 +243,11 @@ grows `7.096x -> 33.199x`. R082 obtains smoother statistics by erasing nodal
 attribute semantics and is rejected before white tiger, visualization, or
 training. See `docs/r082_fixed_neighbor_mass_length_field.md`.
 
-R083 is the prepared exact-nodal representation follow-up. It uses the official
-CGAL 6.2 surface Natural Neighbor/Sibson implementation, not a local weight
-approximation. Official archives and Boost dependencies are pinned by hash in
-an isolated HGC bootstrap; the unmodified CGAL surface-neighbor example and a
+R083 is the completed and rejected exact-nodal representation follow-up. It
+uses the official CGAL 6.2 surface Natural Neighbor/Sibson implementation, not
+a local weight approximation. Official archives and Boost dependencies are
+pinned by hash in an isolated HGC bootstrap; the unmodified CGAL
+surface-neighbor example and a
 two-sheet probe compile and pass. Across separations `0.1x` through `5x` grid
 spacing, opposite-sheet weight is exactly zero and Delaunay-filtered/range
 coordinates are identical. The local standalone C++ CSR builder and strict
@@ -291,11 +292,53 @@ are respectively
 `8c3a0de3d6eb4e6460169910744f13e15d9a33178775159130176250bfd73f4a`, and
 `560deae7394b9d524e231be2532ea4ff89d80d3f19ddda8ba30048ea8e17df06`.
 
-No full Panda, white-tiger, training, or visualization run is authorized. Next
-work is isolated causal attribution of the filtered versus all-points API,
-projected convex-hull/normal behavior, and local sampling. No formal
-field-code modification or parameter-changing retry is authorized yet. See
+Phase 1 causal attribution is complete. Both official filtered and all-points
+overloads fail for `+normal` and `-normal`, all with zero neighbors. The
+filtered candidate count is `52`, and all four regular-triangulation locate
+results are `OUTSIDE_CONVEX_HULL`. The official route is recorded at
+`surface_neighbor_coordinates_3.h:33-85` and `:249-315`, with the false return
+at `regular_neighbor_coordinates_2.h:209-216`. Independent projection of all
+`4500` guides gives origin margin `-0.0038629181937523812`, angular gap
+`3.5597218485003066 rad`, and nearest-guide distance
+`0.014422489485979026`. This is a finite projected-coverage hole, not a
+numeric, filtering, or normal-sign failure. Phase 1 result, official-evidence,
+manifest, and hash-manifest SHA-256 values are respectively
+`9d031b11acef70f9f791ed83519463f46521671e6b38c1ec611a601f3f678e97`,
+`4ee555b96b4a0d730bc8cf6d48f6e61b04a3dd6aaf3ca9670d0b0a923634d50a`,
+`023b4454a453bbad9bd2405a346ea8e83f4b9158edd6341326f09b596e551349`, and
+`5a86d94cf7800658f2e2415f814a2609efff0ece6e48476b59cc55e859291e93`.
+R083 is closed and rejected; no retry, full Panda, white-tiger, training, or
+visualization is authorized. See
 `docs/r083_surface_natural_neighbor_length_field.md`.
+
+R084 is the topology-covered local RBF partition-of-unity scalar length
+proposal. Its Phase A pure float64 algebra is implemented in
+`anigroom/rbf_partition_of_unity.py` and
+`tests/test_rbf_partition_of_unity.py` and has passed. The topology cover and
+checkpoint gate remain undefined/pending, with no trainer, config, or
+visualization integration and no Panda field evidence. A later mesh-topology
+builder must supply fixed-radius patches and memberships with no ambient
+cross-sheet membership. Fixed-radius Wendland C2 PU weights blend exact local
+constant-augmented Wendland RBFs evaluated by 3D chord only inside certified
+patches. Per-patch radii are mandatory as `[P]`, and every solved system is
+bound to its exact patch identity. There is no query-adaptive Kth radius,
+nonzero KNN truncation, fallback, NumPy/SciPy path, `pinv`, `lstsq`, jitter, or
+regularization. The design is scalar-length only; guide lifecycle changes
+rebuild patch algebra, while continuous render barycentric evaluation is a
+later gate.
+
+R084 Phase A passes float64 node self error, constant error, and cardinal-sum
+error gates of `<=1e-10`, finite autograd, boundary continuity,
+folded-topology isolation, and strict singular/uncovered failure. Validation is
+`14` focused tests passed in `1.78 s`; full `mygs` pytest `578` passed with
+`14` warnings in `19.56 s`; `py_compile` and `git diff --check` pass. Later
+cover/checkpoint gates remain unauthorized. A read-only constrained harmonic
+FEM audit found a `340288`-vertex/`680572`-face mesh, KKT dimension `344788`
+with about `2.409 million` nonzeros, `173294` negative cotan edges, no
+CHOLMOD/libigl/geometry-central backend, and `9-18` right-hand sides per
+forward. Harmonic FEM remains mathematically valid but was not executed or
+rejected; a current full-mesh per-forward solve fails the efficiency boundary.
+See `docs/r084_topology_rbf_partition_length_field.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual

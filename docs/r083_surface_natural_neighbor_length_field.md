@@ -103,11 +103,56 @@ artifact-hashes SHA-256
 `560deae7394b9d524e231be2532ea4ff89d80d3f19ddda8ba30048ea8e17df06`.
 
 This is a rejection of the current official Delaunay-filtered candidate at the
-predeclared subset gate, not evidence that the underlying natural-neighbor
-idea is resolved. Next work is isolated causal attribution of the filtered
-versus all-points API, projected convex-hull/normal behavior, and local
-sampling. No formal field-code modification or parameter-changing retry is
-authorized yet.
+predeclared subset gate. The isolated Phase 1 attribution below closes the
+immediate cause without modifying formal field code or changing a retry
+parameter.
+
+## Phase 1 Causal Attribution: Finite Projected-Hull Hole
+
+The failed Panda query was replayed through both official CGAL surface-neighbor
+overloads with both normal signs:
+
+- the Delaunay-filtered overload fails for `+normal` and `-normal`;
+- the all-points range overload fails for `+normal` and `-normal`;
+- all four calls return zero neighbors;
+- the filtered Delaunay conflict-boundary candidate count is `52`; and
+- all four local regular-triangulation locate results are
+  `OUTSIDE_CONVEX_HULL`.
+
+The official source path is direct. The all-points surface wrapper and local
+regular triangulation are in
+`surface_neighbor_coordinates_3.h:33-85`; the Delaunay-filtered candidate path
+is in `surface_neighbor_coordinates_3.h:249-315`; and
+`regular_neighbor_coordinates_2.h:209-216` returns `false` when the projected
+query lies outside the regular triangulation convex hull.
+
+An independent local projection of all `4500` guide sites confirms a finite
+geometric hole around the tangent-plane origin:
+
+- projected-hull origin signed margin:
+  `-0.0038629181937523812`;
+- angular gap: `3.5597218485003066 rad`; and
+- nearest 3D guide distance: `0.014422489485979026`.
+
+The query is finite and near sampled guides, but the projected origin lies
+outside the convex hull even when every guide is supplied. The failure is
+therefore a finite projected-coverage hole, not numerical instability,
+Delaunay filtering, or normal-sign selection.
+
+Phase 1 artifacts are fixed by SHA-256:
+
+- result JSON:
+  `9d031b11acef70f9f791ed83519463f46521671e6b38c1ec611a601f3f678e97`;
+- official-source evidence:
+  `4ee555b96b4a0d730bc8cf6d48f6e61b04a3dd6aaf3ca9670d0b0a923634d50a`;
+- Phase 1 manifest:
+  `023b4454a453bbad9bd2405a346ea8e83f4b9158edd6341326f09b596e551349`;
+- hash manifest:
+  `5a86d94cf7800658f2e2415f814a2609efff0ece6e48476b59cc55e859291e93`.
+
+R083 is closed as a rejected candidate. No filtered-versus-range retry, normal
+flip, local sampling parameter change, formal field-code modification, full
+Panda run, white-tiger run, training, or visualization is authorized.
 
 ## Official API Route
 
@@ -283,10 +328,12 @@ assumed thread-safe without separate evidence.
 
 ## Decision Rule
 
-R083 remains diagnostic, and the current official Delaunay-filtered candidate
-is rejected at the predeclared 4096-root Panda subset gate because one official
-render query returned `success=false`. Next work is isolated causal attribution
-of the filtered versus all-points API, projected convex-hull/normal behavior,
-and local sampling. No formal field-code modification or parameter-changing
-retry is authorized yet; no training, visualization, full Panda, or white-tiger
-run is authorized.
+R083 is rejected at the predeclared 4096-root Panda subset gate. Phase 1 proves
+that both official overloads and both normal signs fail because the projected
+query is outside the all-guide convex hull, not because of filtering, sign, or
+numeric instability. No parameter-changing retry or formal R083 field-code
+modification is authorized; no training, visualization, full Panda, or
+white-tiger run is authorized. R084 Phase A pure algebra is separately
+implemented and passed, but its topology cover and checkpoint gates remain
+pending/unauthorized and provide no Panda field evidence; this does not reopen
+R083.
