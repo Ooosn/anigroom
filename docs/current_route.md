@@ -211,6 +211,19 @@ the length-only control and R080 4k the coupled-guide treatment, with identical
 model/optimizer/RNG/lifecycle start state. See
 `docs/r080_all_guide_unlock_at3k.md`.
 
+R081 is the prepared pre-training representation follow-up after canonical
+R080 view-09 review exposed a blockwise primary-guide length field. Exact
+attribution shows nominal K8 interpolation has only `2.26880` effective guides
+at the median, and changed-support render edges have `6.46x` the P95
+log-length jump of unchanged-support edges. R081 leaves the inherited
+inverse-square path untouched and adds only an opt-in K+1 intrinsic-support,
+density-adaptive Wendland C2 partition-of-unity candidate for fixed-checkpoint
+length diagnosis. It has no trainer/config/checkpoint integration and is not an
+active behavior. All `484` local tests pass. Panda R080 4k and matched
+white-tiger fixed-field evidence, performance, guide-site semantics, and the
+unchanged canonical visualization protocol must pass before a training gate is
+authorized. See `docs/r081_adaptive_continuous_length_field.md`.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049

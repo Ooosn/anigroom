@@ -1,15 +1,18 @@
 """Topology-safe interpolation for mesh-rooted grooming attributes.
 
 Neighbor selection is discrete and rebuilt only when root topology changes.
-Weights are continuous in the current query position, and attribute
-combination is typed: physical scalars/colors use arithmetic interpolation,
-while 3D directions are parallel transported before averaging.
+The inherited inverse-distance weights are differentiable while a cached
+support is fixed, but truncated neighboring support sets do not guarantee one
+globally continuous field across the surface. Attribute combination is typed:
+physical scalars/colors use arithmetic interpolation, while 3D directions are
+parallel transported before averaging.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from numbers import Integral
 from time import perf_counter
 
 import numpy as np
@@ -24,6 +27,87 @@ from anigroom.flow.surface_graph import _augmented_surface_graph, _root_voronoi_
 
 
 EPS = 1.0e-8
+
+
+def adaptive_wendland_c2_weights(
+    distances: torch.Tensor,
+    active_neighbor_count: int,
+    support_indices: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Return normalized compact-support Wendland C2 weights.
+
+    The support radius for each query is the ``(K + 1)``-th smallest entry in
+    ``distances``, where ``K`` is ``active_neighbor_count``.  The boundary
+    entry therefore has exactly zero kernel mass.  Support selection and the
+    radius remain part of the autograd graph for valid inputs.
+    """
+
+    if not isinstance(distances, torch.Tensor):
+        raise TypeError("distances must be a torch.Tensor")
+    if distances.ndim != 2:
+        raise ValueError("distances must have shape [Q, S]")
+    if not torch.is_floating_point(distances) or distances.is_complex():
+        raise TypeError("distances must be a real floating-point tensor")
+    if isinstance(active_neighbor_count, bool) or not isinstance(
+        active_neighbor_count,
+        Integral,
+    ):
+        raise ValueError("active_neighbor_count must be an integer")
+    neighbor_count = int(active_neighbor_count)
+    if neighbor_count <= 0:
+        raise ValueError("active_neighbor_count must be positive")
+    source_count = int(distances.shape[1])
+    if source_count < neighbor_count + 1:
+        raise ValueError("distances must contain at least K + 1 sources")
+    if not bool(torch.isfinite(distances).all()):
+        raise ValueError("distances must be finite")
+    if bool((distances < 0.0).any()):
+        raise ValueError("distances must be nonnegative")
+
+    if support_indices is not None:
+        if not isinstance(support_indices, torch.Tensor):
+            raise TypeError("support_indices must be a torch.Tensor")
+        if support_indices.ndim != 2 or tuple(support_indices.shape) != tuple(
+            distances.shape
+        ):
+            raise ValueError("support_indices must have shape [Q, S] matching distances")
+        if support_indices.dtype not in {
+            torch.int8,
+            torch.uint8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        }:
+            raise TypeError("support_indices must be an integer tensor")
+        sorted_indices = torch.sort(support_indices, dim=1).values
+        if sorted_indices.shape[1] > 1 and bool(
+            (sorted_indices[:, 1:] == sorted_indices[:, :-1]).any()
+        ):
+            raise ValueError("support_indices must be unique within every query row")
+
+    radius = distances.kthvalue(neighbor_count + 1, dim=1, keepdim=True).values
+    if not bool(torch.isfinite(radius).all()) or bool((radius <= 0.0).any()):
+        raise ValueError("every query support radius must be finite and positive")
+
+    inside = distances < radius
+    safe_distances = torch.where(inside, distances, torch.zeros_like(distances))
+    normalized_distance = safe_distances / radius
+    kernel = (1.0 - normalized_distance).pow(4) * (4.0 * normalized_distance + 1.0)
+    raw_weights = torch.where(inside, kernel, torch.zeros_like(kernel))
+    denominator = raw_weights.sum(dim=1, keepdim=True)
+    valid_denominator = torch.isfinite(denominator) & (denominator > 0.0)
+    if not bool(valid_denominator.all()):
+        raise RuntimeError("adaptive Wendland weights have a zero or nonfinite denominator")
+
+    weights = raw_weights / denominator
+    if not bool(torch.isfinite(weights).all()) or bool((weights < 0.0).any()):
+        raise RuntimeError("adaptive Wendland weights must be finite and nonnegative")
+    row_sum = weights.sum(dim=1, keepdim=True)
+    if not bool(torch.isfinite(row_sum).all()) or not bool(
+        torch.allclose(row_sum, torch.ones_like(row_sum), rtol=1.0e-5, atol=1.0e-6)
+    ):
+        raise RuntimeError("adaptive Wendland weights must be row-normalized")
+    return weights
 
 
 @dataclass(frozen=True)
