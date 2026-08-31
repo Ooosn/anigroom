@@ -107,3 +107,13 @@ contract because the later deferral edit no longer contained the literal phrase
 or render was created; the original R074 checkpoint and V8 target hashes stayed
 unchanged, and the qlogin allocation was preserved. The retry requires the full
 463-test suite to pass from a new source/runtime/log/PID path.
+
+The second invocation from `2e35db8` passed all 463 tests and stopped inside
+the migration utility before writing an output. The utility incorrectly
+required every Adam parameter ID to have a state entry. R074 legitimately has
+24 optimizer parameters but only 23 states because
+`gaussian_rgb_residual.raw` had never received a non-`None` gradient and Adam
+initializes state lazily. Guide length itself has a complete state with step
+3000 and zero moments. The corrected migration accepts stateless declared
+parameters while still rejecting undeclared state IDs and requiring the exact
+guide-length state. No checkpoint, render, or training output was created.

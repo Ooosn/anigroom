@@ -149,6 +149,30 @@ def _write_source(path: Path, checkpoint: dict[str, object]) -> str:
     return _sha256(path)
 
 
+def test_schema12_migration_preserves_valid_lazy_adam_state(tmp_path) -> None:
+    source_path = tmp_path / "source_sparse_adam_schema12.pt"
+    output_path = tmp_path / "migrated_sparse_adam_schema14.pt"
+    report_path = tmp_path / "migration_sparse_adam_report.json"
+    source = _schema12_checkpoint()
+    source["optimizer"]["param_groups"][0]["params"].append(1)
+    source["optimizer_param_names"][0].append("gaussian_rgb_residual.raw")
+    source_hash = _write_source(source_path, source)
+
+    migrate_checkpoint(source_path, output_path, report_path, source_hash)
+
+    migrated = torch.load(output_path, map_location="cpu", weights_only=False)
+    assert migrated["optimizer"]["param_groups"][0]["params"] == [0, 1]
+    assert migrated["optimizer_param_names"][0] == [
+        "guide_length_raw",
+        "gaussian_rgb_residual.raw",
+    ]
+    assert set(migrated["optimizer"]["state"]) == {0}
+    torch.testing.assert_close(
+        migrated["optimizer"]["state"][0]["exp_avg"],
+        source["optimizer"]["state"][0]["exp_avg"],
+    )
+
+
 def test_schema12_migration_preserves_payload_and_reports_exact_digests(tmp_path) -> None:
     source_path = tmp_path / "source_schema12.pt"
     output_path = tmp_path / "migrated_schema14.pt"

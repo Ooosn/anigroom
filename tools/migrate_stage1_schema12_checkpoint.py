@@ -477,12 +477,15 @@ def _require_optimizer_structure(
     state_ids = list(state)
     if any(type(state_id) is not int for state_id in state_ids):
         raise RuntimeError("checkpoint optimizer state IDs must be integers")
-    if set(state_ids) != set(parameter_ids):
-        missing = sorted(set(parameter_ids) - set(state_ids))
+    # Adam initializes state lazily on the first non-None gradient. Parameters
+    # that have never received one are valid members of a param group without a
+    # corresponding state entry. Every existing state must still belong to one
+    # declared parameter; guide_length_raw is checked separately below.
+    if not set(state_ids).issubset(set(parameter_ids)):
         extra = sorted(set(state_ids) - set(parameter_ids))
         raise RuntimeError(
-            "checkpoint optimizer state is incomplete: "
-            f"missing={missing}, extra={extra}"
+            "checkpoint optimizer state contains undeclared parameter IDs: "
+            f"extra={extra}"
         )
     if not all(isinstance(entry, dict) for entry in state.values()):
         raise RuntimeError("checkpoint optimizer state entries must be mappings")
