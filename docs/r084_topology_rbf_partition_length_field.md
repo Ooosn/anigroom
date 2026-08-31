@@ -1,9 +1,9 @@
 # R084: Topology-Covered RBF Partition-of-Unity Length Field
 
-Status: Phase A pure float64 algebra is implemented and passed. The
-mesh-topology cover, checkpoint diagnostic, trainer, configuration, and
-visualization paths remain pending or unauthorized; no Panda field evidence
-exists.
+Status: Phase A pure float64 algebra and Phase B1 offline guide-topology data
+algebra are implemented and passed. Phase B2 vertex/face incidence and
+arbitrary-query support, checkpoint diagnostics, trainer, configuration, and
+visualization remain pending or unauthorized; no Panda field evidence exists.
 
 ## Purpose
 
@@ -15,9 +15,10 @@ tuned parameter. It asks whether a topology-covered collection of exact local
 radial basis interpolants can provide a continuous scalar length field while
 retaining guide-site identity.
 
-Phase A implements only pure algebra on caller-supplied patch memberships,
-radii, nodes, and queries. It does not build the topology cover or evaluate a
-checkpoint.
+Phase A implements pure RBF-PU algebra. Phase B1 now implements deterministic
+offline guide-graph distances, fixed patch radii, and guide-node CSR
+membership. It does not implement vertex/face incidence, arbitrary-query
+support, a complete topology cover, or checkpoint evaluation.
 
 ## Decided Contract
 
@@ -141,12 +142,47 @@ Phase A success authorizes neither a mesh-topology cover implementation nor a
 fixed-checkpoint run. The later cover and checkpoint gates are explicitly not
 yet defined or authorized, and no actual Panda field evidence is claimed.
 
+## Phase B1 Result: Offline Guide-Topology Data Algebra Passed
+
+Phase B1 is isolated to:
+
+- `anigroom/rbf_topology_cover.py`;
+- `tests/test_rbf_topology_cover.py`.
+
+It validates a guide-to-guide topology distance matrix `D` with finite entries
+inside each connected component, `+inf` across disconnected components, and
+positive finite off-diagonal distances. At guide sites it provides a
+continuous piecewise-linear topology-distance proxy. This proxy is explicitly
+not an exact geodesic distance and is not described as one.
+
+For each patch, the fixed radius is selected deterministically as the first
+distinct zero-mass boundary strictly above the requested Kth guide distance.
+All ties below that boundary are included; nodes exactly on the boundary are
+excluded and therefore have zero raw PU mass. The output uses exact sorted node
+CSR with mandatory self membership. There is no diagonal jitter, `nextafter`,
+padding, fallback, or tie-breaking by silently dropping equal-distance nodes.
+
+Phase B1 validation evidence:
+
+- `17` focused tests passed in `0.14 s`;
+- full `mygs` pytest: `595` passed, `14` warnings in `19.73 s`;
+- `py_compile` passed; and
+- `git diff --check` passed.
+
+Phase B2 is intentionally absent. No vertex/face incidence structure or
+arbitrary-query patch support has been implemented. Therefore Phase B1 is not
+a complete topology cover, does not evaluate render-root movement, and is not
+actual Panda field evidence. Phase B2, checkpoint, trainer, configuration, and
+visualization gates remain pending or unauthorized.
+
 ## Topology And Lifecycle Boundary
 
-The future topology builder owns patch centers, fixed radii, memberships,
-coverage proof, and folded/disconnected-surface exclusion. The algebra layer
-must not infer missing membership with ambient KNN, expand a radius after seeing
-a query, or pad an undersupported patch.
+Phase B1 owns only guide-graph component distances, fixed guide-patch radii, and
+sorted guide-node CSR. Future Phase B2 owns vertex/face incidence,
+arbitrary-query memberships, coverage proof, and folded/disconnected-surface
+exclusion beyond the guide graph. Neither layer may infer missing membership
+with ambient KNN, expand a radius after seeing a query, or pad an undersupported
+patch.
 
 Guide insertion, deletion, or movement changes interpolation nodes and must
 rebuild affected patch systems. Render-root barycentric movement does not
@@ -189,10 +225,13 @@ implemented or executed, so this audit is not an experimental rejection.
 
 ## Decision Rule
 
-R084 Phase A pure algebra is complete and passed. This does not authorize
-topology construction, checkpoint evaluation, trainer/config integration, or
+R084 Phase A and Phase B1 are complete and passed. B1 establishes only offline
+guide-topology data algebra using the declared piecewise-linear proxy; it is
+not exact geodesic evidence or arbitrary-query coverage. This does not
+authorize Phase B2, checkpoint evaluation, trainer/config integration, or
 visualization, and it is not actual Panda field evidence. Any later gate must
 retain exact nodal identity, constant/cardinal reproduction, finite gradients,
 support-boundary continuity, folded-topology isolation, strict
-singular/uncovered failure, per-patch `[P]` radii, and system-to-patch identity
-binding.
+singular/uncovered failure, per-patch `[P]` radii, system-to-patch identity
+binding, deterministic first-distinct zero-mass boundaries, exact sorted CSR,
+and strict no-jitter/no-padding/no-fallback behavior.

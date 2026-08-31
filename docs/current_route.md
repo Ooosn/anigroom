@@ -314,26 +314,41 @@ visualization is authorized. See
 R084 is the topology-covered local RBF partition-of-unity scalar length
 proposal. Its Phase A pure float64 algebra is implemented in
 `anigroom/rbf_partition_of_unity.py` and
-`tests/test_rbf_partition_of_unity.py` and has passed. The topology cover and
-checkpoint gate remain undefined/pending, with no trainer, config, or
-visualization integration and no Panda field evidence. A later mesh-topology
-builder must supply fixed-radius patches and memberships with no ambient
-cross-sheet membership. Fixed-radius Wendland C2 PU weights blend exact local
-constant-augmented Wendland RBFs evaluated by 3D chord only inside certified
-patches. Per-patch radii are mandatory as `[P]`, and every solved system is
-bound to its exact patch identity. There is no query-adaptive Kth radius,
-nonzero KNN truncation, fallback, NumPy/SciPy path, `pinv`, `lstsq`, jitter, or
-regularization. The design is scalar-length only; guide lifecycle changes
-rebuild patch algebra, while continuous render barycentric evaluation is a
-later gate.
+`tests/test_rbf_partition_of_unity.py` and has passed. Phase B1 offline
+guide-topology data algebra is implemented in
+`anigroom/rbf_topology_cover.py` and `tests/test_rbf_topology_cover.py` and has
+also passed. Phase B2 vertex/face incidence and arbitrary-query support,
+checkpoint gates, trainer, config, visualization, and Panda field evidence
+remain pending or unauthorized. Fixed-radius Wendland C2 PU weights blend
+exact local constant-augmented Wendland RBFs evaluated by 3D chord only inside
+certified patches. Per-patch radii are mandatory as `[P]`, and every solved
+system is bound to its exact patch identity. There is no query-adaptive Kth
+radius, nonzero KNN truncation, fallback, NumPy/SciPy path, `pinv`, `lstsq`,
+jitter, or regularization. The design is scalar-length only; guide lifecycle
+changes rebuild patch algebra, while continuous render barycentric evaluation
+is a later gate.
 
 R084 Phase A passes float64 node self error, constant error, and cardinal-sum
 error gates of `<=1e-10`, finite autograd, boundary continuity,
 folded-topology isolation, and strict singular/uncovered failure. Validation is
 `14` focused tests passed in `1.78 s`; full `mygs` pytest `578` passed with
-`14` warnings in `19.56 s`; `py_compile` and `git diff --check` pass. Later
-cover/checkpoint gates remain unauthorized. A read-only constrained harmonic
-FEM audit found a `340288`-vertex/`680572`-face mesh, KKT dimension `344788`
+`14` warnings in `19.56 s`; `py_compile` and `git diff --check` pass.
+
+R084 Phase B1 validates guide graph `D` with finite component-internal
+distances, `+inf` across components, and positive finite off-diagonals. It uses
+a continuous piecewise-linear topology-distance proxy at guide sites,
+explicitly not exact geodesic distance. Fixed patch radii are selected at the
+first distinct zero-mass boundary above the Kth distance: all ties below are
+included and the boundary is excluded. Node membership is exact sorted CSR
+with mandatory self membership and no jitter, `nextafter`, padding, or
+fallback. Validation is `17` focused tests passed in `0.14 s`; full `mygs`
+pytest `595` passed with `14` warnings in `19.73 s`; `py_compile` and
+`git diff --check` pass. Phase B2 vertex/face incidence and arbitrary-query
+support are intentionally absent, so checkpoint and Panda gates remain
+unauthorized.
+
+A read-only constrained harmonic FEM audit found a
+`340288`-vertex/`680572`-face mesh, KKT dimension `344788`
 with about `2.409 million` nonzeros, `173294` negative cotan edges, no
 CHOLMOD/libigl/geometry-central backend, and `9-18` right-hand sides per
 forward. Harmonic FEM remains mathematically valid but was not executed or
