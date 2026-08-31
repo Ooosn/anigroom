@@ -1,8 +1,9 @@
 # R083: Surface Natural-Neighbor Length Field
 
-Status: official dependency/bootstrap and folded-surface API gate passed;
-local weight-builder/I/O implementation complete; HGC cross-language compile
-gate pending; no training or visualization authorized.
+Status: official dependency/bootstrap, folded-surface API, and HGC
+cross-language gate passed; local weight-builder/I/O implementation complete;
+Panda subset diagnostic implementation under final audit/pending; no training
+or visualization authorized.
 
 ## Purpose
 
@@ -44,6 +45,31 @@ HGC GCC 13.2 toolchain with no warning and exits zero. Bootstrap evidence is
 under:
 
 `D:/RTS/_tmp/panda_r083_natural_neighbor_bootstrap_20260901`.
+
+## Completed HGC Cross-Language Gate
+
+The cross-language gate is complete at clean remote source commit
+`2e590806edcd4d6d23501debe73c11fba3a65f21`:
+
+- `44` focused tests pass; the full HGC suite is `533` passed, `3` skipped;
+- the GCC 13.2 compile exits zero with zero warnings;
+- the builder SHA-256 is
+  `70d7cc13008158ee09ed14302dacc6459bf7a691dcf0c5892b51fc31bfc7fca6`;
+- zero-query is valid, sphere guide queries are exact one-hot, repeated sphere
+  output bytes have SHA-256
+  `4c99047c31e63dd9e0159609dc8117e410999474c7fc5d15c5576a8c97e292e0`,
+  and the folded sheet returns same-sheet-only neighbors;
+- overwrite refusal preserves the existing destination; and
+- the local validation JSON has SHA-256
+  `48946fc7eb894799b748c894d7fb909bfd3f9a6595bda0dda0767382de119c6e`.
+
+The unchanged C++ builder source/binary identity remains tied to
+`2e590806edcd4d6d23501debe73c11fba3a65f21`; it is not the source identity for
+the later Panda subset diagnostic.
+
+This completes compiler and cross-language contract evidence only. The actual
+Panda subset diagnostic implementation is under final audit/pending, and no
+full Panda run is authorized yet.
 
 ## Official API Route
 
@@ -142,11 +168,34 @@ length within `1e-5`, which admits normalized float32 model normals without
 silently changing their direction.
 
 Local Python verification reports `44` focused tests and `536` complete
-repository tests passing. Local validation does not claim C++ compatibility;
-the exact source must still compile on HGC against the pinned CGAL/Boost tree
-and pass a Python-writer -> C++-builder -> Python-reader golden roundtrip.
+repository tests passing. The exact source now also passes the HGC
+cross-language compiler and golden-roundtrip gate recorded above.
 
 ## Phase B: Fixed-Checkpoint Gates
+
+The bounded Panda subset gates are predeclared before any subset result is
+observed:
+
+1. The checkpoint SHA-256 is exactly
+   `fae9f653cbee6e8b0b56987eb1f270cd804989d296e643a05c2efe742ce4c505`,
+   the checkpoint iteration is exactly `4000`, and the source checkout is
+   a clean exact commit containing the finalized diagnostic; that commit's
+   hash will be recorded before execution.
+2. All `4500` guide rows are exact one-hot, and guide-site barycentric
+   reconstruction error is `<= 1e-12`.
+3. All `4096` selected render rows have positive, normalized weights. Every
+   CGAL guide ID is contained in the existing topology-safe K128 candidate
+   support, with zero fallback and no duplicate or padded support. This is a
+   containment safety audit, **not** a proof of exact geodesic K128 nearest
+   neighbors.
+4. Every builder invocation is bounded to `300 s`.
+5. The full `496,632`-root Panda diagnostic is authorized only if the measured
+   sequential extrapolation is `<= 3600 s` for the one-time offline build, no
+   correctness gate fails, and artifacts and provenance are complete.
+
+The actual Panda subset diagnostic implementation remains under final
+audit/pending. Until the gates above are measured and pass, no full Panda,
+white-tiger, training, or visualization run is authorized.
 
 Before the complete Panda population:
 
@@ -154,7 +203,8 @@ Before the complete Panda population:
 2. single-plane and disconnected folded-sheet probes;
 3. guide-site queries proving Kronecker identity;
 4. deterministic bounded Panda subsets for correctness and timing;
-5. complete Panda R080 iteration-4000 weights only after subset acceptance.
+5. complete Panda R080 iteration-4000 weights only after subset acceptance and
+   the predeclared time/provenance gates above.
 
 Complete Panda diagnostics then use the exact inherited surface edge set and
 record:
@@ -178,7 +228,8 @@ gate.
 Natural-neighbor weights are constructed offline when guide/query topology is
 rebuilt. Training-time field evaluation, if eventually accepted, is one sparse
 CSR gather/reduction; it contains no per-step Voronoi construction or global
-linear solve.
+linear solve. The training-time contract remains sparse CSR only; no per-step
+CGAL is authorized.
 
 The current CGAL wrapper still builds a small regular triangulation for each
 query after reusable Delaunay filtering. R083 therefore benchmarks bounded

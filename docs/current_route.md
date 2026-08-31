@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-08-30.
+Status date: 2026-09-01.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -250,10 +250,40 @@ an isolated HGC bootstrap; the unmodified CGAL surface-neighbor example and a
 two-sheet probe compile and pass. Across separations `0.1x` through `5x` grid
 spacing, opposite-sheet weight is exactly zero and Delaunay-filtered/range
 coordinates are identical. The local standalone C++ CSR builder and strict
-Python binary validator pass `44` focused and `536` complete tests, but C++
-cross-language compilation and bounded Panda subset evidence remain pending.
-R083 has no trainer/config/checkpoint or visualization integration. See
-`docs/r083_surface_natural_neighbor_length_field.md`.
+Python binary validator pass `44` focused and `536` complete tests.
+
+The HGC cross-language gate is complete at clean remote source commit
+`2e590806edcd4d6d23501debe73c11fba3a65f21`: the full HGC suite is `533`
+passed, `3` skipped; GCC 13.2 compilation exits zero with zero warnings; the
+builder SHA is
+`70d7cc13008158ee09ed14302dacc6459bf7a691dcf0c5892b51fc31bfc7fca6`;
+zero-query is valid, sphere guide queries are exact one-hot, repeated sphere
+bytes have SHA
+`4c99047c31e63dd9e0159609dc8117e410999474c7fc5d15c5576a8c97e292e0`, the
+folded sheet is same-sheet-only, overwrite refusal preserves the destination,
+and the local validation JSON SHA is
+`48946fc7eb894799b748c894d7fb909bfd3f9a6595bda0dda0767382de119c6e`.
+
+The unchanged C++ builder source/binary identity remains tied to
+`2e590806edcd4d6d23501debe73c11fba3a65f21`; the later Panda subset diagnostic
+must use its own clean exact finalized-diagnostic commit.
+
+The actual Panda subset diagnostic implementation is under final audit/pending;
+no full Panda run is authorized yet. Before any subset, the predeclared gates
+are: exact checkpoint SHA
+`fae9f653cbee6e8b0b56987eb1f270cd804989d296e643a05c2efe742ce4c505` at
+iteration `4000` and a clean exact commit containing the finalized diagnostic,
+whose hash will be recorded before execution; all `4500` guide rows exact
+one-hot with guide-site barycentric error `<=1e-12`; all `4096` selected render
+rows positive/normalized; every CGAL ID contained in the existing
+topology-safe K128 candidate support with zero fallback and no duplicate or
+padding. The latter is a containment safety audit, **not** a proof of exact
+geodesic K128 nearest neighbors. Each builder invocation is bounded to
+`300 s`; the full `496,632`-root Panda run may be authorized only when measured
+sequential extrapolation is `<=3600 s`, no correctness gate fails, and
+artifacts/provenance are complete. The training-time contract remains sparse
+CSR only, with no per-step CGAL. No white-tiger run, training, or visualization
+is authorized. See `docs/r083_surface_natural_neighbor_length_field.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
