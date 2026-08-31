@@ -176,16 +176,26 @@ length-confidence-specific image-gradient gate and a tail-concentration anchor
 are required. R075 remains accepted. See
 `docs/r077_confidence_owned_length.md`.
 
-R078 is the active bounded 0-3k treatment for the two attributed R077
-omissions. It inherits R077 and adds exactly
+R078 is deferred before H100 execution. It inherits R077 and adds exactly
 `VIEW_GATE_LENGTH_CONFIDENCE_SUPPORT=1` and
 `CLEAN_FLOW_GUIDE_LENGTH_ANCHOR_REDUCTION=tail_concentration`. The first gates
 only each source guide's render-path decoded-length gradient by stored length
 confidence before exact surface interpolation; anchor and surface propagation
 remain active. The second retains weight `0.080` and adds weighted `L4-L2`
 concentration to the existing mean absolute natural-log ratio, targeting sparse
-tails without a physical endpoint. See
+tails without a physical endpoint. Its iteration-zero length release is now an
+unresolved schedule confound, so no R078 remote run or artifact exists. See
 `docs/r078_length_confidence_tail.md`.
+
+R079 is the active matched unlock-timing diagnostic. The original R074 schema12
+3k checkpoint can be migrated to schema14 by adding five default config fields
+while preserving every model and optimizer tensor bit-exactly. Its
+`guide_length_raw` Adam moments are exactly zero and step is 3000. R079 resumes
+that frozen state, unlocks only length at 3001, and stops at 4000. This compares
+R079 4000 with R076 1000 at exactly 1000 length updates under the same V8 target,
+without R077/R078 gates or anchors. A separate one-step resume verifies model,
+optimizer, RNG, lifecycle, root count, and inclusive freeze boundary before the
+full continuation. See `docs/r079_length_unlock_at3k.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual

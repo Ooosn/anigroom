@@ -2,9 +2,10 @@
 
 Status date: 2026-08-31.
 
-Status: bounded 3k from-zero experiment contract; formal training evidence is
-pending. R078 is the isolated follow-up to the rejected R077
-confidence-owned mean-anchor route.
+Status: deferred before H100 execution. The mechanisms remain implemented and
+default-off, but the experiment inherits R077's iteration-zero length release
+and therefore cannot answer whether the extreme coat is caused by a length
+code defect or by unlocking into an immature support state.
 
 ## Question
 
@@ -129,3 +130,25 @@ R077 omissions encoded by the assignments above. The experiment must be
 judged with the fixed flow and asset protocols, including child-strand/clump,
 RGB-to-flow or edge-style loss, and cleaned-flow guide initialization checks.
 No result, PSNR endpoint, or final length endpoint is assumed by this contract.
+
+## Deferral boundary
+
+R078 was not deployed: no remote source, runtime, log, PID record, checkpoint,
+or asset exists. Before launch, comparison with the normal Panda R068 schedule
+and the historical R028 early-guide ablation showed that iteration-zero guide
+learning is itself a confound. At equal 1000 guide-length update steps, normal
+R068 iteration 10000 has effective mean/q95 `0.019797/0.034871`, while R076
+iteration 1000 has `0.048385/0.073112` and R077 has
+`0.045406/0.068528`. Normal unlock begins after roughly 660k roots, completed
+coverage ramp, and the final lifecycle event; R076/R077 begin from 400k roots
+during lifecycle and early mask correction.
+
+Code audit also found a separate freeze semantic defect: frozen parameters keep
+a zero gradient tensor and still execute Adam step, advancing state and allowing
+momentum movement if moments are nonzero. This does not cause R076, where length
+was never frozen, but it must be isolated rather than hidden inside R078.
+
+R079 therefore supersedes R078 as the next diagnostic. It migrates the exact
+frozen R074 3k model/optimizer state without changing any tensor, unlocks only
+length at iteration 3001, and compares iteration 4000 against R076 iteration
+1000 at the same 1000 length-update count.
