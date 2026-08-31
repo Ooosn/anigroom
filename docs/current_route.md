@@ -317,16 +317,18 @@ proposal. Its Phase A pure float64 algebra is implemented in
 `tests/test_rbf_partition_of_unity.py` and has passed. Phase B1 offline
 guide-topology data algebra is implemented in
 `anigroom/rbf_topology_cover.py` and `tests/test_rbf_topology_cover.py` and has
-also passed. Phase B2 vertex/face incidence and arbitrary-query support,
-checkpoint gates, trainer, config, visualization, and Panda field evidence
-remain pending or unauthorized. Fixed-radius Wendland C2 PU weights blend
-exact local constant-augmented Wendland RBFs evaluated by 3D chord only inside
-certified patches. Per-patch radii are mandatory as `[P]`, and every solved
-system is bound to its exact patch identity. There is no query-adaptive Kth
-radius, nonzero KNN truncation, fallback, NumPy/SciPy path, `pinv`, `lstsq`,
-jitter, or regularization. The design is scalar-length only; guide lifecycle
-changes rebuild patch algebra, while continuous render barycentric evaluation
-is a later gate.
+also passed. Phase B2 exact vertex/face incidence and arbitrary-query support
+algebra is implemented in those same B1 files and has passed. Actual Panda
+guide graph/cover evidence, local-system conditioning, checkpoint gates,
+trainer, config, visualization, and Panda field evidence remain pending or
+unauthorized. Fixed-radius Wendland C2 PU weights blend exact local constant-
+augmented Wendland RBFs evaluated by 3D chord only inside certified patches.
+Per-patch radii are mandatory as `[P]`, and every solved system is bound to its
+exact patch identity. There is no query-adaptive Kth radius, nonzero KNN
+truncation, fallback, NumPy/SciPy path, `pinv`, `lstsq`, jitter, or
+regularization. The design is scalar-length only; guide lifecycle changes
+rebuild patch algebra, while continuous render barycentric evaluation remains
+outside checkpoint authorization.
 
 R084 Phase A passes float64 node self error, constant error, and cardinal-sum
 error gates of `<=1e-10`, finite autograd, boundary continuity,
@@ -343,9 +345,18 @@ included and the boundary is excluded. Node membership is exact sorted CSR
 with mandatory self membership and no jitter, `nextafter`, padding, or
 fallback. Validation is `17` focused tests passed in `0.14 s`; full `mygs`
 pytest `595` passed with `14` warnings in `19.73 s`; `py_compile` and
-`git diff --check` pass. Phase B2 vertex/face incidence and arbitrary-query
-support are intentionally absent, so checkpoint and Panda gates remain
-unauthorized.
+`git diff --check` pass.
+
+R084 Phase B2 builds exact chunked vertex active CSR, sparse face candidate
+sets of `1-3` patches, and a strong full-face cover report. Arbitrary-query
+support uses ragged piecewise-linear distances and retains candidates at or
+above radius as explicit zero-mass entries. Brute-force comparison proves
+candidate completeness; there is no `topk`, truncation, padding, or fallback.
+Validation is `25` focused tests passed in `0.17 s`; full `mygs` pytest `603`
+passed with `14` warnings in `20.15 s`; `py_compile` and
+`git diff --check` pass. Phase A+B1+B2 code gates pass, but actual Panda guide
+graph, cover, local-system conditioning, checkpoint field, trainer/config,
+visualization, and Panda evidence remain pending or unauthorized.
 
 A read-only constrained harmonic FEM audit found a
 `340288`-vertex/`680572`-face mesh, KKT dimension `344788`

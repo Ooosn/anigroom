@@ -1,8 +1,9 @@
 # R084: Topology-Covered RBF Partition-of-Unity Length Field
 
-Status: Phase A pure float64 algebra and Phase B1 offline guide-topology data
-algebra are implemented and passed. Phase B2 vertex/face incidence and
-arbitrary-query support, checkpoint diagnostics, trainer, configuration, and
+Status: Phase A pure float64 algebra, Phase B1 offline guide-topology data
+algebra, and Phase B2 vertex/face incidence plus arbitrary-query support are
+implemented and passed as code gates. Actual Panda guide graph/cover evidence,
+local-system conditioning, checkpoint diagnostics, trainer, configuration, and
 visualization remain pending or unauthorized; no Panda field evidence exists.
 
 ## Purpose
@@ -15,10 +16,11 @@ tuned parameter. It asks whether a topology-covered collection of exact local
 radial basis interpolants can provide a continuous scalar length field while
 retaining guide-site identity.
 
-Phase A implements pure RBF-PU algebra. Phase B1 now implements deterministic
+Phase A implements pure RBF-PU algebra. Phase B1 implements deterministic
 offline guide-graph distances, fixed patch radii, and guide-node CSR
-membership. It does not implement vertex/face incidence, arbitrary-query
-support, a complete topology cover, or checkpoint evaluation.
+membership. Phase B2 implements exact vertex/face incidence and arbitrary-query
+support algebra. None of these code gates evaluates the actual Panda guide
+graph, topology cover, local-system conditioning, or checkpoint field.
 
 ## Decided Contract
 
@@ -169,20 +171,50 @@ Phase B1 validation evidence:
 - `py_compile` passed; and
 - `git diff --check` passed.
 
-Phase B2 is intentionally absent. No vertex/face incidence structure or
-arbitrary-query patch support has been implemented. Therefore Phase B1 is not
-a complete topology cover, does not evaluate render-root movement, and is not
-actual Panda field evidence. Phase B2, checkpoint, trainer, configuration, and
-visualization gates remain pending or unauthorized.
+Phase B1 itself does not claim vertex/face incidence or arbitrary-query cover;
+those operations are now implemented and passed separately in Phase B2 below.
+Neither phase supplies actual Panda topology or field evidence. Checkpoint,
+trainer, configuration, and visualization gates remain pending or
+unauthorized.
+
+## Phase B2 Result: Vertex/Face And Arbitrary-Query Cover Algebra Passed
+
+Phase B2 extends the same implementation and test files:
+
+- `anigroom/rbf_topology_cover.py`;
+- `tests/test_rbf_topology_cover.py`.
+
+The vertex active-patch CSR is exact and built in chunks only to bound working
+memory; chunking does not change membership. Face candidates are sparse and
+contain `1-3` patch IDs. A strong full-face cover report verifies the complete
+face criterion rather than only vertex incidence.
+
+Arbitrary-query support uses ragged piecewise-linear topology distances. It
+retains candidates at or above the fixed patch radius so their exact zero raw
+PU mass remains explicit; they are not silently truncated. A brute-force
+reference proves candidate completeness. There is no `topk`, fixed-count
+truncation, radius-based candidate deletion, padding, or fallback.
+
+Phase B2 validation evidence:
+
+- `25` focused tests passed in `0.17 s`;
+- full `mygs` pytest: `603` passed, `14` warnings in `20.15 s`;
+- `py_compile` passed; and
+- `git diff --check` passed.
+
+Phase A, B1, and B2 code gates pass. This does not establish an actual Panda
+guide graph, Panda vertex/face cover, local-system conditioning, checkpoint
+field, trainer/config integration, or visualization. Those gates remain
+pending or unauthorized, and no Panda evidence is claimed.
 
 ## Topology And Lifecycle Boundary
 
-Phase B1 owns only guide-graph component distances, fixed guide-patch radii, and
-sorted guide-node CSR. Future Phase B2 owns vertex/face incidence,
-arbitrary-query memberships, coverage proof, and folded/disconnected-surface
-exclusion beyond the guide graph. Neither layer may infer missing membership
-with ambient KNN, expand a radius after seeing a query, or pad an undersupported
-patch.
+Phase B1 owns guide-graph component distances, fixed guide-patch radii, and
+sorted guide-node CSR. Phase B2 owns vertex/face incidence, arbitrary-query
+memberships, strong cover reporting, and completeness proof beyond the guide
+graph. Neither layer may infer missing membership with ambient KNN, expand a
+radius after seeing a query, apply `topk`/fixed-count truncation, or pad/fallback
+an undersupported patch.
 
 Guide insertion, deletion, or movement changes interpolation nodes and must
 rebuild affected patch systems. Render-root barycentric movement does not
@@ -225,13 +257,14 @@ implemented or executed, so this audit is not an experimental rejection.
 
 ## Decision Rule
 
-R084 Phase A and Phase B1 are complete and passed. B1 establishes only offline
-guide-topology data algebra using the declared piecewise-linear proxy; it is
-not exact geodesic evidence or arbitrary-query coverage. This does not
-authorize Phase B2, checkpoint evaluation, trainer/config integration, or
-visualization, and it is not actual Panda field evidence. Any later gate must
+R084 Phase A, Phase B1, and Phase B2 code gates are complete and passed. B1's
+piecewise-linear proxy is not exact geodesic evidence; B2's incidence/query
+algebra is not actual Panda cover or field evidence. This does not authorize
+actual Panda guide-graph construction, local-system conditioning, checkpoint
+evaluation, trainer/config integration, or visualization. Any later gate must
 retain exact nodal identity, constant/cardinal reproduction, finite gradients,
 support-boundary continuity, folded-topology isolation, strict
 singular/uncovered failure, per-patch `[P]` radii, system-to-patch identity
-binding, deterministic first-distinct zero-mass boundaries, exact sorted CSR,
-and strict no-jitter/no-padding/no-fallback behavior.
+binding, deterministic first-distinct zero-mass boundaries, exact sorted/ragged
+CSR, brute-force completeness, and strict no-`topk`/no-truncation/no-padding/
+no-fallback behavior.
