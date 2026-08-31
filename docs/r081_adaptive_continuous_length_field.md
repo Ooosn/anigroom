@@ -1,7 +1,7 @@
 # R081: Density-Adaptive Continuous Length Field
 
-Status: local pre-training implementation complete; fixed-checkpoint H100
-evidence pending; not an active Stage 1 behavior.
+Status: fixed-checkpoint Panda gate completed and rejected; never integrated
+into Stage 1 training or visualization.
 
 ## Purpose
 
@@ -219,6 +219,53 @@ focused mixed-path and coverage-hole regressions included. The exact H100 gate
 must be rerun under a new output/log identity rather than overwriting the failed
 attempt.
 
+The corrected retry at commit
+`a36e0de01c2fbd6d1ac5bd932f4e3f52028df019` completed on the full Panda R080
+iteration-4000 population:
+
+- render roots / guide roots / exact render edges:
+  `496632 / 4500 / 15892224`;
+- legacy/candidate support width: `8 / 9`;
+- candidate support build and distance/weight time: `0.07578 / 0.14029 s`;
+- candidate support bytes: `89,393,760`, versus legacy `79,461,120`;
+- peak allocated/reserved CUDA memory: `1.397 / 1.548 GB`;
+- candidate effective-guide-count median: `2.03082`, below legacy `2.26880`;
+- candidate guide-site relative self-error P50/P95/max:
+  `0.01072 / 0.06188 / 0.29651`;
+- candidate-versus-legacy render-length relative difference P50/P95/max:
+  `0.00661 / 0.04001 / 0.27416`.
+
+The candidate smooths only inside an unchanged K+1 support cell:
+
+| Absolute log-length edge jump | Legacy | R081 candidate |
+| --- | ---: | ---: |
+| all-edge mean | 0.026418 | 0.025634 |
+| all-edge P95 | 0.114162 | 0.122116 |
+| all-edge P99 | 0.226566 | 0.247155 |
+| unchanged-support P95 | 0.027774 | 0.010192 |
+| changed-support P95 | 0.169238 | 0.183033 |
+| changed/unchanged P95 ratio | 6.093 | 17.959 |
+
+Although the boundary source itself has zero Wendland mass, the query-adaptive
+K+1 radius rescales every surviving weight when the discrete support changes.
+With only eight active neighbors, the window is more concentrated than the
+legacy field and produces a worse support seam. R081 therefore fails its core
+continuity objective. No white-tiger run or canonical visualization is
+justified, because the Panda numeric gate already rejects the representation.
+
+Formal retry JSON:
+
+`D:/RTS/_tmp/panda_r081_continuous_field_acceptance_20260901/retry1/panda_r080_iter4000_r081_fixed_field.json`
+
+SHA-256:
+`0a94e109828371a2c628c28a964e8e329493f5464b08d95cb4491abed42f9778`.
+
+The next attempt may retain the literature-backed compact C2 window only if it
+separately tests the standard particle-method premise of a larger fixed
+neighbor mass. It must not tune a Panda length, region, or smoothing loss, and
+it must continue to stop before training or visualization unless the exact
+support-change edge gate improves.
+
 ## Literature Basis
 
 The design follows established particle and scattered-data field methods, not
@@ -245,7 +292,5 @@ References:
 
 ## Decision Rule
 
-R081 remains diagnostic until analytic tests, Panda and white-tiger fixed-field
-evidence, performance checks, and canonical visual review all pass. Only then
-may a separately reviewed config/checkpoint migration expose the backend to a
-bounded training continuation.
+R081 is rejected. Its core helper and diagnostic remain isolated evidence; no
+config/checkpoint migration or bounded training continuation is authorized.
