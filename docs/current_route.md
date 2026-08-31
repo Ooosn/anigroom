@@ -187,15 +187,29 @@ tails without a physical endpoint. Its iteration-zero length release is now an
 unresolved schedule confound, so no R078 remote run or artifact exists. See
 `docs/r078_length_confidence_tail.md`.
 
-R079 is the active matched unlock-timing diagnostic. The original R074 schema12
+R079 is the completed and rejected matched length-only unlock diagnostic. The original R074 schema12
 3k checkpoint can be migrated to schema14 by adding five default config fields
 while preserving every model and optimizer tensor bit-exactly. Its
 `guide_length_raw` Adam moments are exactly zero and step is 3000. R079 resumes
 that frozen state, unlocks only length at 3001, and stops at 4000. This compares
-R079 4000 with R076 1000 at exactly 1000 length updates under the same V8 target,
+R079 4000 compares with R076 1000 at exactly 1000 length updates under the same V8 target,
 without R077/R078 gates or anchors. A separate one-step resume verifies model,
 optimizer, RNG, lifecycle, root count, and inclusive freeze boundary before the
-full continuation. See `docs/r079_length_unlock_at3k.md`.
+full continuation. It reaches effective mean/q95 `0.04199/0.07170`: lower mean
+than R076, but essentially the same excessive q95 and far above normal R068
+10k `0.02006/0.03392`. Thus iteration-zero release is not the sole cause.
+Length was the only movable low-frequency guide attribute, whereas the normal
+route unlocks the coupled guide group together. See
+`docs/r079_length_unlock_at3k.md`.
+
+R080 is the active one-variable follow-up from the same migrated R074 3k
+checkpoint. It inherits R079 and changes only `GUIDE_FREEZE_UNTIL=3000`, so
+length, width/taper, brush, child spread, clump, and direct guide direction can
+share the next 1000 low-frequency updates; shape-detail freezing still holds
+curl/turns and render residual multipliers remain zero. R079 4k is therefore
+the length-only control and R080 4k the coupled-guide treatment, with identical
+model/optimizer/RNG/lifecycle start state. See
+`docs/r080_all_guide_unlock_at3k.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual

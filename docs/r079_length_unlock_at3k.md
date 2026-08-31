@@ -1,7 +1,8 @@
 # R079 3k->4k Length-Unlock Continuation
 
-Status: bounded continuation contract. This arm is intentionally a matched
-schedule comparison, not a new from-zero route or a final acceptance claim.
+Status: completed and rejected as a length-only route. Delaying the isolated
+length release from iteration zero to 3001 improves reconstruction but still
+reproduces the long-coat distribution after 1000 length updates.
 
 ## Question
 
@@ -127,3 +128,33 @@ immediately produce long hair. The outer validator then stopped because setup
 events are emitted under `setup_progress`, while it searched only `progress`.
 No 3000-to-4000 continuation started. The corrected validator accepts either
 event channel without changing training or checkpoint state.
+
+The fourth invocation from clean source `207717f` completes through
+`R079_DONE`. Migration preserves every model and optimizer tensor digest; the
+original R074 checkpoint remains untouched. The migrated checkpoint SHA-256 is
+`e015ea65c1dc473ff1b23e385f8c810ba70cde9deaf3b26244a127e2bf2fc63b`,
+and the final iteration-4000 checkpoint SHA-256 is
+`c9069dd98129f4e27eac34de0dcf3055b210c333ac4bbd8505ee559957e5d101`.
+
+## Completed comparison
+
+Iteration 3001 remains at the frozen short state:
+q05/mean/q50/q95/max
+`0.008857/0.011029/0.011079/0.012956/0.014491`. After the matched 1000
+length updates, iteration 4000 becomes:
+
+| Measurement | R076 1k | R077 1k | R079 4k | Normal R068 10k |
+|---|---:|---:|---:|---:|
+| Mean length | `0.04838` | `0.04541` | `0.04199` | `0.02006` |
+| q95 length | `0.07311` | `0.06853` | `0.07170` | `0.03392` |
+| Maximum | `0.09811` | `0.10620` | `0.11381` | `0.09071` |
+| Test composite | `20.34724` | `20.01886` | `21.60187` | `26.96223` |
+| Test mask L1 | `0.02788` | `0.03211` | `0.02110` | `0.00927` |
+| Roots | `408472` | `408952` | `496183` | `669143` |
+
+R079 therefore disproves the narrow hypothesis that iteration-zero release is
+the sole cause. A frozen 3k state still reaches a q95 near 7.2 cm when length is
+the only unlocked low-frequency guide attribute. The normal 10k route differs
+in a more fundamental way: it unlocks the coupled low-frequency guide group
+together after coverage and population have matured. R080 isolates that group
+coupling from the same R074 3k checkpoint.
