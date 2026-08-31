@@ -227,6 +227,18 @@ P95 worsens `0.169238 -> 0.183033`, overall P95 worsens
 No white-tiger run, canonical visualization, config integration, or training is
 authorized. See `docs/r081_adaptive_continuous_length_field.md`.
 
+R082 is the prepared fixed-neighbor-mass follow-up and changes only the
+diagnostic candidate support from eight active guides plus one zero boundary to
+32 active guides plus one zero boundary. K32 is fixed before output review,
+matches the accepted render-surface graph width, and follows the established
+particle-method principle that a fixed neighbor population lets sampling
+density determine physical bandwidth. The inherited field, guide values,
+checkpoint, surface edges, kernel, and no-training/no-visualization contract
+remain unchanged. The diagnostic now computes exact support intersections in
+linear rather than quadratic support memory; all `492` local tests pass. Panda
+must pass before white-tiger or canonical visual evidence is authorized. See
+`docs/r082_fixed_neighbor_mass_length_field.md`.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049

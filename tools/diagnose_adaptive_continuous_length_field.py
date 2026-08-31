@@ -1,8 +1,9 @@
-"""Bounded R081 fixed-checkpoint continuous length-field diagnostic.
+"""Bounded R081/R082 fixed-checkpoint continuous length-field diagnostic.
 
 This module intentionally stays outside the formal training path.  It loads one
 strict Stage1 checkpoint, evaluates the inherited primary-guide field and an
-independent K+1-support Wendland candidate, and writes only numeric evidence.
+independent fixed-mass K+1-support Wendland candidate, and writes only numeric
+evidence.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import argparse
 from dataclasses import asdict, is_dataclass
 import hashlib
 import json
+from numbers import Integral
 import os
 from pathlib import Path
 import re
@@ -377,11 +379,26 @@ def _edge_support_overlap(
     source_support: torch.Tensor,
     destination_support: torch.Tensor,
 ) -> torch.Tensor:
+    if source_support.ndim != 2 or destination_support.ndim != 2:
+        raise ValueError("edge support batches must have shape [E, S]")
+    if tuple(source_support.shape) != tuple(destination_support.shape):
+        raise ValueError("edge support batches must have equal shape")
     source_sorted = torch.sort(source_support, dim=1).values
     destination_sorted = torch.sort(destination_support, dim=1).values
-    return (
-        source_sorted[:, :, None] == destination_sorted[:, None, :]
-    ).any(dim=2).sum(dim=1)
+    width = int(source_sorted.shape[1])
+    if width == 0:
+        return torch.zeros(
+            (int(source_sorted.shape[0]),),
+            device=source_sorted.device,
+            dtype=torch.long,
+        )
+    insertion = torch.searchsorted(destination_sorted, source_sorted, right=False)
+    safe_insertion = insertion.clamp_max(width - 1)
+    matched = (
+        (insertion < width)
+        & (torch.gather(destination_sorted, 1, safe_insertion) == source_sorted)
+    )
+    return matched.sum(dim=1, dtype=torch.long)
 
 
 def _edge_group(
@@ -614,6 +631,41 @@ def normalize_sha256(value: str) -> str:
     if SHA256_RE.fullmatch(normalized) is None:
         raise ValueError("expected SHA-256 must be exactly 64 hexadecimal characters")
     return normalized
+
+
+def resolve_candidate_active_neighbor_count(
+    baseline_active_neighbor_count: int,
+    candidate_active_neighbor_count: int | None = None,
+) -> int:
+    """Resolve the candidate K without changing the checkpoint baseline K."""
+
+    baseline_k = int(baseline_active_neighbor_count)
+    if baseline_k < 1:
+        raise ValueError(
+            "baseline_active_neighbor_count must be positive, "
+            f"got {baseline_active_neighbor_count}"
+        )
+    if candidate_active_neighbor_count is None:
+        return baseline_k
+    if isinstance(candidate_active_neighbor_count, bool) or not isinstance(
+        candidate_active_neighbor_count,
+        Integral,
+    ):
+        raise ValueError("candidate_active_neighbor_count must be a positive integer")
+    candidate_k = int(candidate_active_neighbor_count)
+    if candidate_k < 1:
+        raise ValueError("candidate_active_neighbor_count must be a positive integer")
+    return candidate_k
+
+
+def _positive_int_argument(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer") from error
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def select_mesh_path(
@@ -868,10 +920,11 @@ def diagnose(
     mesh_path: Path | None = None,
     edge_chunk_size: int = 262144,
     expected_checkpoint_sha256: str | None = None,
+    candidate_active_neighbor_count: int | None = None,
     *,
     overwrite: bool = False,
 ) -> dict[str, Any]:
-    """Run the exact fixed-checkpoint R081 numeric comparison."""
+    """Run the exact fixed-checkpoint R081/R082 numeric comparison."""
 
     if isinstance(edge_chunk_size, bool) or int(edge_chunk_size) <= 0:
         raise ValueError("edge_chunk_size must be positive")
@@ -925,17 +978,27 @@ def diagnose(
 
     if not model.guide_enabled():
         raise RuntimeError("R081 length-field diagnostic requires primary guide roots")
-    active_k = int(config.guide_interpolation_k)
-    if active_k < 1:
-        raise RuntimeError(f"R081 active guide interpolation K must be >= 1, got {active_k}")
-    guide_count = int(model.guide_points_local.shape[0])
-    if guide_count < active_k + 1:
-        raise RuntimeError(
-            "R081 K+1 candidate support is unavailable: "
-            f"guide_count={guide_count}, K={active_k}"
+    baseline_k = int(config.guide_interpolation_k)
+    try:
+        candidate_k = resolve_candidate_active_neighbor_count(
+            baseline_k,
+            candidate_active_neighbor_count,
         )
-    if int(model.guide_interpolation_k) != active_k:
-        raise RuntimeError("checkpoint model/config guide interpolation K disagree")
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    guide_count = int(model.guide_points_local.shape[0])
+    if guide_count < baseline_k:
+        raise RuntimeError(
+            "legacy primary-guide support is unavailable: "
+            f"guide_count={guide_count}, baseline_K={baseline_k}"
+        )
+    if guide_count < candidate_k + 1:
+        raise RuntimeError(
+            "candidate K+1 support is unavailable: "
+            f"guide_count={guide_count}, candidate_K={candidate_k}"
+        )
+    if int(model.guide_interpolation_k) != baseline_k:
+        raise RuntimeError("checkpoint model/config baseline guide interpolation K disagree")
 
     with torch.no_grad():
         roots_world, root_normals, roots_local = model.roots_and_normals()
@@ -956,7 +1019,7 @@ def diagnose(
     legacy_support_validation = validate_surface_support(
         legacy_support,
         source_count=guide_count,
-        expected_width=active_k,
+        expected_width=baseline_k,
         name="legacy primary-guide support",
     )
     _synchronize(device)
@@ -1004,7 +1067,7 @@ def diagnose(
         legacy_weights,
         interpolated=baseline_primary,
         name="legacy primary-guide interpolation",
-        expected_width=active_k,
+        expected_width=baseline_k,
     )
 
     with torch.no_grad():
@@ -1032,12 +1095,12 @@ def diagnose(
         faces=model.faces,
         source_points=model.guide_points_local,
         source_face_ids=model.guide_face_ids,
-        neighbor_count=active_k + 1,
+        neighbor_count=candidate_k + 1,
         device=device,
     )
     _synchronize(device)
     candidate_build_seconds = time.perf_counter() - candidate_build_started
-    if int(candidate_interpolator.neighbor_count) != active_k + 1:
+    if int(candidate_interpolator.neighbor_count) != candidate_k + 1:
         raise RuntimeError("candidate interpolator did not retain K+1 support width")
 
     _synchronize(device)
@@ -1052,7 +1115,7 @@ def diagnose(
     candidate_support_validation = validate_surface_support(
         candidate_support,
         source_count=guide_count,
-        expected_width=active_k + 1,
+        expected_width=candidate_k + 1,
         name="candidate render-root support",
     )
 
@@ -1066,7 +1129,7 @@ def diagnose(
         )
         candidate_weights = adaptive_wendland_c2_weights(
             candidate_distances,
-            active_neighbor_count=active_k,
+            active_neighbor_count=candidate_k,
             support_indices=candidate_support.indices,
         )
         candidate_primary = interpolate_physical(
@@ -1075,7 +1138,7 @@ def diagnose(
             candidate_weights,
         ).reshape(-1)
         candidate_radius = candidate_distances.kthvalue(
-            active_k + 1,
+            candidate_k + 1,
             dim=1,
             keepdim=True,
         ).values.reshape(-1)
@@ -1087,7 +1150,7 @@ def diagnose(
         candidate_weights,
         interpolated=candidate_primary,
         name="candidate Wendland interpolation",
-        expected_width=active_k + 1,
+        expected_width=candidate_k + 1,
     )
     if not bool(torch.isfinite(candidate_distances).all()) or bool(
         (candidate_distances < 0.0).any()
@@ -1108,7 +1171,7 @@ def diagnose(
     self_support_validation = validate_surface_support(
         guide_site_support,
         source_count=guide_count,
-        expected_width=active_k + 1,
+        expected_width=candidate_k + 1,
         name="candidate guide-site support",
     )
     _synchronize(device)
@@ -1121,7 +1184,7 @@ def diagnose(
         )
         guide_site_weights = adaptive_wendland_c2_weights(
             guide_site_distances,
-            active_neighbor_count=active_k,
+            active_neighbor_count=candidate_k,
             support_indices=guide_site_support.indices,
         )
         guide_site_evaluated = interpolate_physical(
@@ -1137,7 +1200,7 @@ def diagnose(
         guide_site_weights,
         interpolated=guide_site_evaluated,
         name="candidate guide-site self-evaluation",
-        expected_width=active_k + 1,
+        expected_width=candidate_k + 1,
     )
     self_absolute_error = (guide_site_evaluated - guide_length).abs()
     self_relative_error = self_absolute_error / guide_length.abs().clamp_min(
@@ -1152,7 +1215,7 @@ def diagnose(
         root_face_ids,
         candidate_support,
         guide_length,
-        active_neighbor_count=active_k,
+        active_neighbor_count=candidate_k,
         max_query_count=1024,
     )
     _synchronize(device)
@@ -1222,10 +1285,23 @@ def diagnose(
         "edge_aggregation_seconds": float(edge_seconds),
         "total_seconds": float(time.perf_counter() - total_started),
     }
+    diagnostic_config = {
+        "baseline_active_neighbor_count": baseline_k,
+        "baseline_support_width": baseline_k,
+        "candidate_active_neighbor_count": candidate_k,
+        "candidate_active_neighbor_count_override": (
+            int(candidate_active_neighbor_count)
+            if candidate_active_neighbor_count is not None
+            else None
+        ),
+        "candidate_support_width": candidate_k + 1,
+    }
 
     report: dict[str, Any] = {
-        "schema": "anigroom.r081_adaptive_continuous_length_field.v1",
-        "diagnostic": "R081_fixed_checkpoint_adaptive_continuous_length_field",
+        "schema": "anigroom.r082_fixed_neighbor_mass_length_field.v1",
+        "schema_version": 2,
+        "diagnostic": "R082_fixed_checkpoint_fixed_neighbor_mass_length_field",
+        "parent_diagnostic": "R081_fixed_checkpoint_adaptive_continuous_length_field",
         "status": "complete",
         "output": str(output),
         "deterministic_json": True,
@@ -1246,12 +1322,17 @@ def diagnose(
                 "path": str(mesh_path_resolved),
                 "sha256": mesh_hash,
             },
+            "diagnostic": diagnostic_config,
             "config_sha256": json_sha256(config_values),
         },
         "source_commit": source_commit,
         "checkpoint_sha256": checkpoint_hash,
         "checkpoint_iteration": checkpoint_iteration,
-        "config": config_values,
+        "config": {
+            "checkpoint": config_values,
+            "diagnostic": diagnostic_config,
+        },
+        "checkpoint_config": config_values,
         "config_sha256": json_sha256(config_values),
         "execution": {
             "device": _device_metadata(device),
@@ -1263,9 +1344,11 @@ def diagnose(
         "counts": {
             "render_root_count": root_count,
             "guide_site_count": guide_count,
-            "legacy_support_width": active_k,
-            "candidate_support_width": active_k + 1,
-            "candidate_guide_site_support_width": active_k + 1,
+            "baseline_active_neighbor_count": baseline_k,
+            "baseline_support_width": baseline_k,
+            "candidate_active_neighbor_count": candidate_k,
+            "candidate_support_width": candidate_k + 1,
+            "candidate_guide_site_support_width": candidate_k + 1,
             "edge_count": int(render_edges.shape[0]),
             "candidate_positive_weight_min": int(
                 (candidate_weights > 0.0).sum(dim=1).min().detach().cpu()
@@ -1325,7 +1408,8 @@ def diagnose(
         "validations": {
             "checkpoint_schema_and_model_load": True,
             "primary_guides_present": True,
-            "active_k_at_least_one": True,
+            "baseline_k_at_least_one": True,
+            "candidate_k_at_least_one": True,
             "legacy_support": legacy_support_validation,
             "candidate_support": candidate_support_validation,
             "candidate_guide_site_support": self_support_validation,
@@ -1367,12 +1451,24 @@ def concise_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "source_commit": report.get("source_commit"),
         "render_root_count": report.get("counts", {}).get("render_root_count"),
         "guide_site_count": report.get("counts", {}).get("guide_site_count"),
+        "baseline_active_neighbor_count": report.get("counts", {}).get(
+            "baseline_active_neighbor_count"
+        ),
+        "candidate_active_neighbor_count": report.get("counts", {}).get(
+            "candidate_active_neighbor_count"
+        ),
+        "baseline_support_width": report.get("counts", {}).get(
+            "baseline_support_width"
+        ),
+        "candidate_support_width": report.get("counts", {}).get(
+            "candidate_support_width"
+        ),
         "edge_count": edges.get("edge_count"),
         "candidate_field_difference_p95": report.get("field_difference", {})
         .get("absolute", {})
         .get("q95"),
         "candidate_edge_jump_p95": edges.get("candidate", {}).get("q95"),
-        "candidate_support_changed_edge_fraction": report.get("edges", {})
+            "candidate_support_changed_edge_fraction": report.get("edges", {})
         .get("full_edge_partition", {})
         .get("changed_support", {})
         .get("edge_fraction"),
@@ -1381,7 +1477,7 @@ def concise_report(report: Mapping[str, Any]) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the bounded R081 fixed-checkpoint length-field diagnostic."
+        description="Run the bounded R082 fixed-checkpoint length-field diagnostic."
     )
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -1389,6 +1485,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mesh", default=None, type=Path)
     parser.add_argument("--edge-chunk-size", type=int, default=262144)
     parser.add_argument("--expected-checkpoint-sha256", default=None)
+    parser.add_argument(
+        "--candidate-active-neighbor-count",
+        type=_positive_int_argument,
+        default=None,
+        help=(
+            "Candidate compact-kernel active guide count; defaults to the "
+            "checkpoint's legacy guide interpolation K."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -1402,6 +1507,7 @@ def main() -> int:
         mesh_path=args.mesh.expanduser().resolve() if args.mesh is not None else None,
         edge_chunk_size=args.edge_chunk_size,
         expected_checkpoint_sha256=args.expected_checkpoint_sha256,
+        candidate_active_neighbor_count=args.candidate_active_neighbor_count,
         overwrite=bool(args.overwrite),
     )
     concise = concise_report({**report, "output": str(args.output.expanduser().resolve())})

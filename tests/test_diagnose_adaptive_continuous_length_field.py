@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import numpy as np
 import pytest
@@ -13,8 +14,12 @@ from anigroom.surface_interpolation import (
     interpolate_physical,
 )
 from tools.diagnose_adaptive_continuous_length_field import (
+    _edge_support_overlap,
     aggregate_edge_statistics,
+    concise_report,
     query_gradient_probe,
+    parse_args,
+    resolve_candidate_active_neighbor_count,
     select_mesh_path,
     summarize,
     validate_interpolation_invariants,
@@ -22,6 +27,82 @@ from tools.diagnose_adaptive_continuous_length_field import (
     validate_support_ids,
     write_deterministic_json,
 )
+
+
+def test_candidate_k_default_override_and_cli_validation(monkeypatch) -> None:
+    assert resolve_candidate_active_neighbor_count(8, None) == 8
+    assert resolve_candidate_active_neighbor_count(8, 8) == 8
+    assert resolve_candidate_active_neighbor_count(8, 32) == 32
+    for invalid in (0, -1, 1.5, True):
+        with pytest.raises(ValueError, match="positive integer"):
+            resolve_candidate_active_neighbor_count(8, invalid)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["diagnose", "--checkpoint", "checkpoint.pt", "--output", "report.json"],
+    )
+    default_args = parse_args()
+    assert default_args.candidate_active_neighbor_count is None
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "diagnose",
+            "--checkpoint",
+            "checkpoint.pt",
+            "--output",
+            "report.json",
+            "--candidate-active-neighbor-count",
+            "32",
+        ],
+    )
+    override_args = parse_args()
+    assert override_args.candidate_active_neighbor_count == 32
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "diagnose",
+            "--checkpoint",
+            "checkpoint.pt",
+            "--output",
+            "report.json",
+            "--candidate-active-neighbor-count",
+            "0",
+        ],
+    )
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
+def test_concise_report_exposes_baseline_and_candidate_k() -> None:
+    concise = concise_report(
+        {
+            "status": "complete",
+            "schema": "anigroom.r082_fixed_neighbor_mass_length_field.v1",
+            "output": "report.json",
+            "checkpoint_sha256": "0" * 64,
+            "checkpoint_iteration": 4000,
+            "source_commit": "deadbeef",
+            "counts": {
+                "render_root_count": 10,
+                "guide_site_count": 8,
+                "baseline_active_neighbor_count": 8,
+                "baseline_support_width": 8,
+                "candidate_active_neighbor_count": 32,
+                "candidate_support_width": 33,
+            },
+            "edges": {"edge_count": 20, "candidate": {"q95": 0.1}},
+            "field_difference": {"absolute": {"q95": 0.02}},
+        }
+    )
+    assert concise["baseline_active_neighbor_count"] == 8
+    assert concise["candidate_active_neighbor_count"] == 32
+    assert concise["baseline_support_width"] == 8
+    assert concise["candidate_support_width"] == 33
 
 
 def test_summary_and_partition_helpers_use_exact_small_tensors() -> None:
@@ -181,6 +262,55 @@ def _direct_edge_reference(
     )
     equal = overlap == support.shape[1]
     return baseline_jump, candidate_jump, equal, overlap
+
+
+def _pairwise_overlap_reference(
+    source_support: torch.Tensor,
+    destination_support: torch.Tensor,
+) -> torch.Tensor:
+    return (
+        source_support[:, :, None] == destination_support[:, None, :]
+    ).any(dim=2).sum(dim=1)
+
+
+def _random_unique_support(
+    batch_size: int,
+    width: int,
+    source_count: int,
+    generator: torch.Generator,
+) -> torch.Tensor:
+    return torch.stack(
+        [
+            torch.randperm(source_count, generator=generator)[:width]
+            for _ in range(batch_size)
+        ],
+        dim=0,
+    )
+
+
+def test_optimized_overlap_matches_pairwise_reference_for_wide_supports() -> None:
+    generator = torch.Generator().manual_seed(20260901)
+    for width in (3, 9, 33, 65):
+        source_count = width + 17
+        for batch_size in (1, 7, 64):
+            source_support = _random_unique_support(
+                batch_size,
+                width,
+                source_count,
+                generator,
+            )
+            destination_support = _random_unique_support(
+                batch_size,
+                width,
+                source_count,
+                generator,
+            )
+            expected = _pairwise_overlap_reference(
+                source_support,
+                destination_support,
+            )
+            actual = _edge_support_overlap(source_support, destination_support)
+            torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
 def test_edge_chunk_aggregation_matches_direct_reference_and_partitions() -> None:
