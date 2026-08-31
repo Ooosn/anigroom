@@ -268,22 +268,34 @@ The unchanged C++ builder source/binary identity remains tied to
 `2e590806edcd4d6d23501debe73c11fba3a65f21`; the later Panda subset diagnostic
 must use its own clean exact finalized-diagnostic commit.
 
-The actual Panda subset diagnostic implementation is under final audit/pending;
-no full Panda run is authorized yet. Before any subset, the predeclared gates
-are: exact checkpoint SHA
+The official Delaunay-filtered R083 candidate was then rejected at the
+predeclared exact `4096`-root Panda subset gate. The executed diagnostic source
+was clean at commit `577edbe24fcc15336d52c83a5736724de2f1ea7c`; it used
+checkpoint SHA
 `fae9f653cbee6e8b0b56987eb1f270cd804989d296e643a05c2efe742ce4c505` at
-iteration `4000` and a clean exact commit containing the finalized diagnostic,
-whose hash will be recorded before execution; all `4500` guide rows exact
-one-hot with guide-site barycentric error `<=1e-12`; all `4096` selected render
-rows positive/normalized; every CGAL ID contained in the existing
-topology-safe K128 candidate support with zero fallback and no duplicate or
-padding. The latter is a containment safety audit, **not** a proof of exact
-geodesic K128 nearest neighbors. Each builder invocation is bounded to
-`300 s`; the full `496,632`-root Panda run may be authorized only when measured
-sequential extrapolation is `<=3600 s`, no correctness gate fails, and
-artifacts/provenance are complete. The training-time contract remains sparse
-CSR only, with no per-step CGAL. No white-tiger run, training, or visualization
-is authorized. See `docs/r083_surface_natural_neighbor_length_field.md`.
+iteration `4000`. The subset run records `72` focused HGC tests passed and a
+full HGC result of `561` passed, `3` skipped; GCC compilation had zero
+warnings; and the unchanged builder SHA remains
+`70d7cc13008158ee09ed14302dacc6459bf7a691dcf0c5892b51fc31bfc7fca6`.
+All `4500/4500` guide sites were exact one-hot with weights `1` and maximum
+barycentric error `0`.
+
+Official CGAL render query index `3552` (global root `431701`) at point
+`[0.15440388023853302,0.4798352122306824,0.7974765300750732]` with normal
+`[0.22737307846546173,-0.6268308162689209,0.7452414035797119]` returned
+`success=false`. Render output and report are absent, so the K128, timing, and
+field-difference gates were not reached. The qlogin was preserved. Local
+failure-validation JSON, failure-manifest, and artifact-hashes SHA-256 values
+are respectively
+`027cec2ecedcf0fc37f7f311416457590e8665aceaea83bb5e314a89be376bc7`,
+`8c3a0de3d6eb4e6460169910744f13e15d9a33178775159130176250bfd73f4a`, and
+`560deae7394b9d524e231be2532ea4ff89d80d3f19ddda8ba30048ea8e17df06`.
+
+No full Panda, white-tiger, training, or visualization run is authorized. Next
+work is isolated causal attribution of the filtered versus all-points API,
+projected convex-hull/normal behavior, and local sampling. No formal
+field-code modification or parameter-changing retry is authorized yet. See
+`docs/r083_surface_natural_neighbor_length_field.md`.
 
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual

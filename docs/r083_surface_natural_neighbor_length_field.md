@@ -1,9 +1,9 @@
 # R083: Surface Natural-Neighbor Length Field
 
 Status: official dependency/bootstrap, folded-surface API, and HGC
-cross-language gate passed; local weight-builder/I/O implementation complete;
-Panda subset diagnostic implementation under final audit/pending; no training
-or visualization authorized.
+cross-language gate passed; the official Delaunay-filtered R083 candidate was
+rejected at the predeclared exact 4096-root Panda subset gate; no full Panda,
+white-tiger, training, or visualization run is authorized.
 
 ## Purpose
 
@@ -63,13 +63,51 @@ The cross-language gate is complete at clean remote source commit
 - the local validation JSON has SHA-256
   `48946fc7eb894799b748c894d7fb909bfd3f9a6595bda0dda0767382de119c6e`.
 
-The unchanged C++ builder source/binary identity remains tied to
-`2e590806edcd4d6d23501debe73c11fba3a65f21`; it is not the source identity for
-the later Panda subset diagnostic.
+This completes the compiler and cross-language builder contract only. The
+unchanged C++ builder source/binary identity remains tied to
+`2e590806edcd4d6d23501debe73c11fba3a65f21`; the later Panda subset diagnostic
+uses its own clean exact source commit.
 
-This completes compiler and cross-language contract evidence only. The actual
-Panda subset diagnostic implementation is under final audit/pending, and no
-full Panda run is authorized yet.
+## Completed Panda 4096-Root Subset Gate: Rejected
+
+The official Delaunay-filtered R083 candidate was executed on the predeclared
+bounded subset and rejected at that gate. The executed diagnostic source was
+clean at commit `577edbe24fcc15336d52c83a5736724de2f1ea7c`. It used checkpoint
+SHA-256
+`fae9f653cbee6e8b0b56987eb1f270cd804989d296e643a05c2efe742ce4c505` at
+iteration `4000`.
+
+The subset validation run records `72` focused HGC tests passed and a full HGC
+result of `561` passed, `3` skipped. GCC compilation completed with zero
+warnings, and the unchanged builder SHA-256 is
+`70d7cc13008158ee09ed14302dacc6459bf7a691dcf0c5892b51fc31bfc7fca6`.
+All `4500/4500` guide sites were exact one-hot with weights `1` and maximum
+barycentric error `0`.
+
+The official CGAL render query at index `3552` (global root `431701`) failed:
+
+```text
+point  = [0.15440388023853302, 0.4798352122306824, 0.7974765300750732]
+normal = [0.22737307846546173, -0.6268308162689209, 0.7452414035797119]
+success = false
+```
+
+The render output and report are absent. Consequently, the K128 containment,
+timing, and field-difference gates were not reached. The qlogin was preserved,
+and no full Panda, white-tiger, training, or visualization run occurred.
+Failure artifacts are identified by local failure-validation JSON SHA-256
+`027cec2ecedcf0fc37f7f311416457590e8665aceaea83bb5e314a89be376bc7`, local
+failure-manifest SHA-256
+`8c3a0de3d6eb4e6460169910744f13e15d9a33178775159130176250bfd73f4a`, and
+artifact-hashes SHA-256
+`560deae7394b9d524e231be2532ea4ff89d80d3f19ddda8ba30048ea8e17df06`.
+
+This is a rejection of the current official Delaunay-filtered candidate at the
+predeclared subset gate, not evidence that the underlying natural-neighbor
+idea is resolved. Next work is isolated causal attribution of the filtered
+versus all-points API, projected convex-hull/normal behavior, and local
+sampling. No formal field-code modification or parameter-changing retry is
+authorized yet.
 
 ## Official API Route
 
@@ -173,14 +211,13 @@ cross-language compiler and golden-roundtrip gate recorded above.
 
 ## Phase B: Fixed-Checkpoint Gates
 
-The bounded Panda subset gates are predeclared before any subset result is
-observed:
+The bounded Panda subset gates were predeclared before the subset result:
 
 1. The checkpoint SHA-256 is exactly
    `fae9f653cbee6e8b0b56987eb1f270cd804989d296e643a05c2efe742ce4c505`,
    the checkpoint iteration is exactly `4000`, and the source checkout is
-   a clean exact commit containing the finalized diagnostic; that commit's
-   hash will be recorded before execution.
+   clean at the executed diagnostic commit
+   `577edbe24fcc15336d52c83a5736724de2f1ea7c`.
 2. All `4500` guide rows are exact one-hot, and guide-site barycentric
    reconstruction error is `<= 1e-12`.
 3. All `4096` selected render rows have positive, normalized weights. Every
@@ -193,9 +230,10 @@ observed:
    sequential extrapolation is `<= 3600 s` for the one-time offline build, no
    correctness gate fails, and artifacts and provenance are complete.
 
-The actual Panda subset diagnostic implementation remains under final
-audit/pending. Until the gates above are measured and pass, no full Panda,
-white-tiger, training, or visualization run is authorized.
+The subset failed before K128 containment, timing, and field-difference gates
+could be measured. The current official Delaunay-filtered candidate is
+rejected; no full Panda, white-tiger, training, or visualization run is
+authorized.
 
 Before the complete Panda population:
 
@@ -203,8 +241,9 @@ Before the complete Panda population:
 2. single-plane and disconnected folded-sheet probes;
 3. guide-site queries proving Kronecker identity;
 4. deterministic bounded Panda subsets for correctness and timing;
-5. complete Panda R080 iteration-4000 weights only after subset acceptance and
-   the predeclared time/provenance gates above.
+5. complete Panda R080 iteration-4000 weights only after a new, separately
+   authorized subset candidate passes the predeclared correctness, time, and
+   provenance gates above.
 
 Complete Panda diagnostics then use the exact inherited surface edge set and
 record:
@@ -244,6 +283,10 @@ assumed thread-safe without separate evidence.
 
 ## Decision Rule
 
-R083 remains diagnostic. Any undersampling, cross-sheet contribution, loss of
-nodal identity, excessive runtime, nondeterministic CSR output, or need for a
-manual neighborhood heuristic rejects the candidate before training.
+R083 remains diagnostic, and the current official Delaunay-filtered candidate
+is rejected at the predeclared 4096-root Panda subset gate because one official
+render query returned `success=false`. Next work is isolated causal attribution
+of the filtered versus all-points API, projected convex-hull/normal behavior,
+and local sampling. No formal field-code modification or parameter-changing
+retry is authorized yet; no training, visualization, full Panda, or white-tiger
+run is authorized.
