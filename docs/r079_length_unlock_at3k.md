@@ -117,3 +117,13 @@ initializes state lazily. Guide length itself has a complete state with step
 3000 and zero moments. The corrected migration accepts stateless declared
 parameters while still rejecting undeclared state IDs and requiring the exact
 guide-length state. No checkpoint, render, or training output was created.
+
+The third invocation from `4a126b4` passed all 464 tests, completed exact
+migration, rendered migrated iteration 3000, resumed optimizer and RNG, and
+successfully wrote the iteration-3001 checkpoint. Its effective
+q05/mean/q50/q95/max is
+`0.008857/0.011029/0.011079/0.012956/0.014491`, so the unlock boundary does not
+immediately produce long hair. The outer validator then stopped because setup
+events are emitted under `setup_progress`, while it searched only `progress`.
+No 3000-to-4000 continuation started. The corrected validator accepts either
+event channel without changing training or checkpoint state.

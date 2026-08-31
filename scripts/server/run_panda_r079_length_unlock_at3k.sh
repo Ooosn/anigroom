@@ -446,7 +446,11 @@ for line in log_path.read_text(encoding="utf-8").splitlines():
 
 
 def event(name: str) -> dict[str, Any]:
-    matches = [value for value in events if value.get("progress") == name]
+    matches = [
+        value
+        for value in events
+        if value.get("progress") == name or value.get("setup_progress") == name
+    ]
     if not matches:
         raise AssertionError(f"missing progress event {name}")
     return matches[-1]
@@ -568,7 +572,11 @@ for line in log_path.read_text(encoding="utf-8").splitlines():
 
 
 def event(name: str) -> dict[str, Any]:
-    matches = [value for value in events if value.get("progress") == name]
+    matches = [
+        value
+        for value in events
+        if value.get("progress") == name or value.get("setup_progress") == name
+    ]
     if not matches:
         raise AssertionError(f"missing progress event {name}")
     return matches[-1]

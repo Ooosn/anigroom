@@ -134,6 +134,7 @@ def test_r079_launcher_enforces_migration_resume_and_4000_contract() -> None:
         'RUN_PREFLIGHT=0',
         'RUN_BATCH_PREFLIGHT=0',
         'assert setup["start_iteration"] == 3000',
+        'value.get("setup_progress") == name',
         'assert setup["root_count"] == 480292',
         'assert hashlib.sha256(target_path.read_bytes()).hexdigest() == expected_target_sha256',
         'assert config_target.resolve() == target_path',
@@ -173,6 +174,7 @@ def test_r079_launcher_enforces_migration_resume_and_4000_contract() -> None:
 
     assert source.count('"$PYTHON_PATH" -B "$MIGRATION_UTILITY"') == 1
     assert source.count('RUN_ID=') == 2
+    assert source.count('value.get("setup_progress") == name') == 2
     assert "composite_psnr" not in source
     lowered = source.lower()
     for forbidden in ("s_vmem", "qsub", "qstat", "qdel", "qalter", "scheduler", "hgc"):
