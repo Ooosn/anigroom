@@ -243,6 +243,18 @@ grows `7.096x -> 33.199x`. R082 obtains smoother statistics by erasing nodal
 attribute semantics and is rejected before white tiger, visualization, or
 training. See `docs/r082_fixed_neighbor_mass_length_field.md`.
 
+R083 is the prepared exact-nodal representation follow-up. It uses the official
+CGAL 6.2 surface Natural Neighbor/Sibson implementation, not a local weight
+approximation. Official archives and Boost dependencies are pinned by hash in
+an isolated HGC bootstrap; the unmodified CGAL surface-neighbor example and a
+two-sheet probe compile and pass. Across separations `0.1x` through `5x` grid
+spacing, opposite-sheet weight is exactly zero and Delaunay-filtered/range
+coordinates are identical. The local standalone C++ CSR builder and strict
+Python binary validator pass `44` focused and `536` complete tests, but C++
+cross-language compilation and bounded Panda subset evidence remain pending.
+R083 has no trainer/config/checkpoint or visualization integration. See
+`docs/r083_surface_natural_neighbor_length_field.md`.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049
