@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from anigroom import rbf_partition_of_unity as rbf_core
 from anigroom.rbf_partition_of_unity import (
     IllConditionedRBFSystemError,
     PartitionCoverageError,
@@ -425,6 +426,54 @@ def test_strict_singular_ill_conditioned_nonfinite_shape_type_and_radius_failure
         blend_partition_of_unity(
             torch.ones((2, 3), dtype=torch.float64),
             torch.ones((2, 2), dtype=torch.float64),
+        )
+
+
+def test_torch_out_of_memory_is_never_wrapped_as_rbf_domain_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    points, radius = _deterministic_patch(count=5)
+    system = build_augmented_system(points, radius)
+    values = torch.ones((5,), dtype=torch.float64)
+
+    def raise_oom(*_args: object, **_kwargs: object) -> torch.Tensor:
+        raise torch.OutOfMemoryError("injected OOM")
+
+    with monkeypatch.context() as context:
+        context.setattr(rbf_core.torch.linalg, "matrix_rank", raise_oom)
+        with pytest.raises(torch.OutOfMemoryError, match="injected OOM"):
+            validate_augmented_system(system)
+    with monkeypatch.context() as context:
+        context.setattr(rbf_core.torch.linalg, "solve", raise_oom)
+        with pytest.raises(torch.OutOfMemoryError, match="injected OOM"):
+            solve_augmented_system(system, values)
+        with pytest.raises(torch.OutOfMemoryError, match="injected OOM"):
+            local_cardinal_weights(
+                points,
+                points,
+                radius,
+                augmented_system=system,
+            )
+
+
+def test_torch_backend_runtime_error_propagates_without_domain_relabel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    points, radius = _deterministic_patch(count=5)
+    system = build_augmented_system(points, radius)
+
+    def raise_backend(*_args: object, **_kwargs: object) -> torch.Tensor:
+        raise RuntimeError("injected backend synchronization failure")
+
+    monkeypatch.setattr(rbf_core.torch.linalg, "solve", raise_backend)
+    with pytest.raises(RuntimeError, match="backend synchronization"):
+        solve_augmented_system(system, torch.ones((5,), dtype=torch.float64))
+    with pytest.raises(RuntimeError, match="backend synchronization"):
+        local_cardinal_weights(
+            points,
+            points,
+            radius,
+            augmented_system=system,
         )
 
 

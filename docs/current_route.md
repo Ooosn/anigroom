@@ -358,6 +358,26 @@ passed with `14` warnings in `20.15 s`; `py_compile` and
 graph, cover, local-system conditioning, checkpoint field, trainer/config,
 visualization, and Panda evidence remain pending or unauthorized.
 
+R084 Phase C1 actual-checkpoint diagnosis is prepared in
+`tools/diagnose_rbf_partition_cover.py` and
+`tests/test_diagnose_rbf_partition_cover.py` but has not been run. Candidate K
+order is fixed as `[8,12,16,24,32,48,64]`, selecting the first all-gates-pass
+candidate. Gates require topology/component and zero-boundary/self invariants;
+all `4500` local systems full-rank with condition `<=1e12`; node, constant, and
+cardinal errors `<=1e-10`; zero uncovered vertices; zero faces without a
+candidate; zero faces lacking strong cover; maximum local node count `<=128`;
+and serialized state `<=4 GiB`. Canonical guide points are recomputed from
+face/barycentric data with hard stored-point mismatch tolerance `1e-6`.
+
+One Voronoi assignment is shared by seed, delta, and root-graph construction;
+`D`, `M`, seed, delta, and component evidence is retained even on no-K
+rejection. OOM/backend failures are execution failures, never numerical
+rejections, and staged output preserves earlier artifacts. Validation is `73`
+focused tests passed in `2.54 s`; full `mygs` pytest `631` passed with `14`
+warnings in `20.41 s`; `py_compile` and `git diff --check` pass. No actual
+checkpoint/Panda result, trainer, config, or visualization is authorized or
+claimed.
+
 A read-only constrained harmonic FEM audit found a
 `340288`-vertex/`680572`-face mesh, KKT dimension `344788`
 with about `2.409 million` nonzeros, `173294` negative cotan edges, no

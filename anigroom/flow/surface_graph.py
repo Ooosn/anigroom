@@ -109,14 +109,53 @@ def _root_voronoi_graph(
     root_nodes: np.ndarray,
     edge_u: np.ndarray,
     edge_v: np.ndarray,
+    *,
+    nearest_distance: np.ndarray | None = None,
+    nearest_source: np.ndarray | None = None,
 ) -> csr_matrix:
-    nearest_distance, _, nearest_source = dijkstra(
-        graph,
-        directed=False,
-        indices=root_nodes,
-        min_only=True,
-        return_predecessors=True,
-    )
+    if (nearest_distance is None) != (nearest_source is None):
+        raise ValueError(
+            "precomputed nearest_distance and nearest_source must be supplied together"
+        )
+    if nearest_distance is None:
+        nearest_distance, _, nearest_source = dijkstra(
+            graph,
+            directed=False,
+            indices=root_nodes,
+            min_only=True,
+            return_predecessors=True,
+        )
+    else:
+        distance_array = np.asarray(nearest_distance)
+        source_array = np.asarray(nearest_source)
+        if distance_array.dtype.kind != "f":
+            raise TypeError("precomputed nearest_distance must be floating point")
+        if source_array.dtype.kind not in "iu":
+            raise TypeError("precomputed nearest_source must be integer")
+        if distance_array.shape != (graph.shape[0],):
+            raise ValueError("precomputed nearest_distance has the wrong shape")
+        if source_array.shape != (graph.shape[0],):
+            raise ValueError("precomputed nearest_source has the wrong shape")
+        nearest_distance = np.ascontiguousarray(distance_array, dtype=np.float64)
+        nearest_source = np.ascontiguousarray(source_array, dtype=np.int64)
+        if np.isnan(nearest_distance).any() or np.isneginf(nearest_distance).any():
+            raise ValueError(
+                "precomputed nearest_distance may contain only finite values or +inf"
+            )
+        finite_distance = np.isfinite(nearest_distance)
+        if np.any(nearest_distance[finite_distance] < 0.0):
+            raise ValueError("precomputed nearest_distance must be nonnegative")
+        root_node_set = np.zeros((graph.shape[0],), dtype=bool)
+        root_node_set[np.asarray(root_nodes, dtype=np.int64)] = True
+        if np.any(nearest_source < 0) or np.any(nearest_source >= graph.shape[0]):
+            raise ValueError("precomputed nearest_source contains an out-of-range node")
+        if not bool(root_node_set[nearest_source].all()):
+            raise ValueError("precomputed nearest_source must identify root nodes")
+        root_node_array = np.asarray(root_nodes, dtype=np.int64)
+        if not bool(np.equal(nearest_distance[root_node_array], 0.0).all()):
+            raise ValueError(
+                "precomputed nearest_distance must be exactly zero at root nodes"
+            )
     vertex_count = int(graph.shape[0] - root_nodes.shape[0])
     source_root = np.asarray(nearest_source, dtype=np.int64) - vertex_count
     if np.any(source_root < 0) or np.any(source_root >= root_nodes.shape[0]):

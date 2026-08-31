@@ -232,8 +232,12 @@ def validate_augmented_system(
     try:
         rank = int(torch.linalg.matrix_rank(detached).item())
         condition = float(torch.linalg.cond(detached).item())
-    except RuntimeError as error:
-        raise RBFAlgebraError("failed to analyze augmented_system") from error
+    except torch.OutOfMemoryError:
+        raise
+    except RuntimeError:
+        # Backend, device, and synchronization failures are execution errors,
+        # not evidence that this mathematical system is singular.
+        raise
     matrix_size = int(system.shape[0])
     if rank != matrix_size:
         raise SingularRBFSystemError(
@@ -379,7 +383,11 @@ def solve_augmented_system(
     )
     try:
         solved = torch.linalg.solve(system, rhs)
+    except torch.OutOfMemoryError:
+        raise
     except RuntimeError as error:
+        if "singular" not in str(error).lower() and "not invertible" not in str(error).lower():
+            raise
         raise RBFAlgebraError("augmented_system solve failed") from error
     if not bool(torch.isfinite(solved).all()):
         raise RBFAlgebraError("augmented_system solve produced nonfinite coefficients")
@@ -490,7 +498,11 @@ def local_cardinal_weights(
             system.transpose(0, 1),
             evaluation_rows.transpose(0, 1),
         ).transpose(0, 1)
+    except torch.OutOfMemoryError:
+        raise
     except RuntimeError as error:
+        if "singular" not in str(error).lower() and "not invertible" not in str(error).lower():
+            raise
         raise RBFAlgebraError("cardinal weight solve failed") from error
     weights = dual[:, :-1]
     if not bool(torch.isfinite(weights).all()):

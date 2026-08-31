@@ -2,9 +2,11 @@
 
 Status: Phase A pure float64 algebra, Phase B1 offline guide-topology data
 algebra, and Phase B2 vertex/face incidence plus arbitrary-query support are
-implemented and passed as code gates. Actual Panda guide graph/cover evidence,
-local-system conditioning, checkpoint diagnostics, trainer, configuration, and
-visualization remain pending or unauthorized; no Panda field evidence exists.
+implemented and passed as code gates. Phase C1 actual-checkpoint diagnosis is
+prepared but has not been run. Actual Panda guide graph/cover evidence,
+local-system conditioning, checkpoint field results, trainer, configuration,
+and visualization remain pending or unauthorized; no Panda field evidence
+exists.
 
 ## Purpose
 
@@ -140,9 +142,9 @@ Validation evidence:
 - `py_compile` passed; and
 - `git diff --check` passed.
 
-Phase A success authorizes neither a mesh-topology cover implementation nor a
-fixed-checkpoint run. The later cover and checkpoint gates are explicitly not
-yet defined or authorized, and no actual Panda field evidence is claimed.
+Phase A success by itself authorized neither a mesh-topology cover nor a
+fixed-checkpoint run. B1/B2 code gates now pass and C1 is prepared below, but
+no actual Panda field evidence is claimed.
 
 ## Phase B1 Result: Offline Guide-Topology Data Algebra Passed
 
@@ -207,6 +209,60 @@ guide graph, Panda vertex/face cover, local-system conditioning, checkpoint
 field, trainer/config integration, or visualization. Those gates remain
 pending or unauthorized, and no Panda evidence is claimed.
 
+## Phase C1: Actual-Checkpoint Diagnostic Prepared, Not Run
+
+Phase C1 is implemented only as a diagnostic entry point and tests:
+
+- `tools/diagnose_rbf_partition_cover.py`;
+- `tests/test_diagnose_rbf_partition_cover.py`.
+
+The actual-checkpoint candidate order is fixed before execution:
+
+```text
+[8, 12, 16, 24, 32, 48, 64]
+```
+
+The diagnostic evaluates that order and selects the first K for which every
+gate passes. It does not tune or reorder K after observing a metric.
+
+For a candidate K to pass, all of the following are required:
+
+1. topology/component invariants pass;
+2. zero-boundary and self-membership invariants pass;
+3. all `4500` local systems have full required rank and condition number
+   `<= 1e12`;
+4. node self, constant, and cardinal-sum errors are each `<= 1e-10`;
+5. uncovered vertex count is zero;
+6. face-with-no-candidate count is zero;
+7. face-lacking-strong-cover count is zero;
+8. maximum node count per local system is `<= 128`; and
+9. serialized state size is `<= 4 GiB`.
+
+Canonical guide points are recomputed from checkpoint guide face IDs and
+barycentric coordinates. Any mismatch against stored guide points above the
+hard tolerance `1e-6` fails the diagnostic.
+
+One Voronoi assignment is shared by seed selection, delta construction, and
+the root graph. Evidence for `D`, `M`, seeds, deltas, and connected components
+is serialized even when no K passes, so a no-K numerical rejection retains its
+causal topology record.
+
+Out-of-memory and backend execution failures are execution failures, never
+numerical candidate rejections. Output is staged so a later-stage failure
+preserves all previously completed artifacts rather than deleting or replacing
+them.
+
+Phase C1 implementation validation:
+
+- `73` focused tests passed in `2.54 s`;
+- full `mygs` pytest: `631` passed, `14` warnings in `20.41 s`;
+- `py_compile` passed; and
+- `git diff --check` passed.
+
+Phase C1 has not been run on an actual checkpoint. There is no Panda guide
+graph, cover, conditioning, selected K, serialized field, or checkpoint result.
+Trainer, configuration, and visualization paths remain unauthorized.
+
 ## Topology And Lifecycle Boundary
 
 Phase B1 owns guide-graph component distances, fixed guide-patch radii, and
@@ -257,14 +313,15 @@ implemented or executed, so this audit is not an experimental rejection.
 
 ## Decision Rule
 
-R084 Phase A, Phase B1, and Phase B2 code gates are complete and passed. B1's
-piecewise-linear proxy is not exact geodesic evidence; B2's incidence/query
-algebra is not actual Panda cover or field evidence. This does not authorize
-actual Panda guide-graph construction, local-system conditioning, checkpoint
-evaluation, trainer/config integration, or visualization. Any later gate must
-retain exact nodal identity, constant/cardinal reproduction, finite gradients,
+R084 Phase A, Phase B1, and Phase B2 code gates are complete and passed. Phase
+C1 actual-checkpoint diagnosis is prepared but unexecuted. B1's piecewise-
+linear proxy is not exact geodesic evidence; B2's incidence/query algebra is
+not actual Panda cover or field evidence. No checkpoint result, trainer/config
+integration, or visualization is authorized. Any later gate must retain exact
+nodal identity, constant/cardinal reproduction, finite gradients,
 support-boundary continuity, folded-topology isolation, strict
 singular/uncovered failure, per-patch `[P]` radii, system-to-patch identity
 binding, deterministic first-distinct zero-mass boundaries, exact sorted/ragged
-CSR, brute-force completeness, and strict no-`topk`/no-truncation/no-padding/
-no-fallback behavior.
+CSR, brute-force completeness, strict no-`topk`/no-truncation/no-padding/
+no-fallback behavior, fixed K order, and staged evidence-preserving failure
+semantics.
