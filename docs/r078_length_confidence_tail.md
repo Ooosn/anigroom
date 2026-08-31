@@ -134,7 +134,8 @@ No result, PSNR endpoint, or final length endpoint is assumed by this contract.
 ## Deferral boundary
 
 R078 was not deployed: no remote source, runtime, log, PID record, checkpoint,
-or asset exists. Before launch, comparison with the normal Panda R068 schedule
+or asset exists. Its bounded 3k contract remains recorded but is not authorized
+for execution. Before launch, comparison with the normal Panda R068 schedule
 and the historical R028 early-guide ablation showed that iteration-zero guide
 learning is itself a confound. At equal 1000 guide-length update steps, normal
 R068 iteration 10000 has effective mean/q95 `0.019797/0.034871`, while R076

@@ -97,3 +97,13 @@ renders view 9 at migrated iteration 3000 and output iteration 4000, and
 writes input, checkpoint, output, preflight, and render hashes. No final length threshold and no final PSNR threshold are encoded here.
 Any visual or metric decision remains a separate review of the matched
 evidence.
+
+## Attempt ledger
+
+The first H100 invocation from source `8864915` stopped at the mandatory test
+gate before migration. It passed 462 tests and failed only the R078 document
+contract because the later deferral edit no longer contained the literal phrase
+`bounded 3k`. No migrated checkpoint, preflight checkpoint, training process,
+or render was created; the original R074 checkpoint and V8 target hashes stayed
+unchanged, and the qlogin allocation was preserved. The retry requires the full
+463-test suite to pass from a new source/runtime/log/PID path.
