@@ -397,6 +397,32 @@ forward. Harmonic FEM remains mathematically valid but was not executed or
 rejected; a current full-mesh per-forward solve fails the efficiency boundary.
 See `docs/r084_topology_rbf_partition_length_field.md`.
 
+R085 is the active nested-Gaussian `0-10k` candidate and does not reopen R084.
+It composes one coarse Gaussian field evaluated only at the existing 4500
+primary-guide sites with the live 4500-guide Gaussian field evaluated at
+render roots. Level 2 is present in every forward pass; through 3k its own
+residual and covariance parameters are frozen while gradients still pass
+through its fixed propagation into level 1. The historical 20k secondary
+geometry roots are not R085 level 3, and `child_radius` is excluded because
+the active `CHILD_COUNT=1` path returns before child expansion.
+
+The first fixed-checkpoint count gate compares strict nested topology-FPS
+prefixes `256/512/1024`. Every arm has complete no-fallback coverage and
+constant/row-sum error below `3.58e-7`. `256` is selected: every primary site
+has at least six active coarse Gaussians, effective count is at least `2.934`,
+maximum weight is at most `0.529`, and learned-length guide-edge log-jump P95
+is `0.10496` versus `0.14095/0.19377` for `512/1024`. Fixed view-09 stress maps
+retain broad anatomical variation at 256 while localized islands return as
+count rises. This is no-training bandwidth evidence; trainer integration and
+quality claims remain pending. See
+`docs/r085_hierarchical_gaussian_0_10k.md`.
+
+The identical M256 initialization contract also passes the accepted
+white-tiger V8 target without retuning: active count is at least `6`, effective
+count is at least `3.589`, maximum weight is at most `0.457`, and row/constant
+errors remain below `3.58e-7`. This is matched initialization evidence, not a
+white-tiger training-quality claim.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049
