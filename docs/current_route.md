@@ -807,9 +807,14 @@ neighbors; render roots then sample the guide field through the same surface
 interpolator used during training and lifecycle updates.
 
 Clean-flow length initialization keeps the observed 5%-95% interval only as a
-robust anchor filter. Surface inpainting reconstructs the complete positive
-reference field, and the trainable guide coordinate starts at zero. No fixed
-physical length interval is applied before or after inpainting.
+robust anchor filter. Surface inpainting still reconstructs complete positive
+guide evidence, but the guide-owned from-zero path now uses only its global
+`0.50` quantile: every guide length reference starts at that one scalar and
+the trainable guide coordinate starts at zero. The spatial inpainted values
+remain diagnostic and optional supervision targets; they are not copied into
+the physical initialization. The legacy render-root-only path is unchanged.
+No fixed physical length interval is applied before or after inpainting, and
+training is free to learn a nonuniform field after the configured unlock.
 
 No render-to-guide reverse initialization exists. No second directional
 parameterization is stored beside the normalized 3D vector.

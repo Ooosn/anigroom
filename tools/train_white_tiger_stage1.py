@@ -958,6 +958,82 @@ def data_clamped_clean_flow_length(
     )
 
 
+@torch.no_grad()
+def initialize_uniform_median_guide_length(
+    guide_length_reference: torch.Tensor,
+    guide_length_raw: torch.Tensor,
+    guide_length_evidence: torch.Tensor,
+    filled_mask: torch.Tensor,
+    *,
+    label: str,
+) -> float:
+    """Initialize every guide at one median physical length.
+
+    The evidence is the completed clean-flow inpainted field. Only rows marked
+    by ``filled_mask`` and carrying finite positive evidence participate in the
+    median. All validation completes before either destination tensor changes.
+    """
+
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError("guide length initialization label must be non-empty")
+    if guide_length_reference.ndim != 2 or guide_length_reference.shape[1] != 1:
+        raise ValueError(
+            f"{label} reference must have shape [G, 1], got "
+            f"{tuple(guide_length_reference.shape)}"
+        )
+    expected_shape = tuple(guide_length_reference.shape)
+    guide_count = int(guide_length_reference.shape[0])
+    if tuple(guide_length_raw.shape) != expected_shape:
+        raise ValueError(
+            f"{label} raw shape mismatch: {tuple(guide_length_raw.shape)} != "
+            f"{expected_shape}"
+        )
+    if tuple(guide_length_evidence.shape) != expected_shape:
+        raise ValueError(
+            f"{label} evidence shape mismatch: "
+            f"{tuple(guide_length_evidence.shape)} != {expected_shape}"
+        )
+    if tuple(filled_mask.shape) != (guide_count,):
+        raise ValueError(
+            f"{label} filled mask shape mismatch: {tuple(filled_mask.shape)} != "
+            f"{(guide_count,)}"
+        )
+    if filled_mask.dtype != torch.bool:
+        raise TypeError(f"{label} filled mask must use torch.bool")
+    for name, tensor in (
+        ("reference", guide_length_reference),
+        ("raw", guide_length_raw),
+        ("evidence", guide_length_evidence),
+    ):
+        if tensor.is_complex() or not torch.is_floating_point(tensor):
+            raise TypeError(f"{label} {name} must be a real floating-point tensor")
+        if tensor.device != guide_length_reference.device:
+            raise ValueError(f"{label} {name} device must match reference")
+        if tensor.dtype != guide_length_reference.dtype:
+            raise ValueError(f"{label} {name} dtype must match reference")
+    if filled_mask.device != guide_length_reference.device:
+        raise ValueError(f"{label} filled mask device must match reference")
+
+    evidence_flat = guide_length_evidence.reshape(-1)
+    selected_mask = (
+        filled_mask
+        & torch.isfinite(evidence_flat)
+        & (evidence_flat > 0.0)
+    )
+    if not bool(selected_mask.any().detach().cpu()):
+        raise RuntimeError(f"{label} has no finite positive filled length evidence")
+    selected = evidence_flat[selected_mask]
+    median = torch.quantile(selected, 0.50)
+    if not bool(torch.isfinite(median).detach().cpu()) or not bool(
+        (median > 0.0).detach().cpu()
+    ):
+        raise RuntimeError(f"{label} produced a non-finite or non-positive median")
+
+    guide_length_reference.fill_(median)
+    guide_length_raw.zero_()
+    return float(median.detach().cpu())
+
+
 def reconstruct_clean_flow_directions(
     points: torch.Tensor,
     directions: torch.Tensor,
@@ -4780,6 +4856,10 @@ def initialize_groom_from_clean_flow(
     guide_direction_reconstruction_change_mean = 0.0
     guide_direction_reconstruction_change_p95 = 0.0
     guide_direction_reconstruction_reliability_mean = 0.0
+    guide_length_init_mode = "disabled"
+    guide_length_init_median = 0.0
+    guide_length_init_reference_min = 0.0
+    guide_length_init_reference_max = 0.0
     if model.guide_enabled():
         guide_points = model.guide_points_local * torch.exp(model.log_scale.detach()).view(1, 1) + model.translation.detach().view(1, 3)
         guide_normals, guide_tangents, guide_bitangents = model.guide_normals_and_tangent_frames()
@@ -4883,10 +4963,14 @@ def initialize_groom_from_clean_flow(
             )
             guide_filled_init = guide_direction_supported
             if bool(config.clean_flow_length_init) and bool(guide_filled_length.any()):
-                model.guide_length_reference[guide_filled_length] = guide_length[
-                    guide_filled_length
-                ]
-                model.guide_length_raw[guide_filled_length].zero_()
+                guide_length_init_median = initialize_uniform_median_guide_length(
+                    model.guide_length_reference,
+                    model.guide_length_raw,
+                    guide_length,
+                    guide_filled_length,
+                    label="guide-root clean-flow length init",
+                )
+                guide_length_init_mode = "global_median"
                 model.initialize_guide_shape_ratios_from_current_scale()
             direction_cosine = (
                 guide_direction_before * guide_direction_reconstructed
@@ -4919,6 +5003,21 @@ def initialize_groom_from_clean_flow(
         guide_filled_init = torch.zeros((0,), dtype=torch.bool, device=roots.device)
         guide_length_min = 0.0
         guide_length_max = 0.0
+
+    if model.guide_enabled():
+        final_guide_reference = model.guide_length_reference.detach().reshape(-1)
+        if not bool(torch.isfinite(final_guide_reference).all().detach().cpu()) or not bool(
+            (final_guide_reference > 0.0).all().detach().cpu()
+        ):
+            raise RuntimeError(
+                "guide-root clean-flow length init left invalid final references"
+            )
+        guide_length_init_reference_min = float(
+            final_guide_reference.min().detach().cpu()
+        )
+        guide_length_init_reference_max = float(
+            final_guide_reference.max().detach().cpu()
+        )
 
     observed = int(render_valid_init.sum().detach().cpu())
     anchor = int(render_valid_anchor.sum().detach().cpu())
@@ -4962,6 +5061,14 @@ def initialize_groom_from_clean_flow(
         "clean_flow_guide_length_init_source_count": int(guide_length_source_count),
         "clean_flow_guide_length_init_reliable_count": int(guide_length_reliable_count),
         "clean_flow_guide_length_init_filled_count": int(guide_filled_length.sum().detach().cpu()),
+        "clean_flow_guide_length_init_mode": guide_length_init_mode,
+        "clean_flow_guide_length_init_median": float(guide_length_init_median),
+        "clean_flow_guide_length_init_reference_min": float(
+            guide_length_init_reference_min
+        ),
+        "clean_flow_guide_length_init_reference_max": float(
+            guide_length_init_reference_max
+        ),
         "clean_flow_direction_representation": "direct_local_3d",
     }
 

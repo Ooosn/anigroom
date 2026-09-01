@@ -1,10 +1,13 @@
 # Live Guide-Attribute Gaussian Field V1
 
-Status: isolated representation, synthetic code gate, and Panda R080
-iteration-4000 initialization probe completed. K8 is retained only as the next
-fixed-checkpoint candidate. No Stage 1 trainer, config, checkpoint-schema,
-lifecycle, SH, canonical-visualizer, or formal-baseline integration is
-authorized by this document.
+Status: isolated representation, synthetic code gate, Panda R080
+iteration-4000 initialization probe, and uniform-median guide-length
+initialization decision completed. K8 is retained only as the next
+fixed-checkpoint candidate. The median-only length change affects from-zero
+guide initialization but does not yet integrate the live Gaussian evaluator
+into the Stage 1 trainer. No checkpoint-schema, lifecycle, SH,
+canonical-visualizer, or formal-baseline integration is authorized by this
+document.
 
 ## Objective
 
@@ -212,6 +215,66 @@ Artifacts:
   `D:/RTS/_tmp/panda_live_gaussian_init_probe_20260901_runner_retry2/result.json`;
 - K8/K16/K32 canonical-comparable maps:
   `D:/RTS/_tmp/panda_live_gaussian_init_probe_20260901_retry2/view09_length_gaussian_k*.png`.
+
+## Uniform-Median Guide-Length Initialization
+
+The canonical-comparable Panda view-09 audit evaluated the fixed
+`guide_length_reference` through the same live Gaussian K8 field, with the
+same camera, visible-root set, base render, and scalar range as the learned
+K8 map. The original 4,500-guide reference is nonuniform but narrow:
+min/mean/P50/P95/max are
+`0.00727375/0.01083564/0.01090699/0.01318722/0.01399855`. The resulting
+496,632-root field is
+`0.00761610/0.01087626/0.01092835/0.01268939/0.01364799`; visible view-09
+values are
+`0.00769953/0.01081526/0.01084090/0.01262548/0.01362322` over exactly
+`230318` roots. The normalized row-sum maximum error is `3.58e-7`.
+
+The source length field therefore supplies one robust global scale for
+from-zero guide initialization, not a spatial prior. The initialization
+contract is:
+
+1. retain the existing confidence filter and surface inpainting to produce
+   finite positive guide evidence;
+2. compute its exact `0.50` quantile;
+3. fill every `guide_length_reference` row with that scalar and zero every
+   `guide_length_raw` row;
+4. retain the spatial clean-flow target/confidence as diagnostic and optional
+   supervision evidence, without copying it into the physical initialization;
+5. leave length unconstrained after its configured training unlock.
+
+For the audited Panda input the scalar is `0.01090699`. Because live Gaussian
+weights are nonnegative and row-normalized, a constant guide field is
+mathematically constant at render roots independent of support overlap. The
+actual full Panda float32 evaluation reproduces it with maximum absolute error
+`3.73e-9`. This is an initialization change, not a physical length clamp or equality loss.
+Direction, color, width, covariance, and lifecycle behavior are unchanged.
+Resume skips from-zero initialization, so saved checkpoint references and raw
+coordinates remain authoritative.
+
+Decision-evidence artifacts (these visualize the retired nonuniform reference
+that motivated the uniform initializer):
+
+- canonical view-09 image:
+  `D:/RTS/_tmp/panda_live_gaussian_initial_reference_view09_20260901/view09_length_initial_reference_gaussian_k8.png`,
+  SHA-256 `a11e1a5d73940e932a3cbedb703cb9b97b8e46c3314e3803320927b2697fef3a`;
+- numerical report:
+  `D:/RTS/_tmp/panda_live_gaussian_initial_reference_view09_20260901/initial_reference_view09.json`,
+  SHA-256 `b4fd768b3c694e328a203ff06e94b59362916819c1ab1a4b56c590343c725a20`;
+- manifest:
+  `D:/RTS/_tmp/panda_live_gaussian_initial_reference_view09_20260901/manifest.sha256`.
+
+Actual uniform-median evaluation artifacts:
+
+- canonical view-09 image:
+  `D:/RTS/_tmp/panda_live_gaussian_uniform_median_view09_20260901/view09_length_uniform_median_gaussian_k8.png`,
+  SHA-256 `786cf9d0779d1d91d1cbbc51d3fe2f8247447fce2c8d32d6a594b65d8ea7f411`;
+- numerical report:
+  `D:/RTS/_tmp/panda_live_gaussian_uniform_median_view09_20260901/uniform_median_view09.json`,
+  SHA-256 `536437f1fcbcdb0b0d974ce89072fce493744a12744655d97637ed8ddec81a98`;
+- render-field array:
+  `D:/RTS/_tmp/panda_live_gaussian_uniform_median_view09_20260901/uniform_median_length_gaussian_k8.npy`,
+  SHA-256 `aabf0ede4d3622d19e06a50de62fb89fe16d79e71a1292a21b95e64a493fa505`.
 
 ## Current Decision Boundary
 
