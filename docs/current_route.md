@@ -358,25 +358,36 @@ passed with `14` warnings in `20.15 s`; `py_compile` and
 graph, cover, local-system conditioning, checkpoint field, trainer/config,
 visualization, and Panda evidence remain pending or unauthorized.
 
-R084 Phase C1 actual-checkpoint diagnosis is prepared in
-`tools/diagnose_rbf_partition_cover.py` and
-`tests/test_diagnose_rbf_partition_cover.py` but has not been run. Candidate K
-order is fixed as `[8,12,16,24,32,48,64]`, selecting the first all-gates-pass
-candidate. Gates require topology/component and zero-boundary/self invariants;
-all `4500` local systems full-rank with condition `<=1e12`; node, constant, and
-cardinal errors `<=1e-10`; zero uncovered vertices; zero faces without a
-candidate; zero faces lacking strong cover; maximum local node count `<=128`;
-and serialized state `<=4 GiB`. Canonical guide points are recomputed from
-face/barycentric data with hard stored-point mismatch tolerance `1e-6`.
+R084 Phase C1 actual-checkpoint diagnosis completed and passed at clean source
+commit `61be5ce95994fcb2d23bc4a81808721380484b43` using checkpoint SHA
+`fae9f653cbee6e8b0b56987eb1f270cd804989d296e643a05c2efe742ce4c505`,
+iteration `4000`. Strong-cover lacking-face counts are K8 `8504`, K12 `426`,
+K16 `6`, K24 `1`, and K32 `0/pass`; K48/K64 were not evaluated under the
+predeclared first-pass rule.
 
-One Voronoi assignment is shared by seed, delta, and root-graph construction;
-`D`, `M`, seed, delta, and component evidence is retained even on no-K
-rejection. OOM/backend failures are execution failures, never numerical
-rejections, and staged output preserves earlier artifacts. Validation is `73`
-focused tests passed in `2.54 s`; full `mygs` pytest `631` passed with `14`
-warnings in `20.41 s`; `py_compile` and `git diff --check` pass. No actual
-checkpoint/Panda result, trainer, config, or visualization is authorized or
-claimed.
+The selected K32 state has `4500/340288/680572` guides/vertices/faces, radii
+`0.08456477184801664..0.13794161074852113`, exactly `32` nodes per patch,
+patch nnz `144000`, vertex-active min/mean/max `11/26.2118000047/46` with nnz
+`8919561`, and face-candidate min/mean/max `11/28.5922092005/49` with nnz
+`19459057`. Uncovered vertices, empty-candidate faces, and faces lacking strong
+cover are all zero. Maximum condition number is `34062.3962071499`; node,
+constant, and cardinal errors are respectively
+`3.5011361974729596e-13`, `6.661338147750939e-16`, and
+`1.1102230246251565e-15`. Serialized state is `539677997 B`; total time is
+`394.745 s`; peak RSS is `2220163072 B`; peak CUDA allocated/reserved is
+`683508224/855638016 B`.
+
+C1 validation is `69` passed, `4` skipped; the full suite is `626` passed,
+`5` skipped. Report, report-manifest, independent-validation, compact-hashes,
+and run-log SHA-256 values are respectively
+`9be5bb16f07e82c04c79876cb656730ed9f7f1489abfc670ce54b473962988c1`,
+`cf2b163c5b7fb78ddc0e699ae6328363297965fe423cf9ff11cdfcbb1e7caa75`,
+`d1672496d99ac2908b5777fc4c0fa0609ba18d7e507a2c94734db5cb97224f91`,
+`beddce3eb09fd88b6c382e49048759e237eb2cabf1a6578b588ab4ba97cad43a`, and
+`bb68dbd7eec19eb74b1a98df3bca2070df96b8fc52a750ad3506927a939af013`.
+The qlogin was preserved. C1 is accepted only: Phase C2 length-field
+evaluation, trainer, config, and visualization remain pending or unauthorized,
+and no Panda length-field result is claimed.
 
 A read-only constrained harmonic FEM audit found a
 `340288`-vertex/`680572`-face mesh, KKT dimension `344788`
