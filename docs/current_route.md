@@ -432,6 +432,14 @@ greater-than-90-degree rows. R085 therefore keeps the full fixed 4500
 clean-flow direction in every forward pass from iteration zero and freezes
 only its trainable tangent residual through 3k.
 
+Direction continuity is judged with the corrected mesh-surface raster, not the
+historical root-point overlay. The corrected protocol evaluates the Gaussian
+field at all 340288 mesh vertices and interpolates vectors over 680572 shared
+triangles before hue conversion, with no 2D blur or base texture. It produces
+429891 visible pixels and zero degenerate visible direction pixels. The prior
+pixel texture was a rounded point-stamping artifact, not a Gaussian-field
+discontinuity.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049

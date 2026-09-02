@@ -395,6 +395,56 @@ def _overlay_direction_colors(
     }
 
 
+def _overlay_direction_surface_colors(
+    base: Image.Image,
+    direction_rgb: np.ndarray,
+    valid_mask: np.ndarray,
+    *,
+    title: str,
+    out_path: Path,
+    alpha: float = 0.82,
+) -> dict[str, float | int]:
+    """Blend a triangle-rasterized direction-color field over one base image."""
+
+    width, height = base.size
+    colors = np.asarray(direction_rgb, dtype=np.float32)
+    valid = np.asarray(valid_mask, dtype=bool)
+    if colors.shape != (height, width, 3):
+        raise ValueError("direction_rgb must match base image as [H, W, 3]")
+    if valid.shape != (height, width):
+        raise ValueError("valid_mask must match base image as [H, W]")
+    if not np.isfinite(colors).all():
+        raise ValueError("direction_rgb contains non-finite values")
+    if not 0.0 <= float(alpha) <= 1.0:
+        raise ValueError("alpha must lie in [0, 1]")
+    canvas = np.asarray(base).astype(np.float32) / 255.0
+    output = canvas.copy()
+    output[valid] = (
+        canvas[valid] * (1.0 - float(alpha))
+        + np.clip(colors[valid], 0.0, 1.0) * float(alpha)
+    )
+    image = Image.fromarray(
+        (np.clip(output, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
+        mode="RGB",
+    )
+    draw = ImageDraw.Draw(image)
+    font_title, font_small = _fonts()
+    draw.rectangle((0, 0, width, 78), fill=(255, 255, 255))
+    draw.text((18, 10), title, fill=(20, 20, 20), font=font_title)
+    draw.text(
+        (18, 47),
+        f"surface pixels: {int(valid.sum()):,}    triangle-rasterized; no 2D blur",
+        fill=(65, 65, 65),
+        font=font_small,
+    )
+    _draw_direction_colorbar(draw, width - 500, 22, 430, 26, font_small)
+    image.save(out_path)
+    return {
+        "surface_pixels": int(valid.sum()),
+        "alpha": float(alpha),
+    }
+
+
 def _fonts():
     try:
         return (

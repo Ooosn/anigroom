@@ -182,6 +182,24 @@ Near-zero projected vectors are neutral gray. The underlying direction is
 always parallel-transported before Gaussian blending and normalized only after
 the weighted vector sum.
 
+The first implementation stamped visible render roots onto rounded pixels with
+hard radius-2 disks and last-writer replacement. It is retained only as a
+root-sampling diagnostic: its pixel texture is not field-continuity evidence.
+The canonical smooth-field view instead evaluates the same Gaussian direction
+at all `340288` mesh vertices, interpolates unit screen vectors over `680572`
+shared triangles, converts the per-pixel vector to hue, and covers `429891`
+visible surface pixels. It uses no point stamping, screen-space blur, or base
+texture inside the surface mask.
+
+The initial surface-raster attempt correctly refused two vertices whose
+area-weighted accumulated normal was zero. Exact mesh inspection found both to
+be orphan vertices that rasterize no triangle. The deterministic repair assigns
+the first valid incident face normal to cancellation rows and a canonical
+placeholder only to true orphans; the two orphans never contribute a visible
+pixel. The failed runner record and staging directory are preserved. Retry 1
+validated the repair with zero degenerate visible direction pixels; retry 2
+sets surface alpha to one so no fur texture is mistaken for field variation.
+
 The fixed 4500 clean-flow base is visually continuous in view 09. Its
 pre-normalization magnitude P05/P50 is `0.956/0.997`, with no negative or
 greater-than-90-degree comparison to itself. The learned R080 4k direction
@@ -229,6 +247,12 @@ Artifacts:
 - direction-color manifest and reliable-runner result SHA-256:
   `f706468f15c7717a777d5b9528566cc5cb13cb6830324d0bec7fc7ca59d024a7`
   and `8843eba6c496e36196d9434922f73f4501828503a913e640370fd2fdeb1aaa37`.
+- canonical pure surface-direction report:
+  `D:/RTS/_tmp/panda_r085_direction_surface_maps_20260902_retry2/r085_direction_surface_maps.json`,
+  SHA-256 `2c3b5cca08ffe4cdec1bf85a3fe575269ca6dbe3fdc71fbd306f535bd3ce2ef6`;
+- pure surface-direction manifest and reliable-runner result SHA-256:
+  `eaa38c200eb37fcd60ab7f8d1b9ae9bccfa84eff557c6e5da55c9e7f0738f80e`
+  and `6e9b8aa003d9218da6d37f5d2f45d24ad388d7ca42b8e0ee2caaac518f2472cc`.
 
 ## Stop Conditions
 
