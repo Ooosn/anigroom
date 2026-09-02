@@ -451,6 +451,17 @@ reaches `37.02` degrees. R085 therefore keeps one shared field across
 attributes and advances to a representation-wide comparison of uniform
 bandwidth, uniformly enlarged bandwidth, and a smaller unified guide subset.
 
+That shared-field gate is complete and rejects every executed replacement
+before training. On Panda, uniform-median and smooth-M256 bandwidth preserve
+direction within `1.38/1.31` degrees at P95 but do not reduce angular-gradient
+tails; uniform `1.25x` raises vertex candidate pairs `6.71M -> 10.63M` without
+gradient benefit; unified 2048 changes direction by about `7.8` degrees at P95
+without reducing the tail. More decisively, white tiger exposes ambient-space
+candidate cancellation: uniform 4500 introduces `74` negative directions
+(`37` above 120 degrees), and smooth-M256 still has `65/36`. No arm advances.
+R085 now requires one topology-gated candidate pattern shared by all
+attributes before any further bandwidth or count decision.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049

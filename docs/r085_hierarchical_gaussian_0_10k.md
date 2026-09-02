@@ -253,6 +253,46 @@ uniformly enlarged radius, and a smaller unified nested-FPS population. The
 historical region labels remain diagnostic evidence and are not an algorithmic
 rule.
 
+## Shared-Field Count And Bandwidth Gate
+
+The next Panda fixed-checkpoint gate compares one shared field across every
+attribute. It predeclares current adaptive-`d8` 4500, uniform-median 4500,
+uniform-`1.25x` 4500, nested topology-FPS 2048 with adaptive or uniform `d8`,
+and a sixth follow-up whose 4500 radii are the M256 nested-Gaussian
+reconstruction of `log(d8)`.
+
+No arm creates a direction-specific field, reversal, or greater-than-90-degree
+Panda direction. The fixed Panda evidence is:
+
+| arm | vertex candidate pairs | direction change P50 / P95 | angular-gradient >10 / >20 px fraction | learned-length max |
+| --- | ---: | ---: | ---: | ---: |
+| adaptive 4500 | 6.706M | 0 / 0.03 deg | 0.362% / 0.134% | 0.08416 |
+| uniform 4500 | 6.714M | 0.22 / 1.38 deg | 0.358% / 0.132% | 0.08404 |
+| uniform 1.25x 4500 | 10.632M | 0.51 / 2.84 deg | 0.358% / 0.131% | 0.07290 |
+| smooth-M256 bandwidth, 4500 | 6.665M | 0.21 / 1.31 deg | 0.361% / 0.133% | 0.08346 |
+| adaptive 2048 | 6.510M | 1.33 / 7.74 deg | 0.369% / 0.135% | 0.07548 |
+| uniform 2048 | 6.444M | 1.35 / 7.77 deg | 0.361% / 0.140% | 0.07794 |
+
+Uniform or smoothly reconstructed bandwidth removes the blue-noise scale map,
+but neither reduces the rapid direction transition. Uniform `1.25x` adds about
+58% candidate work, and 2048 changes direction more strongly, without an
+angular-gradient benefit. Therefore count and bandwidth are not the primary
+cause of that transition; it is already encoded in the clean-flow direction
+values.
+
+The matched white-tiger gate rejects both apparently safe Panda bandwidth
+repairs. White tiger has adaptive pre-normalization magnitude as low as
+`0.00296`, exposing ambient-space support cancellation. Uniform-median 4500
+introduces `74` negative directions, including `37` above 120 degrees. The
+smooth-M256 bandwidth improves this only to `65/36`; it still fails. This is
+not evidence for retaining noisy `d8`. It proves that the current Euclidean
+candidate pattern is not a safe foundation for bandwidth changes.
+
+No shared-field arm advances to training. R085 must next implement a
+topology-gated guide-to-query candidate pattern shared by every attribute,
+then repeat the same bandwidth gate. Candidate topology is a representation
+repair, not a direction-specific exception.
+
 Artifacts:
 
 - report:
@@ -290,6 +330,18 @@ Artifacts:
 - guide-density manifest and reliable-runner result SHA-256:
   `13a642a7d9115bb1a4938b76c05de5cef0c195f2df1e5703b0cfb7d231c37edf`
   and `56f539466a8e0830afa01c09b916c2b06e02c59473659722624270475c195b6a`.
+- shared-field six-arm Panda report:
+  `D:/RTS/_tmp/panda_r085_shared_gaussian_arms_20260902_retry1/r085_shared_gaussian_arms.json`,
+  SHA-256 `83c907d88cdad13cd3b2a58ead99b5e240423bc31214886d46120f1659d4c032`;
+- shared-field Panda manifest and reliable-runner result SHA-256:
+  `8a93508055bd8d6eabc889efbd5e372a4555c2f6536d9b091ddfeb6a684e54b6`
+  and `c8a7bc16f953d8aff9d957d4167e180b3ef31f01f2dd0beb3ac6e2154fb0ab38`;
+- white-tiger uniform/smooth bandwidth regression report:
+  `D:/RTS/_tmp/white_r085_uniform4500_regression_20260902_retry1/white_r085_uniform4500_regression.json`,
+  SHA-256 `5edf98c0b603c56b075d6322140f5d407cc345aa374cffa33bd3a467ac804236`;
+- white-tiger regression manifest and reliable-runner result SHA-256:
+  `23e57f1f84d4065794baf077f95835da68eec40303f08307dce48952d0379376`
+  and `889827254c269cc410dea60356a08a833b47f9df25be1ea48a0f7f5d32e2a8fa`.
 
 ## Stop Conditions
 
@@ -304,5 +356,6 @@ visual stop even when aggregate reconstruction loss improves.
 ## Open Items
 
 - fix the covariance unlock boundary and attribute mask;
+- implement and validate topology-gated guide-to-query Gaussian candidates;
 - implement the packed nested field and focused gradient tests;
 - run matched Panda short training and white-tiger no-regression evidence.
