@@ -423,6 +423,15 @@ count is at least `3.589`, maximum weight is at most `0.457`, and row/constant
 errors remain below `3.58e-7`. This is matched initialization evidence, not a
 white-tiger training-quality claim.
 
+A canonical screen-direction hue map confirms that the absolute flow must not
+be downsampled with scalar attributes. The fixed 4500 clean-flow base is
+continuous and has no directed reversals after transported Gaussian blending.
+Reconstructing it from M256 changes direction by `8.09/31.55` degrees at
+median/P95 even though it introduces no negative dot; M512 produces 88 small
+greater-than-90-degree rows. R085 therefore keeps the full fixed 4500
+clean-flow direction in every forward pass from iteration zero and freezes
+only its trainable tangent residual through 3k.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049

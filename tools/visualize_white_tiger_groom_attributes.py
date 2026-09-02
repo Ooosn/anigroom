@@ -251,6 +251,150 @@ def _overlay_points(
     return {"visible_roots": int(len(values)), "lo": float(value_lo), "hi": float(value_hi)}
 
 
+def _hsv_unit_value_rgb(hue: np.ndarray) -> np.ndarray:
+    """Vectorized HSV hue to RGB for unit saturation and value."""
+
+    values = np.asarray(hue, dtype=np.float32)
+    if not np.isfinite(values).all():
+        raise ValueError("direction hue contains non-finite values")
+    wrapped = np.mod(values, 1.0)
+    sector_float = wrapped * 6.0
+    sector = np.floor(sector_float).astype(np.int32) % 6
+    fraction = sector_float - np.floor(sector_float)
+    zeros = np.zeros_like(fraction)
+    ones = np.ones_like(fraction)
+    descending = 1.0 - fraction
+    rgb = np.empty(values.shape + (3,), dtype=np.float32)
+    choices = (
+        np.stack((ones, fraction, zeros), axis=-1),
+        np.stack((descending, ones, zeros), axis=-1),
+        np.stack((zeros, ones, fraction), axis=-1),
+        np.stack((zeros, descending, ones), axis=-1),
+        np.stack((fraction, zeros, ones), axis=-1),
+        np.stack((ones, zeros, descending), axis=-1),
+    )
+    for index, choice in enumerate(choices):
+        mask = sector == index
+        rgb[mask] = choice[mask]
+    return rgb
+
+
+def _screen_direction_colors(screen_vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Encode directed screen-space flow as cyclic hue.
+
+    Image coordinates are used directly: hue zero is right, then hue advances
+    clockwise through down, left, and up. Near-zero vectors are neutral gray.
+    """
+
+    vectors = np.asarray(screen_vectors, dtype=np.float32)
+    if vectors.ndim != 2 or vectors.shape[1] != 2:
+        raise ValueError("screen_vectors must have shape [N, 2]")
+    if not np.isfinite(vectors).all():
+        raise ValueError("screen_vectors contain non-finite values")
+    magnitude = np.linalg.norm(vectors, axis=-1)
+    hue = np.mod(np.arctan2(vectors[:, 1], vectors[:, 0]) / (2.0 * np.pi), 1.0)
+    colors = _hsv_unit_value_rgb(hue)
+    colors[magnitude <= 1.0e-6] = 0.5
+    return colors, magnitude
+
+
+def _draw_direction_colorbar(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    font,
+) -> None:
+    hue = np.linspace(0.0, 1.0, w, endpoint=False, dtype=np.float32)
+    colors = _hsv_unit_value_rgb(hue)
+    for index, color in enumerate(colors):
+        rgb = tuple((color * 255.0 + 0.5).astype(np.uint8).tolist())
+        draw.line((x + index, y, x + index, y + h), fill=rgb)
+    draw.rectangle((x, y, x + w, y + h), outline=(20, 20, 20), width=1)
+    labels = ((0.0, "right"), (0.25, "down"), (0.50, "left"), (0.75, "up"))
+    for fraction, label in labels:
+        label_x = x + int(round(fraction * w))
+        draw.text((label_x, y + h + 2), label, fill=(30, 30, 30), font=font)
+
+
+def _overlay_direction_colors(
+    base: Image.Image,
+    xy: np.ndarray,
+    screen_vectors: np.ndarray,
+    *,
+    title: str,
+    out_path: Path,
+    radius: int = 2,
+) -> dict[str, float | int]:
+    """Overlay one canonical directed-flow hue at every visible root."""
+
+    width, height = base.size
+    xy_values = np.asarray(xy, dtype=np.float32)
+    vectors = np.asarray(screen_vectors, dtype=np.float32)
+    if xy_values.ndim != 2 or xy_values.shape[1] != 2:
+        raise ValueError("xy must have shape [N, 2]")
+    if vectors.shape != xy_values.shape:
+        raise ValueError("screen_vectors must match xy shape")
+    finite = np.isfinite(xy_values).all(axis=1) & np.isfinite(vectors).all(axis=1)
+    xy_values = xy_values[finite]
+    vectors = vectors[finite]
+    in_frame = (
+        (xy_values[:, 0] >= 0)
+        & (xy_values[:, 0] < width)
+        & (xy_values[:, 1] >= 0)
+        & (xy_values[:, 1] < height)
+    )
+    xy_values = xy_values[in_frame]
+    vectors = vectors[in_frame]
+    colors, magnitude = _screen_direction_colors(vectors)
+
+    canvas = np.asarray(base).astype(np.float32) / 255.0
+    overlay = canvas.copy()
+    alpha = np.zeros((height, width), dtype=np.float32)
+    xi = np.round(xy_values[:, 0]).astype(np.int32)
+    yi = np.round(xy_values[:, 1]).astype(np.int32)
+    for oy in range(-radius, radius + 1):
+        for ox in range(-radius, radius + 1):
+            if ox * ox + oy * oy > radius * radius:
+                continue
+            xx = xi + ox
+            yy = yi + oy
+            valid = (xx >= 0) & (xx < width) & (yy >= 0) & (yy < height)
+            if not np.any(valid):
+                continue
+            overlay[yy[valid], xx[valid]] = colors[valid]
+            alpha[yy[valid], xx[valid]] = np.maximum(
+                alpha[yy[valid], xx[valid]],
+                0.78,
+            )
+    output = canvas * (1.0 - alpha[..., None]) + overlay * alpha[..., None]
+    image = Image.fromarray(
+        (np.clip(output, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
+        mode="RGB",
+    )
+    draw = ImageDraw.Draw(image)
+    font_title, font_small = _fonts()
+    draw.rectangle((0, 0, width, 78), fill=(255, 255, 255))
+    draw.text((18, 10), title, fill=(20, 20, 20), font=font_title)
+    median = float(np.quantile(magnitude, 0.50)) if magnitude.size else 0.0
+    p05 = float(np.quantile(magnitude, 0.05)) if magnitude.size else 0.0
+    draw.text(
+        (18, 47),
+        f"visible roots: {len(vectors):,}    projected magnitude p05/p50: {p05:.4g}/{median:.4g}",
+        fill=(65, 65, 65),
+        font=font_small,
+    )
+    _draw_direction_colorbar(draw, width - 500, 22, 430, 26, font_small)
+    image.save(out_path)
+    return {
+        "visible_roots": int(len(vectors)),
+        "projected_magnitude_p05": p05,
+        "projected_magnitude_p50": median,
+        "zero_projected_count": int(np.count_nonzero(magnitude <= 1.0e-6)),
+    }
+
+
 def _fonts():
     try:
         return (

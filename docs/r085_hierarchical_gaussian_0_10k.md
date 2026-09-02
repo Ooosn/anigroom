@@ -172,6 +172,38 @@ P95/max `0.360/0.457`, and row-sum/constant errors below `3.58e-7`. Thus the
 Panda M256 selection passes matched white-tiger coverage without any count,
 region, density, support, or kernel retuning.
 
+## Directed-Flow Color Maps
+
+R085 adds one reusable canonical direction-color protocol. The visible 3D
+direction is projected into the selected camera; screen angle is encoded as a
+cyclic HSV hue with `right -> down -> left -> up -> right`. Saturation and
+value remain one, so color records direction rather than projected magnitude.
+Near-zero projected vectors are neutral gray. The underlying direction is
+always parallel-transported before Gaussian blending and normalized only after
+the weighted vector sum.
+
+The fixed 4500 clean-flow base is visually continuous in view 09. Its
+pre-normalization magnitude P05/P50 is `0.956/0.997`, with no negative or
+greater-than-90-degree comparison to itself. The learned R080 4k direction
+changes from that base by median/P95/P99 `6.66/18.88/26.20` degrees, with zero
+negative directions.
+
+Downsampling the **absolute** clean-flow field is intentionally a stress test,
+not the R085 forward contract:
+
+| coarse count | angular difference P50 / P95 / P99 / max | negative / >90 / >120 |
+| ---: | ---: | ---: |
+| 256 | 8.09 / 31.55 / 46.57 / 85.08 | 0 / 0 / 0 |
+| 512 | 5.07 / 20.23 / 32.47 / 94.61 | 88 / 88 / 0 |
+| 1024 | 3.09 / 13.93 / 23.40 / 72.19 | 0 / 0 / 0 |
+
+This evidence does not change the scalar-count selection. It confirms the
+attribute-specific hierarchy: `256` owns early low-frequency scalar changes,
+while the complete 4500 clean-flow direction remains the absolute level-2
+base from iteration zero. Only its trainable tangent residual is frozen
+through 3k. Direction is never reconstructed from the 256 level in the actual
+R085 forward path.
+
 Artifacts:
 
 - report:
@@ -191,6 +223,12 @@ Artifacts:
 - white-tiger manifest and reliable-runner result SHA-256:
   `2b22c4aa2e7ea7946ef724d7947820801cd9f58a02980420adfdea405f494cdb`
   and `0b62d286384a8ca899de4a393f1aad44592e5411d4aaa7805c6c1129cde65218`.
+- direction-color report:
+  `D:/RTS/_tmp/panda_r085_direction_color_maps_20260902/r085_direction_color_maps.json`,
+  SHA-256 `300dd2036d98b75883df1840616afeaff74ae229f6b098a7a5787fa974c18b79`;
+- direction-color manifest and reliable-runner result SHA-256:
+  `f706468f15c7717a777d5b9528566cc5cb13cb6830324d0bec7fc7ca59d024a7`
+  and `8843eba6c496e36196d9434922f73f4501828503a913e640370fd2fdeb1aaa37`.
 
 ## Stop Conditions
 
