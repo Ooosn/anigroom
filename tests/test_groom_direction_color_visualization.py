@@ -7,6 +7,7 @@ import torch
 from tools.visualize_white_tiger_groom_attributes import (
     _overlay_direction_colors,
     _overlay_direction_surface_colors,
+    _overlay_scalar_surface_values,
     _screen_direction_colors,
 )
 from tools.visualize_r085_direction_surface_maps import vertex_normals
@@ -89,3 +90,25 @@ def test_vertex_normals_use_deterministic_fallback_for_orphan_vertex() -> None:
     torch.testing.assert_close(normals[3], torch.tensor([0.0, 0.0, 1.0]))
     assert report["accumulated_normal_fallback_count"] == 1
     assert report["orphan_vertex_count"] == 1
+
+
+def test_scalar_surface_overlay_writes_pure_field(tmp_path) -> None:
+    base = Image.new("RGB", (640, 360), (200, 200, 200))
+    values = np.linspace(0.0, 1.0, 640 * 360, dtype=np.float32).reshape(360, 640)
+    valid = np.zeros((360, 640), dtype=bool)
+    valid[100:260, 180:460] = True
+    output = tmp_path / "scalar_surface.png"
+
+    report = _overlay_scalar_surface_values(
+        base,
+        values,
+        valid,
+        title="scalar surface test",
+        out_path=output,
+        lo=0.1,
+        hi=0.9,
+    )
+
+    assert output.is_file()
+    assert report["surface_pixels"] == 160 * 280
+    assert report["alpha"] == 1.0

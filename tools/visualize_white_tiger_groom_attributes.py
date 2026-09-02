@@ -445,6 +445,74 @@ def _overlay_direction_surface_colors(
     }
 
 
+def _overlay_scalar_surface_values(
+    base: Image.Image,
+    scalar_values: np.ndarray,
+    valid_mask: np.ndarray,
+    *,
+    title: str,
+    out_path: Path,
+    lo: float,
+    hi: float,
+    alpha: float = 1.0,
+) -> dict[str, float | int]:
+    """Render one triangle-rasterized scalar field with the canonical turbo map."""
+
+    width, height = base.size
+    values = np.asarray(scalar_values, dtype=np.float32)
+    valid = np.asarray(valid_mask, dtype=bool)
+    if values.shape != (height, width):
+        raise ValueError("scalar_values must match base image as [H, W]")
+    if valid.shape != values.shape:
+        raise ValueError("valid_mask must match scalar_values")
+    if not np.isfinite(values[valid]).all():
+        raise ValueError("valid scalar surface values must be finite")
+    if not np.isfinite(float(lo)) or not np.isfinite(float(hi)) or float(hi) <= float(lo):
+        raise ValueError("scalar surface range must be finite and increasing")
+    if not 0.0 <= float(alpha) <= 1.0:
+        raise ValueError("alpha must lie in [0, 1]")
+    normalized = np.clip((values - float(lo)) / (float(hi) - float(lo)), 0.0, 1.0)
+    colors = _turbo(normalized)
+    canvas = np.asarray(base).astype(np.float32) / 255.0
+    output = canvas.copy()
+    output[valid] = (
+        canvas[valid] * (1.0 - float(alpha))
+        + colors[valid] * float(alpha)
+    )
+    image = Image.fromarray(
+        (np.clip(output, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
+        mode="RGB",
+    )
+    draw = ImageDraw.Draw(image)
+    font_title, font_small = _fonts()
+    draw.rectangle((0, 0, width, 78), fill=(255, 255, 255))
+    draw.text((18, 10), title, fill=(20, 20, 20), font=font_title)
+    draw.text(
+        (18, 47),
+        f"surface pixels: {int(valid.sum()):,}    range: {float(lo):.5g} .. {float(hi):.5g}",
+        fill=(65, 65, 65),
+        font=font_small,
+    )
+    _draw_colorbar(
+        draw,
+        width - 430,
+        22,
+        360,
+        26,
+        signed=False,
+        lo=float(lo),
+        hi=float(hi),
+        font=font_small,
+    )
+    image.save(out_path)
+    return {
+        "surface_pixels": int(valid.sum()),
+        "lo": float(lo),
+        "hi": float(hi),
+        "alpha": float(alpha),
+    }
+
+
 def _fonts():
     try:
         return (

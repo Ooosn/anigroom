@@ -440,6 +440,17 @@ triangles before hue conversion, with no 2D blur or base texture. It produces
 pixel texture was a rounded point-stamping artifact, not a Gaussian-field
 discontinuity.
 
+The full primary-guide density audit shows that guide count alone is not the
+complete cause. Euclidean `d8` P05/P50/P95 is
+`0.03791/0.04398/0.04953`, but its spatial field is blue-noise-like because
+raw local FPS spacing is used directly as Gaussian bandwidth. A second defect
+comes from merging separately sampled historical 500/4000 groups: all 39
+nearest pairs below half the global median distance and all 42 rows with
+`d8/d1 > 3` cross that old boundary; their transported direction difference
+reaches `37.02` degrees. R085 therefore keeps one shared field across
+attributes and advances to a representation-wide comparison of uniform
+bandwidth, uniformly enlarged bandwidth, and a smaller unified guide subset.
+
 R050 is the accepted appearance checkpoint. It keeps R049's 20k secondary
 geometry field and adds only a normalized arc-length Gaussian RGB residual
 profile. Final/best test composite reaches `32.12111/32.20936`, improving R049

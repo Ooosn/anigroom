@@ -222,6 +222,37 @@ base from iteration zero. Only its trainable tangent residual is frozen
 through 3k. Direction is never reconstructed from the 256 level in the actual
 R085 forward path.
 
+## Primary-Guide Density Attribution
+
+The complete 4500-guide audit rejects the simple explanation that the head is
+globally much denser than the body. Euclidean `d8`
+min/P05/P50/P95/max is
+`0.02876/0.03791/0.04398/0.04953/0.05690`. The historical 500-root group has
+mean `0.03998`; the 4000-root group has mean `0.04441`, only about ten percent
+larger. The population is visually well distributed in aggregate.
+
+Two different defects remain:
+
+1. Per-guide Euclidean and topology `d8` form spatial blue-noise patterns even
+   though their histograms are narrow. Using raw local FPS spacing directly as
+   every Gaussian reference scale therefore injects a noisy bandwidth field
+   before any attribute is learned.
+2. The accepted roots were sampled as separate historical 500/4000 groups and
+   merged. Every one of the 39 guides whose nearest distance is below half the
+   global median has its nearest neighbor in the other historical group.
+   Likewise all 42 guides with `d8/d1 > 3` cross that boundary. Their nearest
+   transported clean-flow direction difference has median/P95/max
+   `1.64/14.24/37.02` degrees. The closest pair is only `0.00323` apart versus
+   global median `d1=0.02261`.
+
+This is evidence against adding attribute-specific bandwidths as the first
+repair. The next fixed-checkpoint gate keeps one shared Gaussian weight field
+for all attributes and compares representation-wide choices only: current
+4500 roots with one uniform median reference radius, the same roots with one
+uniformly enlarged radius, and a smaller unified nested-FPS population. The
+historical region labels remain diagnostic evidence and are not an algorithmic
+rule.
+
 Artifacts:
 
 - report:
@@ -253,6 +284,12 @@ Artifacts:
 - pure surface-direction manifest and reliable-runner result SHA-256:
   `eaa38c200eb37fcd60ab7f8d1b9ae9bccfa84eff557c6e5da55c9e7f0738f80e`
   and `6e9b8aa003d9218da6d37f5d2f45d24ad388d7ca42b8e0ee2caaac518f2472cc`.
+- primary-guide density and nearest-direction report:
+  `D:/RTS/_tmp/panda_r085_guide_density_20260902_retry1/r085_primary_guide_density.json`,
+  SHA-256 `e47b0a91142a39e9654822e0f4c2fd7249942293a2e7f57dd305221838f9c2b8`;
+- guide-density manifest and reliable-runner result SHA-256:
+  `13a642a7d9115bb1a4938b76c05de5cef0c195f2df1e5703b0cfb7d231c37edf`
+  and `56f539466a8e0830afa01c09b916c2b06e02c59473659722624270475c195b6a`.
 
 ## Stop Conditions
 
