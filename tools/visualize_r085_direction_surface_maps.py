@@ -179,6 +179,11 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--counts", default="256,512,1024")
     parser.add_argument("--view-index", type=int, default=9)
+    parser.add_argument("--external-directions", type=Path)
+    parser.add_argument("--expected-external-directions-sha256")
+    parser.add_argument("--external-parent-target", type=Path)
+    parser.add_argument("--expected-external-parent-sha256")
+    parser.add_argument("--external-label", default="external directed field")
     args = parser.parse_args()
 
     checkpoint = args.checkpoint.resolve()
@@ -190,6 +195,18 @@ def main() -> None:
         raise RuntimeError("refusing to overwrite R085 surface direction output")
     if not checkpoint.is_file() or not base_image.is_file() or not order_path.is_file():
         raise RuntimeError("required surface-direction input is missing")
+    external_values = (
+        args.external_directions,
+        args.expected_external_directions_sha256,
+        args.external_parent_target,
+        args.expected_external_parent_sha256,
+    )
+    if any(value is not None for value in external_values) and not all(
+        value is not None for value in external_values
+    ):
+        raise RuntimeError(
+            "external direction mode requires directions/parent paths and both SHA-256 locks"
+        )
     checkpoint_sha = sha256_file(checkpoint)
     if checkpoint_sha != str(args.expected_checkpoint_sha256).lower():
         raise RuntimeError(f"checkpoint SHA mismatch: {checkpoint_sha}")
@@ -208,6 +225,45 @@ def main() -> None:
     guide_normals, _guide_tangent, _guide_bitangent = model.guide_normals_and_tangent_frames()
     clean_direction = F.normalize(model.guide_clean_flow_direction_target.detach(), dim=-1, eps=1.0e-8)
     learned_direction = F.normalize(model.guide_direction_world().detach(), dim=-1, eps=1.0e-8)
+    external_direction = None
+    external_report = None
+    if args.external_directions is not None:
+        external_path = args.external_directions.resolve()
+        external_parent = args.external_parent_target.resolve()
+        if not external_path.is_file() or not external_parent.is_file():
+            raise RuntimeError("external direction input is missing")
+        external_sha = sha256_file(external_path)
+        parent_sha = sha256_file(external_parent)
+        if external_sha != str(args.expected_external_directions_sha256).lower():
+            raise RuntimeError(f"external direction SHA mismatch: {external_sha}")
+        if parent_sha != str(args.expected_external_parent_sha256).lower():
+            raise RuntimeError(f"external parent SHA mismatch: {parent_sha}")
+        external_np = np.load(external_path, allow_pickle=False).astype(np.float32)
+        with np.load(external_parent, allow_pickle=False) as parent_payload:
+            parent_points = np.asarray(parent_payload["root_points"], dtype=np.float32)
+        if external_np.shape != (int(guide_points.shape[0]), 3):
+            raise RuntimeError("external directions do not match the checkpoint guide count")
+        if parent_points.shape != tuple(guide_points.shape):
+            raise RuntimeError("external parent roots do not match the checkpoint guide shape")
+        point_error = np.linalg.norm(
+            parent_points - guide_points.detach().cpu().numpy().astype(np.float32),
+            axis=-1,
+        )
+        if float(point_error.max()) > 2.0e-5:
+            raise RuntimeError(
+                f"external parent/checkpoint guide identity mismatch: {float(point_error.max())}"
+            )
+        external_direction = F.normalize(
+            torch.as_tensor(external_np, device=device),
+            dim=-1,
+            eps=1.0e-8,
+        )
+        external_report = {
+            "directions": {"path": str(external_path), "sha256": external_sha},
+            "parent": {"path": str(external_parent), "sha256": parent_sha},
+            "label": str(args.external_label),
+            "root_identity_error": summarize(point_error),
+        }
     vertices_local = model.vertices.detach()
     faces = model.faces.detach().long()
     normals_vertex, vertex_normal_report = vertex_normals(vertices_local, faces)
@@ -264,6 +320,27 @@ def main() -> None:
             {"relative_to_clean_flow": direction_difference(learned_vertex, clean_vertex)},
         ),
     ]
+    if external_direction is not None:
+        external_vertex, external_magnitude = transported_direction_field(
+            vertex_field,
+            external_direction,
+            guide_normals,
+            normals_vertex,
+        )
+        variants.append(
+            (
+                "external",
+                str(args.external_label),
+                external_vertex,
+                external_magnitude,
+                {
+                    "relative_to_clean_flow": direction_difference(
+                        external_vertex,
+                        clean_vertex,
+                    )
+                },
+            )
+        )
     for count in counts:
         selected = np.asarray(order[:count], dtype=np.int64)
         coarse_binding, _spacing, binding_report = _topology_binding(
@@ -360,6 +437,7 @@ def main() -> None:
             "iteration": int(checkpoint_payload["iteration"]),
         },
         "nested_order": {"path": str(order_path), "sha256": sha256_file(order_path)},
+        "external": external_report,
         "counts": {
             "guide": int(guide_points.shape[0]),
             "mesh_vertex": int(vertices_local.shape[0]),

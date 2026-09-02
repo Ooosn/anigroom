@@ -283,6 +283,17 @@ front-facing negative edges to zero. Formal target generation and fixed-view
 acceptance remain required before V8 replaces V7 as a training input. See
 `docs/panda_v8_confidence_guided_flow_20260830.md`.
 
+### Post-V8 automatic multiview refinement candidate
+
+The post-V8 diagnostic does not rerun V6 or V7. It freezes the formal
+per-view evidence matrix and V8 root-reliability factors, alternates a
+tangent-angle-only multiview refit with the unchanged V8 complete-direction
+propagation, and automatically backtracks or stops unless both multiview and
+surface-connection energies are nonincreasing. Panda and white tiger each
+accept one cycle and reject cycle two under identical settings. The candidate
+is documented in `docs/post_v8_automatic_refinement_20260903.md`; formal V8
+targets remain the accepted parents until visual review and any training gate.
+
 ## Acceptance Evidence
 
 Before using a new target in training, produce:

@@ -1,6 +1,6 @@
 # Current Route
 
-Status date: 2026-09-01.
+Status date: 2026-09-03.
 
 This is the only source of truth for active Stage 1 behavior. The recovery
 ledger records measured experiments, but it does not define executable schema.
@@ -133,6 +133,16 @@ coverage factor, while the unchanged ~0.0111 mean strand length proves the
 inherited 0.30 length scale is the remaining short-coat variable. See
 `docs/panda_v8_confidence_guided_flow_20260830.md` and
 `docs/r074_v8_confidence_flow.md`.
+
+A post-V8 automatic multiview-refinement diagnostic now alternates the exact
+formal `[V,N]` selected-direct evidence with the unchanged V8 joint-confidence
+propagation. Confidence is frozen, V6/V7 are not rerun, and every complete
+cycle must improve or preserve both weighted multiview residual and surface
+connection energy. Panda/white each accept one cycle and automatically reject
+cycle two. Multiview energy improves `10.370%/2.507%` and surface energy
+improves `5.727%/0.531%`, with exact deterministic reruns. This is a target
+candidate, not yet a training baseline. See
+`docs/post_v8_automatic_refinement_20260903.md`.
 
 R075 is the accepted isolated 3k initialization/asset gate. It inherits R074 and changes only
 `CLEAN_FLOW_LENGTH_INIT_SCALE=0.30 -> 1.0`, restoring the formal target's own
