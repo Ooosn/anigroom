@@ -134,15 +134,17 @@ inherited 0.30 length scale is the remaining short-coat variable. See
 `docs/panda_v8_confidence_guided_flow_20260830.md` and
 `docs/r074_v8_confidence_flow.md`.
 
-A post-V8 automatic multiview-refinement diagnostic now alternates the exact
-formal `[V,N]` selected-direct evidence with the unchanged V8 joint-confidence
-propagation. Confidence is frozen, V6/V7 are not rerun, and every complete
-cycle must improve or preserve both weighted multiview residual and surface
-connection energy. Panda/white each accept one cycle and automatically reject
-cycle two. Multiview energy improves `10.370%/2.507%` and surface energy
-improves `5.727%/0.531%`, with exact deterministic reruns. This is a target
-candidate, not yet a training baseline. See
-`docs/post_v8_automatic_refinement_20260903.md`.
+Post-V8 angle/lift attribution reopens the tangent-only diagnostic. Screen
+arrows mix tangent angle, lift, normal, and camera projection; on Panda view09,
+`148/612` screen edges above 45 degrees have transported 3D angle below 20
+degrees. Eight predeclared arms separate tangent-only, lift-only, joint, and
+Jacobian-owned updates. The only cross-sample candidate jointly optimizes
+tangent angle and log lift while regularizing only the spatial variation of
+the lift update with shared weight `1.0`. Panda/white each accept one cycle and
+reject cycle two. Data/complete/tangent/lift energy gains are
+`1.422/4.774/4.193/2.656%` and `2.963/0.303/0.440/2.492%`, respectively, with
+exact deterministic reruns. This remains a target candidate, not a training
+baseline. See `docs/post_v8_angle_lift_attempt_20260903.md`.
 
 R075 is the accepted isolated 3k initialization/asset gate. It inherits R074 and changes only
 `CLEAN_FLOW_LENGTH_INIT_SCALE=0.30 -> 1.0`, restoring the formal target's own

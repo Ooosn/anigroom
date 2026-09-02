@@ -2,8 +2,10 @@
 
 Status date: 2026-09-03.
 
-Status: fixed-input Panda and white-tiger diagnostics pass. The candidate is
-not yet a training baseline; the formal V8 targets remain immutable parents.
+Status: superseded diagnostic parent. The tangent-only candidate exposed the
+angle/lift attribution problem and is replaced by the attempt series in
+`docs/post_v8_angle_lift_attempt_20260903.md`. It was never a training baseline;
+the formal V8 targets remain immutable parents.
 
 ## Purpose
 
@@ -139,7 +141,5 @@ Canonical Panda view09:
 
 ## Decision
 
-The automatic BA-plus-V8-propagation idea is numerically viable on both
-samples and self-stops after one accepted cycle. It may advance as a target
-candidate after user visual review. It has not been integrated into formal
-target generation and has not been used for training.
+The tangent-only result does not advance. Its view09 screen and transported-3D
+roughness attribution is incomplete; see the superseding angle/lift attempt.

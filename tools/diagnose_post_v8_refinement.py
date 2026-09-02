@@ -76,6 +76,18 @@ def main() -> None:
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--exclude", default="4,24,25")
+    parser.add_argument(
+        "--refit-mode",
+        choices=[
+            "theta_only",
+            "theta_observable",
+            "rho_only",
+            "joint",
+            "joint_observable",
+        ],
+        default="theta_only",
+    )
+    parser.add_argument("--lift-delta-smooth-weight", type=float, default=0.0)
     args = parser.parse_args()
 
     target = args.target.resolve()
@@ -207,7 +219,10 @@ def main() -> None:
         ),
         device=device,
     )
-    config = PostV8RefinementConfig()
+    config = PostV8RefinementConfig(
+        refit_mode=str(args.refit_mode),
+        lift_delta_smooth_weight=float(args.lift_delta_smooth_weight),
+    )
     result = run_post_v8_refinement(
         direction=direction,
         normals=normals,
@@ -281,6 +296,9 @@ def main() -> None:
     parent_arrays["post_v8_refinement_accepted_cycle_count"] = np.asarray(
         len(result.cycle_directions),
         dtype=np.int32,
+    )
+    parent_arrays["post_v8_refinement_refit_mode"] = np.asarray(
+        str(args.refit_mode)
     )
     parent_arrays["post_v8_refinement_confidence_recomputed"] = np.asarray(False)
     candidate_target_path = staging / "candidate_target.npz"

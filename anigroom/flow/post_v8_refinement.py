@@ -27,6 +27,9 @@ EPS = 1.0e-8
 
 @dataclass(frozen=True)
 class PostV8RefinementConfig:
+    refit_mode: str = "theta_only"
+    rho_epsilon: float = 1.0e-6
+    lift_delta_smooth_weight: float = 0.0
     ba_iterations: int = 120
     ba_learning_rate: float = 0.03
     ba_relative_tolerance: float = 1.0e-7
@@ -38,6 +41,17 @@ class PostV8RefinementConfig:
     backtracking_steps: int = 6
 
     def __post_init__(self) -> None:
+        if self.refit_mode not in {
+            "theta_only",
+            "theta_observable",
+            "rho_only",
+            "joint",
+            "joint_observable",
+        }:
+            raise ValueError(
+                "refit_mode must be theta_only, theta_observable, rho_only, joint, "
+                "or joint_observable"
+            )
         integer_values = {
             "ba_iterations": self.ba_iterations,
             "ba_patience": self.ba_patience,
@@ -48,6 +62,7 @@ class PostV8RefinementConfig:
             if isinstance(value, bool) or int(value) != value or int(value) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         positive_values = {
+            "rho_epsilon": self.rho_epsilon,
             "ba_learning_rate": self.ba_learning_rate,
             "ba_relative_tolerance": self.ba_relative_tolerance,
             "outer_relative_tolerance": self.outer_relative_tolerance,
@@ -57,14 +72,22 @@ class PostV8RefinementConfig:
         for name, value in positive_values.items():
             if not math.isfinite(float(value)) or float(value) <= 0.0:
                 raise ValueError(f"{name} must be finite and positive")
+        if not math.isfinite(float(self.lift_delta_smooth_weight)) or float(
+            self.lift_delta_smooth_weight
+        ) < 0.0:
+            raise ValueError("lift_delta_smooth_weight must be finite and non-negative")
 
 
 @dataclass(frozen=True)
-class TangentAngleRefitResult:
+class DirectionRefitResult:
     direction: torch.Tensor
     tangent_coordinate: torch.Tensor
+    lift_coordinate: torch.Tensor
     initial_data_energy: float
     final_data_energy: float
+    initial_optimization_energy: float
+    final_optimization_energy: float
+    observability_report: dict[str, float | int]
     history: tuple[dict[str, float | int], ...]
 
 
@@ -187,6 +210,39 @@ def compose_tangent_angle(
     )
 
 
+def compose_direction_parameters(
+    *,
+    normals: torch.Tensor,
+    frame: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    tangent_coordinate: torch.Tensor,
+    lift_coordinate: torch.Tensor,
+    rho_epsilon: float,
+) -> torch.Tensor:
+    """Decode separate tangent-angle and log-lift coordinates."""
+
+    normal = _unit(normals, name="normals")
+    normal_component, tangent_magnitude, tangent_axis, bitangent = frame
+    n = int(normal.shape[0])
+    if tangent_coordinate.shape != (n,) or lift_coordinate.shape != (n,):
+        raise ValueError("direction coordinates must both have shape [N]")
+    rotated_axis = _unit(
+        tangent_axis + tangent_coordinate[:, None] * bitangent,
+        name="rotated tangent axis",
+    )
+    baseline_rho = (
+        normal_component.clamp_min(0.0) / tangent_magnitude.clamp_min(EPS)
+    )[:, 0]
+    rho = (
+        (baseline_rho + float(rho_epsilon))
+        * torch.exp(lift_coordinate.clamp(-20.0, 20.0))
+        - float(rho_epsilon)
+    ).clamp_min(0.0)
+    return _unit(
+        rotated_axis + rho[:, None] * normal,
+        name="composed direction",
+    )
+
+
 def project_direction_differentials(
     *,
     points: torch.Tensor,
@@ -297,7 +353,96 @@ def _project_per_view_evidence(
     return screen, magnitude, depth
 
 
-def refit_tangent_angles(
+@torch.no_grad()
+def parameter_observability(
+    *,
+    direction: torch.Tensor,
+    normals: torch.Tensor,
+    projection_points: torch.Tensor,
+    viewmats: torch.Tensor,
+    intrinsics: torch.Tensor,
+    rho_epsilon: float,
+    finite_difference_step: float = 1.0e-3,
+) -> dict[str, torch.Tensor]:
+    """Measure screen-angle sensitivity to tangent angle and log lift."""
+
+    current = _unit(direction, name="direction")
+    normal = _unit(normals, name="normals")
+    frame = _tangent_frame(current, normal)
+    n = int(current.shape[0])
+    step = float(finite_difference_step)
+    zero = current.new_zeros((n,))
+
+    def projected(
+        tangent_coordinate: torch.Tensor,
+        lift_coordinate: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        candidate = compose_direction_parameters(
+            normals=normal,
+            frame=frame,
+            tangent_coordinate=tangent_coordinate,
+            lift_coordinate=lift_coordinate,
+            rho_epsilon=float(rho_epsilon),
+        )
+        screen, magnitude, depth = project_direction_differentials(
+            points=projection_points,
+            directions=candidate,
+            viewmats=viewmats,
+            intrinsics=intrinsics,
+        )
+        return screen / magnitude[..., None].clamp_min(EPS), magnitude, depth
+
+    theta_plus, theta_plus_mag, theta_plus_depth = projected(
+        zero + math.tan(step),
+        zero,
+    )
+    theta_minus, theta_minus_mag, theta_minus_depth = projected(
+        zero - math.tan(step),
+        zero,
+    )
+    lift_plus, lift_plus_mag, lift_plus_depth = projected(zero, zero + step)
+    lift_minus, lift_minus_mag, lift_minus_depth = projected(zero, zero - step)
+
+    def signed_angle(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+        cross = first[..., 0] * second[..., 1] - first[..., 1] * second[..., 0]
+        dot = (first * second).sum(dim=-1)
+        return torch.atan2(cross, dot)
+
+    theta_jacobian = signed_angle(theta_minus, theta_plus) / (2.0 * step)
+    lift_jacobian = signed_angle(lift_minus, lift_plus) / (2.0 * step)
+    valid = (
+        (theta_plus_mag > 1.0e-6)
+        & (theta_minus_mag > 1.0e-6)
+        & (lift_plus_mag > 1.0e-6)
+        & (lift_minus_mag > 1.0e-6)
+        & (theta_plus_depth > 1.0e-6)
+        & (theta_minus_depth > 1.0e-6)
+        & (lift_plus_depth > 1.0e-6)
+        & (lift_minus_depth > 1.0e-6)
+    )
+    theta_information = theta_jacobian.square()
+    lift_information = lift_jacobian.square()
+    denominator = theta_information + lift_information
+    theta_fraction = torch.where(
+        valid & (denominator > EPS),
+        theta_information / denominator.clamp_min(EPS),
+        torch.zeros_like(denominator),
+    )
+    lift_fraction = torch.where(
+        valid & (denominator > EPS),
+        lift_information / denominator.clamp_min(EPS),
+        torch.zeros_like(denominator),
+    )
+    return {
+        "theta_jacobian": theta_jacobian,
+        "lift_jacobian": lift_jacobian,
+        "theta_fraction": theta_fraction,
+        "lift_fraction": lift_fraction,
+        "valid": valid,
+    }
+
+
+def refit_direction_parameters(
     *,
     direction: torch.Tensor,
     normals: torch.Tensor,
@@ -307,7 +452,9 @@ def refit_tangent_angles(
     viewmats: torch.Tensor,
     intrinsics: torch.Tensor,
     config: PostV8RefinementConfig,
-) -> TangentAngleRefitResult:
+    edge_u: torch.Tensor | None = None,
+    edge_v: torch.Tensor | None = None,
+) -> DirectionRefitResult:
     n, _ = _validate_core_shapes(
         direction=direction,
         normals=normals,
@@ -320,8 +467,74 @@ def refit_tangent_angles(
     current = _unit(direction, name="direction")
     normal = _unit(normals, name="normals")
     frame = _tangent_frame(current, normal)
-    coordinate = torch.nn.Parameter(current.new_zeros((n,)))
-    optimizer = torch.optim.Adam([coordinate], lr=float(config.ba_learning_rate))
+    if float(config.lift_delta_smooth_weight) > 0.0:
+        if edge_u is None or edge_v is None:
+            raise ValueError("lift delta smoothing requires edge_u and edge_v")
+        if edge_u.shape != edge_v.shape or edge_u.ndim != 1:
+            raise ValueError("edge_u and edge_v must have matching shape [E]")
+        if edge_u.device != current.device or edge_v.device != current.device:
+            raise ValueError("lift smoothing edges must share the refit device")
+    optimization_weights = per_view_weights
+    theta_optimization_weights = per_view_weights
+    lift_optimization_weights = per_view_weights
+    observability_report: dict[str, float | int] = {
+        "enabled": 0,
+        "positive_input_pair_count": int((per_view_weights > 0.0).sum().cpu()),
+    }
+    if config.refit_mode in {"theta_observable", "joint_observable"}:
+        observability = parameter_observability(
+            direction=current,
+            normals=normal,
+            projection_points=projection_points,
+            viewmats=viewmats,
+            intrinsics=intrinsics,
+            rho_epsilon=float(config.rho_epsilon),
+        )
+        theta_fraction = observability["theta_fraction"].to(
+            device=current.device,
+            dtype=current.dtype,
+        )
+        lift_fraction = observability["lift_fraction"].to(
+            device=current.device,
+            dtype=current.dtype,
+        )
+        theta_optimization_weights = per_view_weights * theta_fraction
+        lift_optimization_weights = per_view_weights * lift_fraction
+        if config.refit_mode == "theta_observable":
+            optimization_weights = theta_optimization_weights
+        positive = per_view_weights > 0.0
+        selected_fraction = theta_fraction[positive]
+        observability_report = {
+            "enabled": 1,
+            "positive_input_pair_count": int(positive.sum().cpu()),
+            "positive_effective_pair_count": int(
+                (theta_optimization_weights > 0.0).sum().cpu()
+            ),
+            "theta_fraction_mean": float(selected_fraction.mean().cpu()),
+            "theta_fraction_p50": float(
+                torch.quantile(selected_fraction, 0.50).cpu()
+            ),
+            "theta_fraction_p95": float(
+                torch.quantile(selected_fraction, 0.95).cpu()
+            ),
+            "theta_fraction_min": float(selected_fraction.min().cpu()),
+            "theta_fraction_max": float(selected_fraction.max().cpu()),
+            "lift_fraction_mean": float(lift_fraction[positive].mean().cpu()),
+            "gradient_partitioned": int(config.refit_mode == "joint_observable"),
+        }
+    tangent_coordinate = torch.nn.Parameter(current.new_zeros((n,)))
+    lift_coordinate = torch.nn.Parameter(current.new_zeros((n,)))
+    trainable = []
+    if config.refit_mode in {
+        "theta_only",
+        "theta_observable",
+        "joint",
+        "joint_observable",
+    }:
+        trainable.append(tangent_coordinate)
+    if config.refit_mode in {"rho_only", "joint", "joint_observable"}:
+        trainable.append(lift_coordinate)
+    optimizer = torch.optim.Adam(trainable, lr=float(config.ba_learning_rate))
     initial_energy = multiview_axial_energy(
         direction=current,
         projection_points=projection_points,
@@ -330,31 +543,96 @@ def refit_tangent_angles(
         viewmats=viewmats,
         intrinsics=intrinsics,
     )
-    best_energy = float(initial_energy.detach().cpu())
-    best_coordinate = coordinate.detach().clone()
-    no_improvement = 0
-    history: list[dict[str, float | int]] = []
-    for iteration in range(int(config.ba_iterations)):
-        candidate = compose_tangent_angle(
-            normals=normal,
-            frame=frame,
-            tangent_coordinate=coordinate,
-        )
-        loss = multiview_axial_energy(
-            direction=candidate,
+    if config.refit_mode == "joint_observable":
+        initial_optimization_energy = multiview_axial_energy(
+            direction=current,
             projection_points=projection_points,
             per_view_axes=per_view_axes,
-            per_view_weights=per_view_weights,
+            per_view_weights=theta_optimization_weights,
+            viewmats=viewmats,
+            intrinsics=intrinsics,
+        ) + multiview_axial_energy(
+            direction=current,
+            projection_points=projection_points,
+            per_view_axes=per_view_axes,
+            per_view_weights=lift_optimization_weights,
             viewmats=viewmats,
             intrinsics=intrinsics,
         )
+    else:
+        initial_optimization_energy = multiview_axial_energy(
+            direction=current,
+            projection_points=projection_points,
+            per_view_axes=per_view_axes,
+            per_view_weights=optimization_weights,
+            viewmats=viewmats,
+            intrinsics=intrinsics,
+        )
+    best_energy = float(initial_optimization_energy.detach().cpu())
+    best_tangent_coordinate = tangent_coordinate.detach().clone()
+    best_lift_coordinate = lift_coordinate.detach().clone()
+    no_improvement = 0
+    history: list[dict[str, float | int]] = []
+    for iteration in range(int(config.ba_iterations)):
+        if config.refit_mode == "joint_observable":
+            theta_candidate = compose_direction_parameters(
+                normals=normal,
+                frame=frame,
+                tangent_coordinate=tangent_coordinate,
+                lift_coordinate=lift_coordinate.detach(),
+                rho_epsilon=float(config.rho_epsilon),
+            )
+            lift_candidate = compose_direction_parameters(
+                normals=normal,
+                frame=frame,
+                tangent_coordinate=tangent_coordinate.detach(),
+                lift_coordinate=lift_coordinate,
+                rho_epsilon=float(config.rho_epsilon),
+            )
+            loss = multiview_axial_energy(
+                direction=theta_candidate,
+                projection_points=projection_points,
+                per_view_axes=per_view_axes,
+                per_view_weights=theta_optimization_weights,
+                viewmats=viewmats,
+                intrinsics=intrinsics,
+            ) + multiview_axial_energy(
+                direction=lift_candidate,
+                projection_points=projection_points,
+                per_view_axes=per_view_axes,
+                per_view_weights=lift_optimization_weights,
+                viewmats=viewmats,
+                intrinsics=intrinsics,
+            )
+        else:
+            candidate = compose_direction_parameters(
+                normals=normal,
+                frame=frame,
+                tangent_coordinate=tangent_coordinate,
+                lift_coordinate=lift_coordinate,
+                rho_epsilon=float(config.rho_epsilon),
+            )
+            loss = multiview_axial_energy(
+                direction=candidate,
+                projection_points=projection_points,
+                per_view_axes=per_view_axes,
+                per_view_weights=optimization_weights,
+                viewmats=viewmats,
+                intrinsics=intrinsics,
+            )
+        if float(config.lift_delta_smooth_weight) > 0.0:
+            lift_delta_smooth = (
+                lift_coordinate[edge_u] - lift_coordinate[edge_v]
+            ).square().mean()
+            loss = loss + float(config.lift_delta_smooth_weight) * lift_delta_smooth
         if not bool(torch.isfinite(loss)):
             raise RuntimeError(f"non-finite BA loss at iteration {iteration}")
         value = float(loss.detach().cpu())
         relative_gain = (best_energy - value) / max(abs(best_energy), EPS)
         if value < best_energy and relative_gain > float(config.ba_relative_tolerance):
             best_energy = value
-            best_coordinate = coordinate.detach().clone()
+            best_tangent_coordinate = tangent_coordinate.detach().clone()
+            best_lift_coordinate = lift_coordinate.detach().clone()
             no_improvement = 0
         else:
             no_improvement += 1
@@ -364,13 +642,16 @@ def refit_tangent_angles(
             break
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        if coordinate.grad is None or not bool(torch.isfinite(coordinate.grad).all()):
-            raise RuntimeError(f"invalid BA gradient at iteration {iteration}")
+        for parameter in trainable:
+            if parameter.grad is None or not bool(torch.isfinite(parameter.grad).all()):
+                raise RuntimeError(f"invalid BA gradient at iteration {iteration}")
         optimizer.step()
-    final_direction = compose_tangent_angle(
+    final_direction = compose_direction_parameters(
         normals=normal,
         frame=frame,
-        tangent_coordinate=best_coordinate,
+        tangent_coordinate=best_tangent_coordinate,
+        lift_coordinate=best_lift_coordinate,
+        rho_epsilon=float(config.rho_epsilon),
     )
     final_energy = multiview_axial_energy(
         direction=final_direction,
@@ -380,11 +661,46 @@ def refit_tangent_angles(
         viewmats=viewmats,
         intrinsics=intrinsics,
     )
-    return TangentAngleRefitResult(
+    if config.refit_mode == "joint_observable":
+        final_optimization_energy = multiview_axial_energy(
+            direction=final_direction,
+            projection_points=projection_points,
+            per_view_axes=per_view_axes,
+            per_view_weights=theta_optimization_weights,
+            viewmats=viewmats,
+            intrinsics=intrinsics,
+        ) + multiview_axial_energy(
+            direction=final_direction,
+            projection_points=projection_points,
+            per_view_axes=per_view_axes,
+            per_view_weights=lift_optimization_weights,
+            viewmats=viewmats,
+            intrinsics=intrinsics,
+        )
+    else:
+        final_optimization_energy = multiview_axial_energy(
+            direction=final_direction,
+            projection_points=projection_points,
+            per_view_axes=per_view_axes,
+            per_view_weights=optimization_weights,
+            viewmats=viewmats,
+            intrinsics=intrinsics,
+        )
+    if float(config.lift_delta_smooth_weight) > 0.0:
+        final_optimization_energy = final_optimization_energy + float(
+            config.lift_delta_smooth_weight
+        ) * (
+            best_lift_coordinate[edge_u] - best_lift_coordinate[edge_v]
+        ).square().mean()
+    return DirectionRefitResult(
         direction=final_direction.detach(),
-        tangent_coordinate=best_coordinate.detach(),
+        tangent_coordinate=best_tangent_coordinate.detach(),
+        lift_coordinate=best_lift_coordinate.detach(),
         initial_data_energy=float(initial_energy.detach().cpu()),
         final_data_energy=float(final_energy.detach().cpu()),
+        initial_optimization_energy=float(initial_optimization_energy.detach().cpu()),
+        final_optimization_energy=float(final_optimization_energy.detach().cpu()),
+        observability_report=observability_report,
         history=tuple(history),
     )
 
@@ -403,6 +719,46 @@ def surface_connection_energy(
     )
     edge_dot = (direction[edge_u] * transported).sum(dim=-1).clamp(-1.0, 1.0)
     return (1.0 - edge_dot).mean()
+
+
+def tangent_connection_energy(
+    *,
+    direction: torch.Tensor,
+    normals: torch.Tensor,
+    edge_u: torch.Tensor,
+    edge_v: torch.Tensor,
+) -> torch.Tensor:
+    normal = _unit(normals, name="normals")
+    unit_direction = _unit(direction, name="direction")
+    normal_component = (unit_direction * normal).sum(dim=-1, keepdim=True)
+    tangent = unit_direction - normal_component * normal
+    tangent_magnitude = torch.linalg.vector_norm(tangent, dim=-1)
+    tangent_axis = F.normalize(tangent, dim=-1, eps=EPS)
+    transported = parallel_transport_vectors(
+        tangent_axis[edge_v],
+        normal[edge_v],
+        normal[edge_u],
+    )
+    edge_dot = (tangent_axis[edge_u] * transported).sum(dim=-1).clamp(-1.0, 1.0)
+    weight = tangent_magnitude[edge_u] * tangent_magnitude[edge_v]
+    return (weight * (1.0 - edge_dot)).sum() / weight.sum().clamp_min(EPS)
+
+
+def lift_connection_energy(
+    *,
+    direction: torch.Tensor,
+    normals: torch.Tensor,
+    edge_u: torch.Tensor,
+    edge_v: torch.Tensor,
+) -> torch.Tensor:
+    normal = _unit(normals, name="normals")
+    unit_direction = _unit(direction, name="direction")
+    normal_component = (unit_direction * normal).sum(dim=-1).clamp_min(0.0)
+    tangent = unit_direction - normal_component[:, None] * normal
+    tangent_magnitude = torch.linalg.vector_norm(tangent, dim=-1)
+    rho = normal_component / tangent_magnitude.clamp_min(EPS)
+    log_lift = torch.log1p(rho)
+    return (log_lift[edge_u] - log_lift[edge_v]).square().mean()
 
 
 def _change_statistics(before: torch.Tensor, after: torch.Tensor) -> dict[str, float]:
@@ -453,11 +809,29 @@ def run_post_v8_refinement(
         edge_u=edge_u,
         edge_v=edge_v,
     )
+    current_tangent = tangent_connection_energy(
+        direction=current,
+        normals=normal,
+        edge_u=edge_u,
+        edge_v=edge_v,
+    )
+    current_lift = lift_connection_energy(
+        direction=current,
+        normals=normal,
+        edge_u=edge_u,
+        edge_v=edge_v,
+    )
+    initial_energy = {
+        "data": float(current_data.cpu()),
+        "surface": float(current_surface.cpu()),
+        "tangent": float(current_tangent.cpu()),
+        "lift": float(current_lift.cpu()),
+    }
     cycles: list[dict[str, Any]] = []
     outputs: list[torch.Tensor] = []
     stop_reason = "maximum_cycles"
     for cycle in range(1, int(cfg.outer_max_cycles) + 1):
-        ba = refit_tangent_angles(
+        ba = refit_direction_parameters(
             direction=current,
             normals=normal,
             projection_points=projection_points,
@@ -466,16 +840,20 @@ def run_post_v8_refinement(
             viewmats=viewmats,
             intrinsics=intrinsics,
             config=cfg,
+            edge_u=edge_u,
+            edge_v=edge_v,
         )
         frame = _tangent_frame(current, normal)
         accepted: dict[str, Any] | None = None
         attempts: list[dict[str, Any]] = []
         for step in range(int(cfg.backtracking_steps)):
             scale = 0.5**step
-            ba_candidate = compose_tangent_angle(
+            ba_candidate = compose_direction_parameters(
                 normals=normal,
                 frame=frame,
                 tangent_coordinate=ba.tangent_coordinate * scale,
+                lift_coordinate=ba.lift_coordinate * scale,
+                rho_epsilon=float(cfg.rho_epsilon),
             ).detach()
             propagated = refine_confidence_guided_directed_flow(
                 direction=ba_candidate,
@@ -506,30 +884,56 @@ def run_post_v8_refinement(
                 edge_u=edge_u,
                 edge_v=edge_v,
             )
+            tangent_energy = tangent_connection_energy(
+                direction=candidate,
+                normals=normal,
+                edge_u=edge_u,
+                edge_v=edge_v,
+            )
+            lift_energy = lift_connection_energy(
+                direction=candidate,
+                normals=normal,
+                edge_u=edge_u,
+                edge_v=edge_v,
+            )
             data_ok = bool(
                 data_energy <= current_data + float(cfg.acceptance_tolerance)
             )
             surface_ok = bool(
                 surface_energy <= current_surface + float(cfg.acceptance_tolerance)
             )
+            tangent_ok = bool(
+                tangent_energy <= current_tangent + float(cfg.acceptance_tolerance)
+            )
+            lift_ok = bool(
+                lift_energy <= current_lift + float(cfg.acceptance_tolerance)
+            )
             strict = bool(
                 data_energy < current_data - float(cfg.acceptance_tolerance)
                 or surface_energy < current_surface - float(cfg.acceptance_tolerance)
+                or tangent_energy < current_tangent - float(cfg.acceptance_tolerance)
+                or lift_energy < current_lift - float(cfg.acceptance_tolerance)
             )
             attempt = {
                 "scale": scale,
                 "data_energy": float(data_energy.cpu()),
                 "surface_energy": float(surface_energy.cpu()),
+                "tangent_energy": float(tangent_energy.cpu()),
+                "lift_energy": float(lift_energy.cpu()),
                 "data_nonincreasing": data_ok,
                 "surface_nonincreasing": surface_ok,
+                "tangent_nonincreasing": tangent_ok,
+                "lift_nonincreasing": lift_ok,
                 "strict_improvement": strict,
             }
             attempts.append(attempt)
-            if data_ok and surface_ok and strict:
+            if data_ok and surface_ok and tangent_ok and lift_ok and strict:
                 accepted = {
                     "direction": candidate.detach(),
                     "data_energy": data_energy.detach(),
                     "surface_energy": surface_energy.detach(),
+                    "tangent_energy": tangent_energy.detach(),
+                    "lift_energy": lift_energy.detach(),
                     "scale": scale,
                     "propagation_report": propagated["report"],
                 }
@@ -542,6 +946,9 @@ def run_post_v8_refinement(
                     "accepted": False,
                     "ba_initial_data_energy": ba.initial_data_energy,
                     "ba_final_data_energy": ba.final_data_energy,
+                    "ba_initial_optimization_energy": ba.initial_optimization_energy,
+                    "ba_final_optimization_energy": ba.final_optimization_energy,
+                    "ba_observability": ba.observability_report,
                     "attempts": attempts,
                 }
             )
@@ -550,8 +957,12 @@ def run_post_v8_refinement(
         change = _change_statistics(current, candidate)
         previous_data = float(current_data.cpu())
         previous_surface = float(current_surface.cpu())
+        previous_tangent = float(current_tangent.cpu())
+        previous_lift = float(current_lift.cpu())
         current_data = accepted["data_energy"]
         current_surface = accepted["surface_energy"]
+        current_tangent = accepted["tangent_energy"]
+        current_lift = accepted["lift_energy"]
         current = candidate
         outputs.append(current.detach().clone())
         relative_data = (previous_data - float(current_data.cpu())) / max(
@@ -560,6 +971,12 @@ def run_post_v8_refinement(
         relative_surface = (previous_surface - float(current_surface.cpu())) / max(
             abs(previous_surface), EPS
         )
+        relative_tangent = (previous_tangent - float(current_tangent.cpu())) / max(
+            abs(previous_tangent), EPS
+        )
+        relative_lift = (previous_lift - float(current_lift.cpu())) / max(
+            abs(previous_lift), EPS
+        )
         cycles.append(
             {
                 "cycle": cycle,
@@ -567,10 +984,17 @@ def run_post_v8_refinement(
                 "accepted_scale": accepted["scale"],
                 "ba_initial_data_energy": ba.initial_data_energy,
                 "ba_final_data_energy": ba.final_data_energy,
+                "ba_initial_optimization_energy": ba.initial_optimization_energy,
+                "ba_final_optimization_energy": ba.final_optimization_energy,
+                "ba_observability": ba.observability_report,
                 "data_energy": float(current_data.cpu()),
                 "surface_energy": float(current_surface.cpu()),
+                "tangent_energy": float(current_tangent.cpu()),
+                "lift_energy": float(current_lift.cpu()),
                 "relative_data_improvement": relative_data,
                 "relative_surface_improvement": relative_surface,
+                "relative_tangent_improvement": relative_tangent,
+                "relative_lift_improvement": relative_lift,
                 "change": change,
                 "attempts": attempts,
                 "propagation": accepted["propagation_report"],
@@ -580,6 +1004,8 @@ def run_post_v8_refinement(
             change["p95_deg"] <= float(cfg.outer_change_p95_tolerance_deg)
             and relative_data <= float(cfg.outer_relative_tolerance)
             and relative_surface <= float(cfg.outer_relative_tolerance)
+            and relative_tangent <= float(cfg.outer_relative_tolerance)
+            and relative_lift <= float(cfg.outer_relative_tolerance)
         ):
             stop_reason = "fixed_point_tolerance"
             break
@@ -598,8 +1024,11 @@ def run_post_v8_refinement(
         "cycles": cycles,
         "accepted_cycle_count": len(outputs),
         "stop_reason": stop_reason,
+        "initial_energy": initial_energy,
         "final_data_energy": float(current_data.cpu()),
         "final_surface_energy": float(current_surface.cpu()),
+        "final_tangent_energy": float(current_tangent.cpu()),
+        "final_lift_energy": float(current_lift.cpu()),
         "config": {
             name: getattr(cfg, name)
             for name in PostV8RefinementConfig.__dataclass_fields__
