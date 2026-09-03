@@ -283,18 +283,58 @@ front-facing negative edges to zero. Formal target generation and fixed-view
 acceptance remain required before V8 replaces V7 as a training input. See
 `docs/panda_v8_confidence_guided_flow_20260830.md`.
 
-### Post-V8 angle/lift refinement candidate
+### Earlier post-V8 angle/lift candidate
 
-The post-V8 diagnostic does not rerun V6 or V7. It freezes the formal per-view
-evidence and V8 reliability factors, separates tangent angle from log lift,
-and measures their individual screen-angle Jacobians. Tangent-only, lift-only,
-joint, and Jacobian-owned arms show that neither component can safely absorb
-all screen residuals. The surviving cross-sample arm jointly refits both while
-regularizing only the spatial variation of the lift update, then runs the
-unchanged V8 complete-direction propagation. Panda and white tiger each accept
-one cycle and reject cycle two. See
-`docs/post_v8_angle_lift_attempt_20260903.md`; formal V8 targets remain the
-accepted parents until visual review and any training gate.
+The earlier post-V8 tangent/angle-lift diagnostic did not pass the user-local
+arrow visual. A local continuous stronger-neighbor propagation attempt improved
+aggregate metrics but left top/right screen conflicts; its code was discarded.
+Its sixth cycle was accepted and its seventh rejected despite `1039-1500`
+locally eligible roots, establishing a local-greedy/global-gate deadlock. The
+full attempt ledger is in `docs/post_v8_global_direction_field_attempt_20260903.md`.
+
+### Post-V8 global direction-field candidate
+
+The isolated follow-up starts from the formal V8 Panda/white parents
+`5cb76945adb034e9666bfc98ae05647062d7ac4e3609e68162e561e4eebd54b1` and
+`92a6d496aa39e85272f35668967f82d34df7f884681ade4e336c07256b47a3d7`. It is a
+joint tangent-angle/log-lift global field solve on a parallel-transport graph.
+The dimensionless objective is confidence-weighted axial reprojection data
+divided by baseline plus `smooth_weight` times the mean normalized final
+surface/tangent/lift connection energies. It adds an orientation barrier on
+previously nonnegative/nonsevere edges and uses deterministic Adam with
+powers-of-two backtracking. There is no species, region, view, image, or
+protected-owner rule.
+
+Acceptance requires nonincrease of data/surface/tangent/lift, edge
+P95/P99/top-1%-CVaR/max, negative/severe edge+root counts, and zero newly bad
+roots. The first no-barrier and edge-identity/root-support gate sweeps failed
+cross-sample; the orientation-barrier sweep passed `10/10`. The selected shared
+diagnostic is `smooth_weight=3`, orientation barrier `10`, chosen for the
+strongest Panda correction while white passes every generic gate under the same
+settings and automatic backtracking. This is not claimed to be the automatic
+min-ranking winner.
+
+The selected Panda/white data/surface/tangent/lift values are respectively
+`0.151728958/0.081285164/0.092970185/0.047688868 ->
+0.134471998/0.022716768/0.026532158/0.009225478` and
+`0.210384637/0.102271296/0.111925289/0.035596021 ->
+0.208973378/0.093914248/0.102144413/0.031667717`. Edge P95/P99 changes are
+`55.3008/94.7821 -> 25.8670/44.9140` and
+`60.1170/87.1834 -> 57.3577/83.7524`; negative/severe edges are
+`365/10 -> 8/0` and `248/45 -> 230/35`; direction-change P95/max is
+`44.788/68.655` and `3.467/7.857`, with zero newly bad roots.
+
+The 71-root user QA improves incident-3D-max median/P95/max
+`50.477/80.064/88.169 -> 15.955/44.632/53.527`, with `67` roots improving
+more than `1°` and `4` worsening. However, `33` visible fixed-length screen
+arrows remain mixed and the top group still appears reversed. V7 sign
+reorientation flips `10` Panda roots but leaves the top cluster; it also worsens
+white post-V8 lift `0.031668 -> 0.038818`, so the selected candidate is the
+pre-reorientation global field. It remains a diagnostic target, not formal
+training input, until the user/physical-asset visual gate passes. See
+`docs/post_v8_global_direction_field_attempt_20260903.md` for paths, hashes,
+deterministic reruns, visuals, literature basis, and isolated implementation
+files.
 
 ## Acceptance Evidence
 
