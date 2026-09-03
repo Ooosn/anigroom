@@ -113,10 +113,13 @@ Panda visual evidence:
   `D:/RTS/_tmp/panda_global_field_s3_b10_arrows_view09_20260903/direction/view09_user_region_crop_4x.png`, SHA-256
   `5f66705142cf5bc4380c59ecc4d3a352c4311a1ef3983a3238cae6f3a4fd85bf`.
 
-The available white `b10` visual under
-`D:/RTS/_tmp/white_global_field_b10_arrows_view09_20260903` is a different
-`smooth=1` diagnostic and must not be mislabeled as the selected `smooth=3`
-candidate.
+The matched selected white-tiger view09 overlay is
+`D:/RTS/_tmp/white_global_field_s3_b10_arrows_view09_20260903/direction/view09_shell_cleaned_3d_arrows_overlay.png`,
+SHA-256
+`52d97bbfb3d91552e2576b659ee8511aaea46193ef5c9bf0b6314934e1f8bbc4`.
+The earlier white visualization under
+`D:/RTS/_tmp/white_global_field_b10_arrows_view09_20260903` remains a distinct
+`smooth=1` diagnostic and must not be used as selected-candidate evidence.
 
 The isolated implementation files are
 `anigroom/flow/global_direction_field_refinement.py`,

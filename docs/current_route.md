@@ -178,8 +178,8 @@ mixed and the top group still appears reversed. Re-running V7 signs flips `10`
 Panda roots but leaves the top cluster; white post-V8 lift worsens
 `0.031668 -> 0.038818`, so reorientation is rejected. The selected candidate
 is the pre-reorientation global field. Its Panda/white target paths and hashes,
-exact deterministic reruns, Panda full/crop visual hashes, the warning that
-white `b10` is a different `smooth=1` diagnostic, and the isolated
+exact deterministic reruns, matched Panda and white selected-view visuals,
+the warning that the earlier white `b10` is a different `smooth=1` diagnostic, and the isolated
 implementation/test files are recorded in
 `docs/post_v8_global_direction_field_attempt_20260903.md`. Formal V8 remains
 the accepted training parent until user/physical-asset visual acceptance.
